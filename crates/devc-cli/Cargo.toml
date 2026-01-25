@@ -1,0 +1,24 @@
+[package]
+name = "devc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI entry point for devc"
+
+[[bin]]
+name = "devc"
+path = "src/main.rs"
+
+[dependencies]
+devc-core = { workspace = true }
+devc-config = { workspace = true }
+devc-provider = { workspace = true }
+devc-tui = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+toml = { workspace = true }

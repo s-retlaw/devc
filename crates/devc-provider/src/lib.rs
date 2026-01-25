@@ -1,0 +1,151 @@
+//! Container provider trait and implementations for devc
+//!
+//! This crate provides an abstraction over container runtimes (Docker, Podman)
+//! with a consistent API for container operations.
+
+mod docker;
+mod error;
+mod host_podman;
+mod types;
+
+pub use docker::DockerProvider;
+pub use error::*;
+pub use host_podman::HostPodmanProvider;
+pub use types::*;
+
+use async_trait::async_trait;
+use std::pin::Pin;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+/// Trait for container providers (Docker, Podman, etc.)
+#[async_trait]
+pub trait ContainerProvider: Send + Sync {
+    /// Build an image from a Dockerfile
+    async fn build(&self, config: &BuildConfig) -> Result<ImageId>;
+
+    /// Pull an image from a registry
+    async fn pull(&self, image: &str) -> Result<ImageId>;
+
+    /// Create a container from an image
+    async fn create(&self, config: &CreateContainerConfig) -> Result<ContainerId>;
+
+    /// Start a container
+    async fn start(&self, id: &ContainerId) -> Result<()>;
+
+    /// Stop a container
+    async fn stop(&self, id: &ContainerId, timeout: Option<u32>) -> Result<()>;
+
+    /// Remove a container
+    async fn remove(&self, id: &ContainerId, force: bool) -> Result<()>;
+
+    /// Execute a command in a running container
+    async fn exec(&self, id: &ContainerId, config: &ExecConfig) -> Result<ExecResult>;
+
+    /// Execute a command with interactive I/O streams
+    async fn exec_interactive(
+        &self,
+        id: &ContainerId,
+        config: &ExecConfig,
+    ) -> Result<ExecStream>;
+
+    /// List containers managed by devc
+    async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>>;
+
+    /// Get detailed information about a container
+    async fn inspect(&self, id: &ContainerId) -> Result<ContainerDetails>;
+
+    /// Get container logs
+    async fn logs(&self, id: &ContainerId, config: &LogConfig) -> Result<LogStream>;
+
+    /// Check if the provider is available/connected
+    async fn ping(&self) -> Result<()>;
+
+    /// Get provider information
+    fn info(&self) -> ProviderInfo;
+
+    /// Copy files into a container
+    async fn copy_into(
+        &self,
+        id: &ContainerId,
+        src: &std::path::Path,
+        dest: &str,
+    ) -> Result<()>;
+
+    /// Copy files from a container
+    async fn copy_from(
+        &self,
+        id: &ContainerId,
+        src: &str,
+        dest: &std::path::Path,
+    ) -> Result<()>;
+}
+
+/// Interactive exec stream with stdin/stdout/stderr
+pub struct ExecStream {
+    pub stdin: Option<Pin<Box<dyn AsyncWrite + Send>>>,
+    pub output: Pin<Box<dyn AsyncRead + Send>>,
+    pub id: String,
+}
+
+/// Factory function to create a provider based on type
+pub async fn create_provider(
+    provider_type: ProviderType,
+    config: &devc_config::GlobalConfig,
+) -> Result<Box<dyn ContainerProvider>> {
+    match provider_type {
+        ProviderType::Docker => {
+            let socket = &config.providers.docker.socket;
+            let provider = DockerProvider::new(socket).await?;
+            Ok(Box::new(provider))
+        }
+        ProviderType::Podman => {
+            // For now, Podman uses Docker-compatible API
+            let socket = &config.providers.podman.socket;
+            let provider = DockerProvider::new_podman(socket).await?;
+            Ok(Box::new(provider))
+        }
+    }
+}
+
+/// Check if we're running inside a Fedora Toolbox or similar container
+fn is_in_toolbox() -> bool {
+    std::path::Path::new("/run/.containerenv").exists()
+}
+
+/// Create the default provider based on global config
+/// Auto-detects Toolbox environment and uses host podman if needed
+pub async fn create_default_provider(
+    config: &devc_config::GlobalConfig,
+) -> Result<Box<dyn ContainerProvider>> {
+    // If in toolbox, try host podman first
+    if is_in_toolbox() {
+        tracing::info!("Detected toolbox environment, using host podman");
+        match HostPodmanProvider::new().await {
+            Ok(provider) => return Ok(Box::new(provider)),
+            Err(e) => {
+                tracing::warn!("Failed to connect to host podman: {}, trying socket", e);
+            }
+        }
+    }
+
+    // Try configured provider
+    let provider_type = match config.defaults.provider.as_str() {
+        "podman" => ProviderType::Podman,
+        _ => ProviderType::Docker,
+    };
+
+    match create_provider(provider_type, config).await {
+        Ok(provider) => Ok(provider),
+        Err(e) => {
+            // If in toolbox and socket failed, give a helpful error
+            if is_in_toolbox() {
+                Err(ProviderError::ConnectionError(format!(
+                    "Cannot connect to container runtime. In toolbox, ensure 'flatpak-spawn --host podman' works. Error: {}",
+                    e
+                )))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}

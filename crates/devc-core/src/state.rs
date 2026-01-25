@@ -1,0 +1,293 @@
+//! Container state management
+//!
+//! Persists container state to `~/.local/share/devc/containers.json`
+
+use crate::Result;
+use chrono::{DateTime, Utc};
+use devc_config::GlobalConfig;
+use devc_provider::ProviderType;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// Container state stored on disk
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerState {
+    /// Unique identifier (UUID)
+    pub id: String,
+    /// Human-readable name
+    pub name: String,
+    /// Provider type (docker/podman)
+    pub provider: ProviderType,
+    /// Path to the devcontainer.json config
+    pub config_path: PathBuf,
+    /// Docker/Podman image ID (after build)
+    pub image_id: Option<String>,
+    /// Docker/Podman container ID (after create)
+    pub container_id: Option<String>,
+    /// Current status
+    pub status: DevcContainerStatus,
+    /// When this container was created in devc
+    pub created_at: DateTime<Utc>,
+    /// Last time the container was used
+    pub last_used: DateTime<Utc>,
+    /// Workspace folder path on host
+    pub workspace_path: PathBuf,
+    /// Additional metadata
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+/// devc container status (separate from Docker status)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DevcContainerStatus {
+    /// Configuration loaded but not built
+    Configured,
+    /// Image is being built
+    Building,
+    /// Image built, container not created
+    Built,
+    /// Container created but not started
+    Created,
+    /// Container is running
+    Running,
+    /// Container stopped
+    Stopped,
+    /// Container failed (build or runtime error)
+    Failed,
+}
+
+impl std::fmt::Display for DevcContainerStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Configured => write!(f, "configured"),
+            Self::Building => write!(f, "building"),
+            Self::Built => write!(f, "built"),
+            Self::Created => write!(f, "created"),
+            Self::Running => write!(f, "running"),
+            Self::Stopped => write!(f, "stopped"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// State store for all managed containers
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StateStore {
+    /// Version for forward compatibility
+    pub version: u32,
+    /// All managed containers indexed by ID
+    pub containers: HashMap<String, ContainerState>,
+}
+
+impl StateStore {
+    const CURRENT_VERSION: u32 = 1;
+
+    /// Create a new empty state store
+    pub fn new() -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            containers: HashMap::new(),
+        }
+    }
+
+    /// Load state from the default location
+    pub fn load() -> Result<Self> {
+        let path = Self::state_path()?;
+        Self::load_from(&path)
+    }
+
+    /// Load state from a specific path
+    pub fn load_from(path: &PathBuf) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+
+        let content = std::fs::read_to_string(path)?;
+        let store: Self = serde_json::from_str(&content)?;
+
+        // TODO: Handle version migrations if needed
+        if store.version > Self::CURRENT_VERSION {
+            tracing::warn!(
+                "State file version {} is newer than supported version {}",
+                store.version,
+                Self::CURRENT_VERSION
+            );
+        }
+
+        Ok(store)
+    }
+
+    /// Save state to the default location
+    pub fn save(&self) -> Result<()> {
+        let path = Self::state_path()?;
+        self.save_to(&path)
+    }
+
+    /// Save state to a specific path
+    pub fn save_to(&self, path: &PathBuf) -> Result<()> {
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+
+        Ok(())
+    }
+
+    /// Get the default state file path
+    pub fn state_path() -> Result<PathBuf> {
+        let data_dir = GlobalConfig::data_dir()?;
+        Ok(data_dir.join("containers.json"))
+    }
+
+    /// Add a new container state
+    pub fn add(&mut self, state: ContainerState) {
+        self.containers.insert(state.id.clone(), state);
+    }
+
+    /// Get a container state by ID
+    pub fn get(&self, id: &str) -> Option<&ContainerState> {
+        self.containers.get(id)
+    }
+
+    /// Get a mutable container state by ID
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut ContainerState> {
+        self.containers.get_mut(id)
+    }
+
+    /// Find a container by name
+    pub fn find_by_name(&self, name: &str) -> Option<&ContainerState> {
+        self.containers.values().find(|c| c.name == name)
+    }
+
+    /// Find a container by workspace path
+    pub fn find_by_workspace(&self, path: &PathBuf) -> Option<&ContainerState> {
+        self.containers.values().find(|c| &c.workspace_path == path)
+    }
+
+    /// Remove a container state
+    pub fn remove(&mut self, id: &str) -> Option<ContainerState> {
+        self.containers.remove(id)
+    }
+
+    /// List all containers
+    pub fn list(&self) -> Vec<&ContainerState> {
+        self.containers.values().collect()
+    }
+
+    /// List containers matching a filter
+    pub fn filter<F>(&self, f: F) -> Vec<&ContainerState>
+    where
+        F: Fn(&ContainerState) -> bool,
+    {
+        self.containers.values().filter(|c| f(c)).collect()
+    }
+
+    /// Update last_used timestamp for a container
+    pub fn touch(&mut self, id: &str) {
+        if let Some(state) = self.containers.get_mut(id) {
+            state.last_used = Utc::now();
+        }
+    }
+}
+
+impl ContainerState {
+    /// Create a new container state
+    pub fn new(
+        name: String,
+        provider: ProviderType,
+        config_path: PathBuf,
+        workspace_path: PathBuf,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            provider,
+            config_path,
+            image_id: None,
+            container_id: None,
+            status: DevcContainerStatus::Configured,
+            created_at: now,
+            last_used: now,
+            workspace_path,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Check if the container can be started
+    pub fn can_start(&self) -> bool {
+        matches!(
+            self.status,
+            DevcContainerStatus::Created | DevcContainerStatus::Stopped
+        )
+    }
+
+    /// Check if the container can be stopped
+    pub fn can_stop(&self) -> bool {
+        matches!(self.status, DevcContainerStatus::Running)
+    }
+
+    /// Check if the container can be removed
+    pub fn can_remove(&self) -> bool {
+        !matches!(
+            self.status,
+            DevcContainerStatus::Running | DevcContainerStatus::Building
+        )
+    }
+
+    /// Get a short display ID
+    pub fn short_id(&self) -> &str {
+        if self.id.len() > 8 {
+            &self.id[..8]
+        } else {
+            &self.id
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_container_state_new() {
+        let state = ContainerState::new(
+            "test".to_string(),
+            ProviderType::Docker,
+            PathBuf::from("/path/to/devcontainer.json"),
+            PathBuf::from("/path/to/workspace"),
+        );
+
+        assert_eq!(state.name, "test");
+        assert_eq!(state.provider, ProviderType::Docker);
+        assert_eq!(state.status, DevcContainerStatus::Configured);
+        assert!(state.image_id.is_none());
+        assert!(state.container_id.is_none());
+    }
+
+    #[test]
+    fn test_state_store_crud() {
+        let mut store = StateStore::new();
+
+        let state = ContainerState::new(
+            "test".to_string(),
+            ProviderType::Docker,
+            PathBuf::from("/path/to/devcontainer.json"),
+            PathBuf::from("/path/to/workspace"),
+        );
+        let id = state.id.clone();
+
+        store.add(state);
+        assert!(store.get(&id).is_some());
+        assert!(store.find_by_name("test").is_some());
+
+        store.remove(&id);
+        assert!(store.get(&id).is_none());
+    }
+}

@@ -1,0 +1,14 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# Editor
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Claude Code local settings
+.claude/

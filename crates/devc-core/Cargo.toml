@@ -1,0 +1,23 @@
+[package]
+name = "devc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core logic for devc container lifecycle management"
+
+[dependencies]
+devc-config = { workspace = true }
+devc-provider = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+directories = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+shellexpand = { workspace = true }
+base64 = { workspace = true }
+tempfile = { workspace = true }

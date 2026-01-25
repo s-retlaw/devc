@@ -1,0 +1,17 @@
+[package]
+name = "devc-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TUI application for devc"
+
+[dependencies]
+devc-core = { workspace = true }
+devc-config = { workspace = true }
+devc-provider = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
