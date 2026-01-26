@@ -48,7 +48,7 @@ pub struct DefaultsConfig {
 impl Default for DefaultsConfig {
     fn default() -> Self {
         Self {
-            provider: "docker".to_string(),
+            provider: "podman".to_string(),
             dotfiles_repo: None,
             dotfiles_local: None,
             shell: "/bin/bash".to_string(),
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = GlobalConfig::default();
-        assert_eq!(config.defaults.provider, "docker");
+        assert_eq!(config.defaults.provider, "podman");
         assert_eq!(config.defaults.shell, "/bin/bash");
     }
 

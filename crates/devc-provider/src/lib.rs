@@ -134,6 +134,11 @@ pub async fn create_default_provider(
         _ => ProviderType::Docker,
     };
 
+    let socket_path = match provider_type {
+        ProviderType::Podman => &config.providers.podman.socket,
+        ProviderType::Docker => &config.providers.docker.socket,
+    };
+
     match create_provider(provider_type, config).await {
         Ok(provider) => Ok(provider),
         Err(e) => {
@@ -144,8 +149,59 @@ pub async fn create_default_provider(
                     e
                 )))
             } else {
-                Err(e)
+                let socket_exists = std::path::Path::new(socket_path).exists();
+                Err(ProviderError::ConnectionError(format_connection_error(
+                    provider_type,
+                    socket_path,
+                    socket_exists,
+                    &e,
+                )))
             }
         }
     }
+}
+
+/// Format a helpful connection error message with actionable instructions
+fn format_connection_error(
+    provider: ProviderType,
+    socket_path: &str,
+    socket_exists: bool,
+    underlying: &ProviderError,
+) -> String {
+    let provider_name = match provider {
+        ProviderType::Podman => "Podman",
+        ProviderType::Docker => "Docker",
+    };
+
+    let mut msg = format!("Cannot connect to {}\n\n", provider_name);
+
+    if !socket_exists {
+        msg.push_str(&format!(
+            "The {} API socket was not found at:\n  {}\n\n",
+            provider_name, socket_path
+        ));
+
+        match provider {
+            ProviderType::Podman => {
+                msg.push_str("To enable the Podman socket, run:\n");
+                msg.push_str("  systemctl --user enable --now podman.socket\n\n");
+                msg.push_str("To verify it's working:\n");
+                msg.push_str(
+                    "  curl --unix-socket $XDG_RUNTIME_DIR/podman/podman.sock http://localhost/_ping\n",
+                );
+            }
+            ProviderType::Docker => {
+                msg.push_str("To start Docker, run:\n");
+                msg.push_str("  sudo systemctl enable --now docker\n");
+            }
+        }
+    } else {
+        msg.push_str(&format!(
+            "The socket exists at {} but the daemon is not responding.\n\n",
+            socket_path
+        ));
+        msg.push_str(&format!("Underlying error: {}\n", underlying));
+    }
+
+    msg
 }

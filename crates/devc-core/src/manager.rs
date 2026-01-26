@@ -308,6 +308,11 @@ impl ContainerManager {
         // Update status
         self.set_status(id, DevcContainerStatus::Running).await?;
 
+        // Ensure SSH daemon is running if SSH was set up for this container
+        if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
+            self.ensure_ssh_daemon_running(&ContainerId::new(container_id)).await?;
+        }
+
         // Run post-start commands
         let container = Container::from_config(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.post_start_command {
@@ -322,6 +327,36 @@ impl ContainerManager {
         }
 
         Ok(())
+    }
+
+    /// Ensure the SSH daemon (dropbear) is running in the container
+    async fn ensure_ssh_daemon_running(&self, container_id: &ContainerId) -> Result<()> {
+        let script = r#"
+if ! pgrep -x dropbear >/dev/null 2>&1; then
+    /usr/sbin/dropbear -s -r /etc/dropbear/dropbear_ed25519_host_key -p 127.0.0.1:2222 2>/dev/null
+fi
+"#;
+        let config = devc_provider::ExecConfig {
+            cmd: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+            env: std::collections::HashMap::new(),
+            working_dir: None,
+            user: Some("root".to_string()),
+            tty: false,
+            stdin: false,
+            privileged: false,
+        };
+
+        match self.provider.exec(container_id, &config).await {
+            Ok(_) => {
+                tracing::debug!("SSH daemon check/start completed");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("Failed to ensure SSH daemon is running: {}", e);
+                // Don't fail the start if SSH daemon can't be started
+                Ok(())
+            }
+        }
     }
 
     /// Stop a container
@@ -354,7 +389,7 @@ impl ContainerManager {
         Ok(())
     }
 
-    /// Remove a container
+    /// Remove a container completely (removes from state store too)
     pub async fn remove(&self, id: &str, force: bool) -> Result<()> {
         let container_state = {
             let state = self.state.read().await;
@@ -383,6 +418,53 @@ impl ContainerManager {
         {
             let mut state = self.state.write().await;
             state.remove(id);
+            state.save()?;
+        }
+
+        Ok(())
+    }
+
+    /// Stop and remove the runtime container, but keep the state so it can be recreated with `up`
+    pub async fn down(&self, id: &str) -> Result<()> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        // Stop if running
+        if container_state.status == DevcContainerStatus::Running {
+            if let Some(ref container_id) = container_state.container_id {
+                let _ = self
+                    .provider
+                    .stop(&ContainerId::new(container_id), Some(10))
+                    .await;
+            }
+        }
+
+        // Remove the runtime container if it exists
+        if let Some(ref container_id) = container_state.container_id {
+            let _ = self
+                .provider
+                .remove(&ContainerId::new(container_id), true)
+                .await;
+        }
+
+        // Update state: keep image but clear container_id, reset status to Built (or Configured if no image)
+        {
+            let mut state = self.state.write().await;
+            if let Some(cs) = state.get_mut(id) {
+                cs.container_id = None;
+                cs.status = if cs.image_id.is_some() {
+                    DevcContainerStatus::Built
+                } else {
+                    DevcContainerStatus::Configured
+                };
+                // Clear SSH metadata since we'll need to set it up again
+                cs.metadata.remove("ssh_available");
+            }
             state.save()?;
         }
 
@@ -524,6 +606,15 @@ impl ContainerManager {
             self.start(id).await?;
         } else {
             self.set_status(id, DevcContainerStatus::Running).await?;
+
+            // Ensure SSH daemon is running even if container was already up
+            let container_state = {
+                let state = self.state.read().await;
+                state.get(id).cloned().unwrap()
+            };
+            if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
+                self.ensure_ssh_daemon_running(&container_id).await?;
+            }
         }
 
         Ok(())

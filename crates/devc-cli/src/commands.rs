@@ -428,18 +428,14 @@ pub async fn up(manager: &ContainerManager, container: Option<String>) -> Result
     Ok(())
 }
 
-/// Stop and remove a container
+/// Stop and remove a container (but keep state so it can be recreated with `up`)
 pub async fn down(manager: &ContainerManager, container: &str) -> Result<()> {
     let state = find_container(manager, container).await?;
 
-    if state.status == DevcContainerStatus::Running {
-        println!("Stopping '{}'...", state.name);
-        manager.stop(&state.id).await?;
-    }
-
-    println!("Removing '{}'...", state.name);
-    manager.remove(&state.id, true).await?;
-    println!("Removed '{}'", state.name);
+    println!("Stopping '{}'...", state.name);
+    manager.down(&state.id).await?;
+    println!("Stopped '{}'", state.name);
+    println!("\nRun 'devc up {}' to start it again.", state.name);
 
     Ok(())
 }

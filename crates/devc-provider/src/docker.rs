@@ -184,6 +184,13 @@ impl ContainerProvider for DockerProvider {
             })
             .collect();
 
+        // For rootless Podman, use keep-id to map host UID into container
+        let userns_mode = if self.provider_type == ProviderType::Podman {
+            Some("keep-id".to_string())
+        } else {
+            None
+        };
+
         let host_config = HostConfig {
             mounts: if mounts.is_empty() {
                 None
@@ -207,11 +214,15 @@ impl ContainerProvider for DockerProvider {
             } else {
                 Some(config.cap_drop.clone())
             },
-            security_opt: if config.security_opt.is_empty() {
-                None
-            } else {
-                Some(config.security_opt.clone())
+            security_opt: {
+                let mut opts = config.security_opt.clone();
+                // For Podman, disable SELinux labeling to allow bind mount access
+                if self.provider_type == ProviderType::Podman {
+                    opts.push("label=disable".to_string());
+                }
+                if opts.is_empty() { None } else { Some(opts) }
             },
+            userns_mode,
             ..Default::default()
         };
 
