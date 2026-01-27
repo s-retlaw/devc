@@ -9,6 +9,50 @@ use devc_provider::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Sanitize a name for CLI-friendly usage
+/// - Converts to lowercase
+/// - Replaces spaces and special chars with hyphens
+/// - Collapses multiple hyphens
+/// - Trims leading/trailing hyphens
+fn sanitize_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // Collapse multiple hyphens and trim
+    let mut result = String::new();
+    let mut last_was_hyphen = true; // Start true to skip leading hyphens
+    for c in sanitized.chars() {
+        if c == '-' {
+            if !last_was_hyphen {
+                result.push(c);
+            }
+            last_was_hyphen = true;
+        } else {
+            result.push(c);
+            last_was_hyphen = false;
+        }
+    }
+
+    // Trim trailing hyphen
+    if result.ends_with('-') {
+        result.pop();
+    }
+
+    if result.is_empty() {
+        "container".to_string()
+    } else {
+        result
+    }
+}
+
 /// Represents a fully configured container ready for operations
 #[derive(Debug, Clone)]
 pub struct Container {
@@ -30,7 +74,7 @@ impl Container {
         let (devcontainer, config_path) = DevContainerConfig::load_from_dir(workspace_path)?;
         let global_config = GlobalConfig::load()?;
 
-        let name = devcontainer
+        let raw_name = devcontainer
             .name
             .clone()
             .or_else(|| {
@@ -41,7 +85,7 @@ impl Container {
             .unwrap_or_else(|| "devcontainer".to_string());
 
         Ok(Self {
-            name,
+            name: sanitize_name(&raw_name),
             workspace_path: workspace_path.to_path_buf(),
             devcontainer,
             config_path,
@@ -67,7 +111,7 @@ impl Container {
             .unwrap_or(Path::new("."))
             .to_path_buf();
 
-        let name = devcontainer
+        let raw_name = devcontainer
             .name
             .clone()
             .or_else(|| {
@@ -78,7 +122,7 @@ impl Container {
             .unwrap_or_else(|| "devcontainer".to_string());
 
         Ok(Self {
-            name,
+            name: sanitize_name(&raw_name),
             workspace_path,
             devcontainer,
             config_path: config_path.to_path_buf(),

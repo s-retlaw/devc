@@ -319,7 +319,7 @@ pub async fn remove(manager: &ContainerManager, container: &str, force: bool) ->
 }
 
 /// List containers
-pub async fn list(manager: &ContainerManager, all: bool) -> Result<()> {
+pub async fn list(manager: &ContainerManager) -> Result<()> {
     let containers = manager.list().await?;
 
     if containers.is_empty() {
@@ -328,24 +328,19 @@ pub async fn list(manager: &ContainerManager, all: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Column widths
+    const NAME_WIDTH: usize = 26;
+    const STATUS_WIDTH: usize = 12;
+    const PROVIDER_WIDTH: usize = 10;
+
     // Header
     println!(
-        "{:<20} {:<12} {:<10} {:<20}",
+        "  {:<NAME_WIDTH$} {:<STATUS_WIDTH$} {:<PROVIDER_WIDTH$} {}",
         "NAME", "STATUS", "PROVIDER", "WORKSPACE"
     );
-    println!("{}", "-".repeat(70));
+    println!("{}", "-".repeat(75));
 
     for container in containers {
-        // Skip non-running containers unless --all
-        if !all
-            && !matches!(
-                container.status,
-                DevcContainerStatus::Running | DevcContainerStatus::Building
-            )
-        {
-            continue;
-        }
-
         let status_symbol = match container.status {
             DevcContainerStatus::Running => "●",
             DevcContainerStatus::Stopped => "○",
@@ -362,9 +357,20 @@ pub async fn list(manager: &ContainerManager, all: bool) -> Result<()> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| container.workspace_path.to_string_lossy().to_string());
 
+        // Pad name manually to handle Unicode symbol display width
+        let name_padding = NAME_WIDTH.saturating_sub(container.name.len());
+        let status_str = format!("{}", container.status);
+        let status_padding = STATUS_WIDTH.saturating_sub(status_str.len());
+        let provider_str = format!("{}", container.provider);
+        let provider_padding = PROVIDER_WIDTH.saturating_sub(provider_str.len());
+
         println!(
-            "{} {:<18} {:<12} {:<10} {:<20}",
-            status_symbol, container.name, container.status, container.provider, workspace
+            "{} {}{} {}{} {}{} {}",
+            status_symbol,
+            container.name, " ".repeat(name_padding),
+            status_str, " ".repeat(status_padding),
+            provider_str, " ".repeat(provider_padding),
+            workspace
         );
     }
 

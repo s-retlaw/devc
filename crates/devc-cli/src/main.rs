@@ -1,8 +1,10 @@
 //! devc - Dev Container Manager CLI
 
 mod commands;
+mod selector;
 
 use clap::{Parser, Subcommand};
+use selector::{select_container, SelectionContext};
 use devc_config::GlobalConfig;
 use devc_core::ContainerManager;
 use devc_provider::create_default_provider;
@@ -28,8 +30,8 @@ struct Cli {
 enum Commands {
     /// Run a command in a container
     Run {
-        /// Container name or ID
-        container: String,
+        /// Container name or ID (interactive selection if not specified)
+        container: Option<String>,
         /// Command to run
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
@@ -37,8 +39,8 @@ enum Commands {
 
     /// Open an interactive shell in a container
     Ssh {
-        /// Container name or ID
-        container: String,
+        /// Container name or ID (interactive selection if not specified)
+        container: Option<String>,
     },
 
     /// Build a container
@@ -52,31 +54,27 @@ enum Commands {
 
     /// Start a container
     Start {
-        /// Container name or ID
-        container: String,
+        /// Container name or ID (interactive selection if not specified)
+        container: Option<String>,
     },
 
     /// Stop a container
     Stop {
-        /// Container name or ID
-        container: String,
+        /// Container name or ID (interactive selection if not specified)
+        container: Option<String>,
     },
 
     /// Remove a container
     Rm {
-        /// Container name or ID
-        container: String,
+        /// Container name or ID (interactive selection if not specified)
+        container: Option<String>,
         /// Force removal even if running
         #[arg(short, long)]
         force: bool,
     },
 
     /// List containers
-    List {
-        /// Show all containers (including stopped)
-        #[arg(short, long)]
-        all: bool,
-    },
+    List,
 
     /// Initialize a new dev container from current directory
     Init,
@@ -89,8 +87,8 @@ enum Commands {
 
     /// Stop and remove a container
     Down {
-        /// Container name or ID
-        container: String,
+        /// Container name or ID (interactive selection if not specified)
+        container: Option<String>,
     },
 
     /// Resize container PTY (fixes nested tmux after zoom)
@@ -161,36 +159,100 @@ async fn run() -> anyhow::Result<()> {
             devc_tui::run(manager).await?;
         }
         Some(cmd) => {
+            // Get containers for selection (only when needed)
+            let get_containers = || async { manager.list().await };
+
             match cmd {
                 Commands::Run { container, cmd } => {
-                    commands::run(&manager, &container, cmd).await?;
+                    let name = match container {
+                        Some(name) => name,
+                        None => {
+                            let containers = get_containers().await?;
+                            select_container(&containers, SelectionContext::Running, "Select container to run command in:")?
+                        }
+                    };
+                    commands::run(&manager, &name, cmd).await?;
                 }
                 Commands::Ssh { container } => {
-                    commands::ssh(&manager, &container).await?;
+                    let name = match container {
+                        Some(name) => name,
+                        None => {
+                            let containers = get_containers().await?;
+                            select_container(&containers, SelectionContext::Running, "Select container to connect to:")?
+                        }
+                    };
+                    commands::ssh(&manager, &name).await?;
                 }
                 Commands::Build { container, no_cache } => {
                     commands::build(&manager, container, no_cache).await?;
                 }
                 Commands::Start { container } => {
-                    commands::start(&manager, &container).await?;
+                    let name = match container {
+                        Some(name) => name,
+                        None => {
+                            let containers = get_containers().await?;
+                            select_container(&containers, SelectionContext::Startable, "Select container to start:")?
+                        }
+                    };
+                    commands::start(&manager, &name).await?;
                 }
                 Commands::Stop { container } => {
-                    commands::stop(&manager, &container).await?;
+                    let name = match container {
+                        Some(name) => name,
+                        None => {
+                            let containers = get_containers().await?;
+                            select_container(&containers, SelectionContext::Running, "Select container to stop:")?
+                        }
+                    };
+                    commands::stop(&manager, &name).await?;
                 }
                 Commands::Rm { container, force } => {
-                    commands::remove(&manager, &container, force).await?;
+                    let name = match container {
+                        Some(name) => name,
+                        None => {
+                            let containers = get_containers().await?;
+                            select_container(&containers, SelectionContext::Any, "Select container to remove:")?
+                        }
+                    };
+                    commands::remove(&manager, &name, force).await?;
                 }
-                Commands::List { all } => {
-                    commands::list(&manager, all).await?;
+                Commands::List => {
+                    commands::list(&manager).await?;
                 }
                 Commands::Init => {
                     commands::init(&manager).await?;
                 }
                 Commands::Up { container } => {
+                    let container = match container {
+                        Some(name) => Some(name),
+                        None => {
+                            // up can work without selection (uses cwd), but offer selection if containers exist
+                            let containers = get_containers().await?;
+                            let uppable: Vec<_> = containers.iter()
+                                .filter(|c| c.status != devc_core::DevcContainerStatus::Running)
+                                .collect();
+                            if !uppable.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                                // Offer selection but allow fallback to cwd behavior
+                                match select_container(&containers, SelectionContext::Uppable, "Select container to bring up (or Esc for current directory):") {
+                                    Ok(name) => Some(name),
+                                    Err(_) => None, // Fall back to cwd behavior
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                    };
                     commands::up(&manager, container).await?;
                 }
                 Commands::Down { container } => {
-                    commands::down(&manager, &container).await?;
+                    let name = match container {
+                        Some(name) => name,
+                        None => {
+                            let containers = get_containers().await?;
+                            select_container(&containers, SelectionContext::Any, "Select container to bring down:")?
+                        }
+                    };
+                    commands::down(&manager, &name).await?;
                 }
                 Commands::Resize { container, cols, rows } => {
                     commands::resize(&manager, container, cols, rows).await?;
