@@ -27,6 +27,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         View::Dashboard => draw_dashboard(frame, app, chunks[1]),
         View::ContainerDetail => draw_detail(frame, app, chunks[1]),
         View::BuildOutput => draw_build_output(frame, app, chunks[1]),
+        View::Logs => draw_logs(frame, app, chunks[1]),
         View::Help => draw_help(frame, chunks[1]),
         View::Confirm => {
             draw_dashboard(frame, app, chunks[1]);
@@ -61,6 +62,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         View::Dashboard => "[j/k] Navigate  [b]uild  [s]tart/stop  [u]p  [d]elete  [?] Help  [q]uit",
         View::ContainerDetail => "[b]uild  [s]tart/stop  [u]p  [l]ogs  [q] Back",
         View::BuildOutput => "[q] Back",
+        View::Logs => "[j/k] Scroll  [g/G] Top/Bottom  [C-d/C-u] Page  [r]efresh  [q] Back",
         View::Help => "Press any key to close",
         View::Confirm => "[y]es  [n]o",
     };
@@ -269,6 +271,63 @@ fn draw_build_output(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: true });
 
     frame.render_widget(output, area);
+}
+
+/// Draw logs view with scrolling
+fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
+    let container_name = app
+        .selected_container()
+        .map(|c| c.name.as_str())
+        .unwrap_or("Unknown");
+
+    // Calculate visible area (accounting for borders)
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let total_lines = app.logs.len();
+
+    // Build visible lines with line numbers
+    let text: Vec<Line> = app
+        .logs
+        .iter()
+        .enumerate()
+        .skip(app.logs_scroll)
+        .take(inner_height)
+        .map(|(i, line)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>5} ", i + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(line.as_str()),
+            ])
+        })
+        .collect();
+
+    // Show scroll position in title
+    let scroll_info = if total_lines > 0 {
+        let percent = if total_lines <= inner_height {
+            100
+        } else {
+            ((app.logs_scroll + inner_height).min(total_lines) * 100) / total_lines
+        };
+        format!(
+            " Logs: {} [{}/{}] {}% ",
+            container_name,
+            app.logs_scroll + 1,
+            total_lines,
+            percent
+        )
+    } else {
+        format!(" Logs: {} (empty) ", container_name)
+    };
+
+    let logs = Paragraph::new(text).block(
+        Block::default()
+            .title(scroll_info)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+
+    frame.render_widget(logs, area);
 }
 
 /// Draw help view

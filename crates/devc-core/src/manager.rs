@@ -6,7 +6,7 @@ use crate::{
 };
 use devc_config::{GlobalConfig, ImageSource};
 use devc_provider::{
-    ContainerId, ContainerProvider, ContainerStatus, ExecStream, ProviderType,
+    ContainerId, ContainerProvider, ContainerStatus, ExecStream, LogConfig, ProviderType,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -763,6 +763,53 @@ fi
         }
 
         Ok(new_status)
+    }
+
+    /// Get container logs
+    ///
+    /// Returns logs as a vector of lines. If tail is specified, only returns
+    /// that many lines from the end.
+    pub async fn logs(&self, id: &str, tail: Option<u64>) -> Result<Vec<String>> {
+        use tokio::io::AsyncBufReadExt;
+
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        let container_id = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container has no container ID".to_string()))?;
+
+        let config = LogConfig {
+            follow: false,
+            stdout: true,
+            stderr: true,
+            tail,
+            timestamps: false,
+            since: None,
+            until: None,
+        };
+
+        let log_stream = self
+            .provider
+            .logs(&ContainerId::new(container_id), &config)
+            .await?;
+
+        // Read all lines from the stream
+        let reader = tokio::io::BufReader::new(log_stream.stream);
+        let mut lines = reader.lines();
+        let mut result = Vec::new();
+
+        while let Some(line) = lines.next_line().await? {
+            result.push(line);
+        }
+
+        Ok(result)
     }
 
     /// Helper to set container status

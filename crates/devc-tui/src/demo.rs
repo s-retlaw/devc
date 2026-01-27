@@ -15,6 +15,8 @@ pub struct DemoApp {
     pub containers: Vec<ContainerState>,
     pub selected: usize,
     pub build_output: Vec<String>,
+    pub logs: Vec<String>,
+    pub logs_scroll: usize,
     pub status_message: Option<String>,
     pub should_quit: bool,
     pub confirm_action: Option<crate::app::ConfirmAction>,
@@ -82,11 +84,18 @@ impl DemoApp {
             },
         ];
 
+        // Sample log data for demo
+        let logs: Vec<String> = (1..=50)
+            .map(|i| format!("[2024-01-15 10:00:{:02}] Sample log line {}: Container operation in progress...", i % 60, i))
+            .collect();
+
         Self {
             view: crate::app::View::Dashboard,
             containers,
             selected: 0,
             build_output: Vec::new(),
+            logs,
+            logs_scroll: 0,
             status_message: Some("Demo mode - no container runtime".to_string()),
             should_quit: false,
             confirm_action: None,
@@ -130,6 +139,7 @@ impl DemoApp {
             crate::app::View::ContainerDetail => self.draw_detail(frame, chunks[1]),
             crate::app::View::Help => self.draw_help(frame, chunks[1]),
             crate::app::View::BuildOutput => self.draw_build(frame, chunks[1]),
+            crate::app::View::Logs => self.draw_logs(frame, chunks[1]),
             crate::app::View::Confirm => {
                 self.draw_dashboard(frame, chunks[1]);
                 self.draw_confirm(frame, area);
@@ -154,7 +164,8 @@ impl DemoApp {
 
         let help = match self.view {
             crate::app::View::Dashboard => "[j/k] Navigate  [Enter] Details  [?] Help  [q] Quit",
-            crate::app::View::ContainerDetail => "[q] Back  [?] Help",
+            crate::app::View::ContainerDetail => "[l]ogs  [q] Back  [?] Help",
+            crate::app::View::Logs => "[j/k] Scroll  [g/G] Top/Bottom  [C-d/C-u] Page  [q] Back",
             crate::app::View::Help => "Press any key to close",
             _ => "[q] Back",
         };
@@ -266,6 +277,51 @@ impl DemoApp {
         frame.render_widget(output, area);
     }
 
+    fn draw_logs(&self, frame: &mut Frame, area: Rect) {
+        use ratatui::widgets::{Block, Borders, Paragraph};
+
+        let container_name = self
+            .selected_container()
+            .map(|c| c.name.as_str())
+            .unwrap_or("Unknown");
+
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let total_lines = self.logs.len();
+
+        let text: Vec<Line> = self
+            .logs
+            .iter()
+            .enumerate()
+            .skip(self.logs_scroll)
+            .take(inner_height)
+            .map(|(i, line)| {
+                Line::from(vec![
+                    Span::styled(format!("{:>5} ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::raw(line.as_str()),
+                ])
+            })
+            .collect();
+
+        let scroll_info = if total_lines > 0 {
+            let percent = if total_lines <= inner_height {
+                100
+            } else {
+                ((self.logs_scroll + inner_height).min(total_lines) * 100) / total_lines
+            };
+            format!(" Logs: {} [{}/{}] {}% ", container_name, self.logs_scroll + 1, total_lines, percent)
+        } else {
+            format!(" Logs: {} (empty) ", container_name)
+        };
+
+        let logs = Paragraph::new(text).block(
+            Block::default()
+                .title(scroll_info)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+        frame.render_widget(logs, area);
+    }
+
     fn draw_confirm(&self, frame: &mut Frame, area: Rect) {
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
@@ -296,9 +352,42 @@ impl DemoApp {
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
+    fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         if self.view == crate::app::View::Confirm {
             self.view = crate::app::View::Dashboard;
+            return;
+        }
+
+        // Handle Logs view navigation separately
+        if self.view == crate::app::View::Logs {
+            let page_size = 20;
+            match code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    self.view = crate::app::View::ContainerDetail;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if self.logs_scroll < self.logs.len().saturating_sub(1) {
+                        self.logs_scroll += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.logs_scroll = self.logs_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('g') => {
+                    self.logs_scroll = 0;
+                }
+                KeyCode::Char('G') => {
+                    self.logs_scroll = self.logs.len().saturating_sub(1);
+                }
+                KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.logs_scroll = (self.logs_scroll + page_size / 2)
+                        .min(self.logs.len().saturating_sub(1));
+                }
+                KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.logs_scroll = self.logs_scroll.saturating_sub(page_size / 2);
+                }
+                _ => {}
+            }
             return;
         }
 
@@ -325,6 +414,10 @@ impl DemoApp {
                 if !self.containers.is_empty() {
                     self.view = crate::app::View::ContainerDetail;
                 }
+            }
+            KeyCode::Char('l') if self.view == crate::app::View::ContainerDetail => {
+                self.logs_scroll = self.logs.len().saturating_sub(1);
+                self.view = crate::app::View::Logs;
             }
             KeyCode::Char('b') | KeyCode::Char('s') | KeyCode::Char('u') | KeyCode::Char('d') => {
                 self.view = crate::app::View::Confirm;

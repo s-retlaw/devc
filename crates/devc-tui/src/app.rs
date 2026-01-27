@@ -28,6 +28,8 @@ pub enum View {
     ContainerDetail,
     /// Build output view
     BuildOutput,
+    /// Container logs view
+    Logs,
     /// Help view
     Help,
     /// Confirmation dialog
@@ -53,6 +55,10 @@ pub struct App {
     pub selected: usize,
     /// Build output log
     pub build_output: Vec<String>,
+    /// Container logs
+    pub logs: Vec<String>,
+    /// Logs scroll position (line offset from top)
+    pub logs_scroll: usize,
     /// Status message
     pub status_message: Option<String>,
     /// Should quit
@@ -74,6 +80,8 @@ impl App {
             containers,
             selected: 0,
             build_output: Vec::new(),
+            logs: Vec::new(),
+            logs_scroll: 0,
             status_message: None,
             should_quit: false,
             confirm_action: None,
@@ -163,6 +171,7 @@ impl App {
             View::Dashboard => self.handle_dashboard_key(code, modifiers).await?,
             View::ContainerDetail => self.handle_detail_key(code, modifiers).await?,
             View::BuildOutput => self.handle_build_key(code, modifiers).await?,
+            View::Logs => self.handle_logs_key(code, modifiers).await?,
             View::Help => {
                 // Any key returns to previous view
                 if code != KeyCode::Char('?') {
@@ -250,7 +259,7 @@ impl App {
                 self.up_selected().await?;
             }
             KeyCode::Char('l') => {
-                // TODO: Show logs
+                self.fetch_logs().await?;
             }
             _ => {}
         }
@@ -269,6 +278,57 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 // Scroll up
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle logs view keys with vim-like navigation
+    async fn handle_logs_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> AppResult<()> {
+        // Calculate visible lines (approximate, will be refined by UI)
+        let page_size = 20;
+
+        match code {
+            // Single line movement
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.logs_scroll < self.logs.len().saturating_sub(1) {
+                    self.logs_scroll += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.logs_scroll = self.logs_scroll.saturating_sub(1);
+            }
+            // Go to top/bottom
+            KeyCode::Char('g') => {
+                self.logs_scroll = 0;
+            }
+            KeyCode::Char('G') => {
+                self.logs_scroll = self.logs.len().saturating_sub(1);
+            }
+            // Half page movement (Ctrl+D / Ctrl+U)
+            KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.logs_scroll = (self.logs_scroll + page_size / 2)
+                    .min(self.logs.len().saturating_sub(1));
+            }
+            KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.logs_scroll = self.logs_scroll.saturating_sub(page_size / 2);
+            }
+            // Full page movement (Ctrl+F / Ctrl+B)
+            KeyCode::Char('f') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.logs_scroll = (self.logs_scroll + page_size)
+                    .min(self.logs.len().saturating_sub(1));
+            }
+            KeyCode::Char('b') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.logs_scroll = self.logs_scroll.saturating_sub(page_size);
+            }
+            // Refresh logs
+            KeyCode::Char('r') => {
+                self.fetch_logs().await?;
             }
             _ => {}
         }
@@ -392,6 +452,39 @@ impl App {
 
         self.loading = false;
         self.refresh_containers().await?;
+        Ok(())
+    }
+
+    /// Fetch logs for the selected container
+    async fn fetch_logs(&mut self) -> AppResult<()> {
+        if self.containers.is_empty() {
+            return Ok(());
+        }
+
+        let container = &self.containers[self.selected];
+
+        // Only fetch logs if container has been created
+        if container.container_id.is_none() {
+            self.status_message = Some("Container has not been created yet".to_string());
+            return Ok(());
+        }
+
+        self.status_message = Some(format!("Loading logs for {}...", container.name));
+        self.loading = true;
+
+        match self.manager.logs(&container.id, Some(1000)).await {
+            Ok(lines) => {
+                self.logs = lines;
+                self.logs_scroll = self.logs.len().saturating_sub(1); // Start at bottom
+                self.view = View::Logs;
+                self.status_message = Some(format!("{} log lines", self.logs.len()));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to fetch logs: {}", e));
+            }
+        }
+
+        self.loading = false;
         Ok(())
     }
 
