@@ -1,5 +1,9 @@
 //! devc - Dev Container Manager CLI
 
+// Use mimalloc for better performance with async/multi-threaded workloads
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod commands;
 mod selector;
 
