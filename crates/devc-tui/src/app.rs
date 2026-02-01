@@ -6,8 +6,9 @@ use crate::ui;
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
 use devc_core::{ContainerManager, ContainerState, DevcContainerStatus};
-use devc_provider::{create_provider, detect_available_providers, ProviderType};
+use devc_provider::{create_provider, detect_available_providers, DiscoveredContainer, ProviderType};
 use ratatui::prelude::*;
+use ratatui::widgets::TableState;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -84,6 +85,12 @@ pub enum ConfirmAction {
     },
     /// Set a provider as the default and save to config
     SetDefaultProvider(ProviderType),
+    /// Adopt a discovered container into devc management
+    Adopt {
+        container_id: String,
+        container_name: String,
+        workspace_path: Option<String>,
+    },
 }
 
 /// Dialog focus state for keyboard navigation
@@ -160,6 +167,16 @@ pub struct App {
     pub settings_state: SettingsState,
     /// Provider detail state (for provider-specific settings)
     pub provider_detail_state: ProviderDetailState,
+    /// Whether we're in discover mode (showing all devcontainers, not just managed)
+    pub discover_mode: bool,
+    /// Discovered containers (when in discover mode)
+    pub discovered_containers: Vec<DiscoveredContainer>,
+    /// Selected discovered container index
+    pub selected_discovered: usize,
+    /// Table state for containers view (tracks selection and scroll)
+    pub containers_table_state: TableState,
+    /// Table state for discovered containers view
+    pub discovered_table_state: TableState,
 }
 
 impl App {
@@ -227,6 +244,11 @@ impl App {
             dialog_focus: DialogFocus::default(),
             settings_state,
             provider_detail_state: ProviderDetailState::new(),
+            discover_mode: false,
+            discovered_containers: Vec::new(),
+            selected_discovered: 0,
+            containers_table_state: TableState::default().with_selected(0),
+            discovered_table_state: TableState::default().with_selected(0),
         })
     }
 
@@ -421,6 +443,15 @@ impl App {
             return Ok(());
         }
 
+        // Check discover mode FIRST - Esc/q should exit discover mode, not quit app
+        if self.view == View::Main && self.tab == Tab::Containers && self.discover_mode {
+            if code == KeyCode::Esc || code == KeyCode::Char('q') {
+                self.discover_mode = false;
+                self.status_message = Some("Showing managed containers".to_string());
+                return Ok(());
+            }
+        }
+
         // Global keys (work in any view)
         match code {
             KeyCode::Char('q') => {
@@ -505,78 +536,153 @@ impl App {
         code: KeyCode,
         _modifiers: KeyModifiers,
     ) -> AppResult<()> {
-        match code {
-            // Navigation
-            KeyCode::Char('j') | KeyCode::Down => {
-                if !self.containers.is_empty() {
-                    self.selected = (self.selected + 1) % self.containers.len();
-                }
+        // Toggle discover mode with 'D'
+        if code == KeyCode::Char('D') {
+            if self.discover_mode {
+                // Exit discover mode
+                self.discover_mode = false;
+                self.status_message = Some("Showing managed containers".to_string());
+            } else {
+                // Enter discover mode
+                self.discover_mode = true;
+                self.status_message = Some("Discovering containers...".to_string());
+                self.refresh_discovered().await?;
+                self.status_message = Some("Discover mode: showing all devcontainers".to_string());
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if !self.containers.is_empty() {
-                    self.selected = self.selected.checked_sub(1).unwrap_or(self.containers.len() - 1);
-                }
-            }
-            KeyCode::Char('g') | KeyCode::Home => {
-                self.selected = 0;
-            }
-            KeyCode::Char('G') | KeyCode::End => {
-                if !self.containers.is_empty() {
-                    self.selected = self.containers.len() - 1;
-                }
-            }
+            return Ok(());
+        }
 
-            // Actions
-            KeyCode::Enter => {
-                if !self.containers.is_empty() {
-                    self.view = View::ContainerDetail;
+        if self.discover_mode {
+            // Discover mode key handling
+            match code {
+                // Navigation
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !self.discovered_containers.is_empty() {
+                        self.selected_discovered = (self.selected_discovered + 1) % self.discovered_containers.len();
+                        self.discovered_table_state.select(Some(self.selected_discovered));
+                    }
                 }
-            }
-            KeyCode::Char('b') => {
-                self.build_selected().await?;
-            }
-            KeyCode::Char('s') => {
-                self.toggle_selected().await?;
-            }
-            KeyCode::Char('u') => {
-                self.up_selected().await?;
-            }
-            KeyCode::Char('d') | KeyCode::Delete => {
-                if !self.containers.is_empty() {
-                    let container = &self.containers[self.selected];
-                    self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
-                    self.dialog_focus = DialogFocus::Confirm;
-                    self.view = View::Confirm;
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !self.discovered_containers.is_empty() {
+                        self.selected_discovered = self.selected_discovered
+                            .checked_sub(1)
+                            .unwrap_or(self.discovered_containers.len() - 1);
+                        self.discovered_table_state.select(Some(self.selected_discovered));
+                    }
                 }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    self.selected_discovered = 0;
+                    self.discovered_table_state.select(Some(0));
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    if !self.discovered_containers.is_empty() {
+                        self.selected_discovered = self.discovered_containers.len() - 1;
+                        self.discovered_table_state.select(Some(self.selected_discovered));
+                    }
+                }
+                // Adopt selected container
+                KeyCode::Char('a') => {
+                    if !self.discovered_containers.is_empty() {
+                        let container = &self.discovered_containers[self.selected_discovered];
+                        if !container.managed {
+                            self.dialog_focus = DialogFocus::Confirm;
+                            self.confirm_action = Some(ConfirmAction::Adopt {
+                                container_id: container.id.0.clone(),
+                                container_name: container.name.clone(),
+                                workspace_path: container.workspace_path.clone(),
+                            });
+                            self.view = View::Confirm;
+                        } else {
+                            self.status_message = Some("Container is already managed by devc".to_string());
+                        }
+                    }
+                }
+                // Refresh discovered containers
+                KeyCode::Char('r') | KeyCode::F(5) => {
+                    self.refresh_discovered().await?;
+                    self.status_message = Some("Refreshed discovered containers".to_string());
+                }
+                _ => {}
             }
-            KeyCode::Char('r') | KeyCode::F(5) => {
-                self.refresh_containers().await?;
-                self.status_message = Some("Refreshed".to_string());
-            }
-            KeyCode::Char('R') => {
-                if !self.containers.is_empty() && self.is_connected() {
-                    let container = &self.containers[self.selected];
-                    let old_provider = container.provider;
-                    let new_provider = self.active_provider.unwrap(); // Safe: checked is_connected
-                    let provider_change = if old_provider != new_provider {
-                        Some((old_provider, new_provider))
-                    } else {
-                        None
-                    };
+        } else {
+            // Normal (managed) mode key handling
+            match code {
+                // Navigation
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !self.containers.is_empty() {
+                        self.selected = (self.selected + 1) % self.containers.len();
+                        self.containers_table_state.select(Some(self.selected));
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !self.containers.is_empty() {
+                        self.selected = self.selected.checked_sub(1).unwrap_or(self.containers.len() - 1);
+                        self.containers_table_state.select(Some(self.selected));
+                    }
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    self.selected = 0;
+                    self.containers_table_state.select(Some(0));
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    if !self.containers.is_empty() {
+                        self.selected = self.containers.len() - 1;
+                        self.containers_table_state.select(Some(self.selected));
+                    }
+                }
 
-                    self.rebuild_no_cache = false;
-                    self.dialog_focus = DialogFocus::Confirm;
-                    self.confirm_action = Some(ConfirmAction::Rebuild {
-                        id: container.id.clone(),
-                        provider_change,
-                    });
-                    self.view = View::Confirm;
-                } else if !self.is_connected() {
-                    self.status_message = Some("Not connected to provider".to_string());
+                // Actions
+                KeyCode::Enter => {
+                    if !self.containers.is_empty() {
+                        self.view = View::ContainerDetail;
+                    }
                 }
-            }
+                KeyCode::Char('b') => {
+                    self.build_selected().await?;
+                }
+                KeyCode::Char('s') => {
+                    self.toggle_selected().await?;
+                }
+                KeyCode::Char('u') => {
+                    self.up_selected().await?;
+                }
+                KeyCode::Char('d') | KeyCode::Delete => {
+                    if !self.containers.is_empty() {
+                        let container = &self.containers[self.selected];
+                        self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
+                        self.dialog_focus = DialogFocus::Confirm;
+                        self.view = View::Confirm;
+                    }
+                }
+                KeyCode::Char('r') | KeyCode::F(5) => {
+                    self.refresh_containers().await?;
+                    self.status_message = Some("Refreshed".to_string());
+                }
+                KeyCode::Char('R') => {
+                    if !self.containers.is_empty() && self.is_connected() {
+                        let container = &self.containers[self.selected];
+                        let old_provider = container.provider;
+                        let new_provider = self.active_provider.unwrap(); // Safe: checked is_connected
+                        let provider_change = if old_provider != new_provider {
+                            Some((old_provider, new_provider))
+                        } else {
+                            None
+                        };
 
-            _ => {}
+                        self.rebuild_no_cache = false;
+                        self.dialog_focus = DialogFocus::Confirm;
+                        self.confirm_action = Some(ConfirmAction::Rebuild {
+                            id: container.id.clone(),
+                            provider_change,
+                        });
+                        self.view = View::Confirm;
+                    } else if !self.is_connected() {
+                        self.status_message = Some("Not connected to provider".to_string());
+                    }
+                }
+
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -967,6 +1073,27 @@ impl App {
         if !self.containers.is_empty() && self.selected >= self.containers.len() {
             self.selected = self.containers.len() - 1;
         }
+        // Sync table state
+        if !self.containers.is_empty() {
+            self.containers_table_state.select(Some(self.selected));
+        }
+
+        Ok(())
+    }
+
+    /// Refresh discovered containers list
+    async fn refresh_discovered(&mut self) -> AppResult<()> {
+        self.discovered_containers = self.manager.read().await.discover().await
+            .unwrap_or_default();
+
+        // Ensure selected index is valid
+        if !self.discovered_containers.is_empty() && self.selected_discovered >= self.discovered_containers.len() {
+            self.selected_discovered = self.discovered_containers.len() - 1;
+        }
+        // Sync table state
+        if !self.discovered_containers.is_empty() {
+            self.discovered_table_state.select(Some(self.selected_discovered));
+        }
 
         Ok(())
     }
@@ -1189,6 +1316,29 @@ impl App {
                     // Try to reconnect with the new provider
                     self.retry_connection().await?;
                 }
+            }
+            ConfirmAction::Adopt { container_id, container_name, workspace_path } => {
+                self.loading = true;
+                self.status_message = Some(format!("Adopting '{}'...", container_name));
+
+                // Use a block to ensure the read guard is dropped before refresh_containers
+                let adopt_result = {
+                    let manager = self.manager.read().await;
+                    manager.adopt(&container_id, workspace_path.as_deref()).await
+                };
+
+                match adopt_result {
+                    Ok(state) => {
+                        self.status_message = Some(format!("Adopted '{}'", state.name));
+                        // Switch back to managed view and refresh
+                        self.discover_mode = false;
+                        self.refresh_containers().await?;
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to adopt: {}", e));
+                    }
+                }
+                self.loading = false;
             }
         }
         Ok(())

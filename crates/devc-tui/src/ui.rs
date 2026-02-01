@@ -4,13 +4,14 @@ use ansi_to_tui::IntoText;
 use crate::app::{App, ConfirmAction, DialogFocus, Tab, View};
 use crate::settings::{SettingsField, SettingsSection};
 use devc_core::DevcContainerStatus;
+use devc_provider::{ContainerStatus, DevcontainerSource};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs, Wrap},
 };
 
 /// Main draw function
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.size();
 
     // Check if we need a warning banner
@@ -54,7 +55,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.view {
         View::Main => match app.tab {
-            Tab::Containers => draw_containers(frame, app, content_area),
+            Tab::Containers => {
+                if app.discover_mode {
+                    draw_discovered_containers(frame, app, content_area);
+                } else {
+                    draw_containers(frame, app, content_area);
+                }
+            }
             Tab::Providers => draw_providers(frame, app, content_area),
             Tab::Settings => draw_settings(frame, app, content_area),
         },
@@ -66,7 +73,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         View::Confirm => {
             // Draw the main content behind the dialog
             match app.tab {
-                Tab::Containers => draw_containers(frame, app, content_area),
+                Tab::Containers => {
+                    if app.discover_mode {
+                        draw_discovered_containers(frame, app, content_area);
+                    } else {
+                        draw_containers(frame, app, content_area);
+                    }
+                }
                 Tab::Providers => draw_providers(frame, app, content_area),
                 Tab::Settings => draw_settings(frame, app, content_area),
             }
@@ -143,7 +156,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.view {
         View::Main => match app.tab {
             Tab::Containers => {
-                "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R: Rebuild  d: Delete  ?: Help  q: Quit"
+                if app.discover_mode {
+                    "Esc/q: Exit  j/k: Navigate  a: Adopt  r: Refresh  ?: Help"
+                } else {
+                    "D: Discover  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R: Rebuild  d: Delete  ?: Help  q: Quit"
+                }
             }
             Tab::Providers => {
                 "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Configure  Space/a: Set Active  s: Save  ?: Help  q: Quit"
@@ -197,13 +214,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(footer, area);
 }
 
-/// Draw the containers tab
-fn draw_containers(frame: &mut Frame, app: &App, area: Rect) {
+/// Draw the containers tab using Table widget with headers
+fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.containers.is_empty() {
         let empty = Paragraph::new(
             "No containers found.\n\n\
              Use 'devc init' in a directory with devcontainer.json to add a container.\n\n\
-             Or use 'devc list --discover' to find VS Code devcontainers.",
+             Press 'D' to discover existing devcontainers.",
         )
         .style(Style::default().fg(Color::DarkGray))
         .block(
@@ -217,11 +234,22 @@ fn draw_containers(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let items: Vec<ListItem> = app
+    // Define header row
+    let header = Row::new(vec![
+        Cell::from(" "),
+        Cell::from("Name"),
+        Cell::from("Status"),
+        Cell::from("Provider"),
+        Cell::from("Last Used"),
+    ])
+    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
+
+    // Build data rows
+    let rows: Vec<Row> = app
         .containers
         .iter()
-        .enumerate()
-        .map(|(i, container)| {
+        .map(|container| {
             let status_symbol = match container.status {
                 DevcContainerStatus::Running => "●",
                 DevcContainerStatus::Stopped => "○",
@@ -242,40 +270,145 @@ fn draw_containers(frame: &mut Frame, app: &App, area: Rect) {
                 DevcContainerStatus::Configured => Color::DarkGray,
             };
 
-            let is_selected = i == app.selected;
-            let style = if is_selected {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default()
-            };
-
-            let line = Line::from(vec![
-                Span::styled(
-                    format!(" {} ", status_symbol),
-                    Style::default().fg(status_color),
-                ),
-                Span::styled(format!("{:<20}", container.name), style.bold()),
-                Span::styled(format!("{:<12}", container.status), style.fg(status_color)),
-                Span::styled(
-                    format!("{:<10}", container.provider),
-                    style.fg(Color::DarkGray),
-                ),
-                Span::styled(format_time_ago(container.last_used.timestamp()), style.fg(Color::DarkGray)),
-            ]);
-
-            ListItem::new(line).style(style)
+            Row::new(vec![
+                Cell::from(status_symbol).style(Style::default().fg(status_color)),
+                Cell::from(container.name.clone()).style(Style::default().bold()),
+                Cell::from(format!("{}", container.status)).style(Style::default().fg(status_color)),
+                Cell::from(format!("{}", container.provider)),
+                Cell::from(format_time_ago(container.last_used.timestamp()))
+                    .style(Style::default().fg(Color::DarkGray)),
+            ])
         })
         .collect();
 
-    let list = List::new(items)
+    // Define column widths
+    let widths = [
+        Constraint::Length(3),   // Status icon
+        Constraint::Length(22),  // Name
+        Constraint::Length(12),  // Status
+        Constraint::Length(10),  // Provider
+        Constraint::Min(10),     // Last Used (takes remaining)
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
         .block(
             Block::default()
                 .title(" Containers ")
                 .borders(Borders::ALL),
         )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+        .highlight_symbol("▶ ");
 
-    frame.render_widget(list, area);
+    frame.render_stateful_widget(table, area, &mut app.containers_table_state);
+}
+
+/// Draw discovered containers using Table widget with headers
+fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.discovered_containers.is_empty() {
+        let empty = Paragraph::new(
+            "No devcontainers found.\n\n\
+             Make sure a container provider is running and has devcontainers.",
+        )
+        .style(Style::default().fg(Color::DarkGray))
+        .block(
+            Block::default()
+                .title(" Discovered Containers (Esc to exit) ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: true });
+
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    // Define header row
+    let header = Row::new(vec![
+        Cell::from(" "),
+        Cell::from("Name"),
+        Cell::from("Status"),
+        Cell::from("Source"),
+        Cell::from("Managed"),
+        Cell::from("Workspace"),
+    ])
+    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
+
+    // Build data rows
+    let rows: Vec<Row> = app
+        .discovered_containers
+        .iter()
+        .map(|container| {
+            let status_symbol = match container.status {
+                ContainerStatus::Running => "●",
+                ContainerStatus::Exited => "○",
+                ContainerStatus::Created => "◔",
+                _ => "?",
+            };
+
+            let status_color = match container.status {
+                ContainerStatus::Running => Color::Green,
+                ContainerStatus::Exited => Color::DarkGray,
+                ContainerStatus::Created => Color::Cyan,
+                _ => Color::Yellow,
+            };
+
+            let source_str = match container.source {
+                DevcontainerSource::Devc => "devc",
+                DevcontainerSource::VsCode => "vscode",
+                DevcontainerSource::Other => "other",
+            };
+
+            let managed_str = if container.managed { "Yes" } else { "No" };
+            let managed_color = if container.managed { Color::Green } else { Color::Yellow };
+
+            let workspace = container.workspace_path.as_deref().unwrap_or("-");
+            let workspace_display = if workspace.len() > 30 {
+                format!("...{}", &workspace[workspace.len()-27..])
+            } else {
+                workspace.to_string()
+            };
+
+            let name_display = if container.name.len() > 20 {
+                format!("{}...", &container.name[..17])
+            } else {
+                container.name.clone()
+            };
+
+            Row::new(vec![
+                Cell::from(status_symbol).style(Style::default().fg(status_color)),
+                Cell::from(name_display).style(Style::default().bold()),
+                Cell::from(format!("{}", container.status)).style(Style::default().fg(status_color)),
+                Cell::from(source_str).style(Style::default().fg(Color::Cyan)),
+                Cell::from(managed_str).style(Style::default().fg(managed_color)),
+                Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+
+    // Define column widths
+    let widths = [
+        Constraint::Length(3),   // Status icon
+        Constraint::Length(22),  // Name
+        Constraint::Length(10),  // Status
+        Constraint::Length(8),   // Source
+        Constraint::Length(8),   // Managed
+        Constraint::Min(20),     // Workspace (takes remaining)
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .title(" Discovered Containers (Esc to exit, a to adopt) ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+        .highlight_symbol("▶ ");
+
+    frame.render_stateful_widget(table, area, &mut app.discovered_table_state);
 }
 
 /// Draw the providers tab
@@ -890,6 +1023,14 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 devc_provider::ProviderType::Podman => "Podman",
             };
             draw_set_provider_confirm_dialog(frame, app, area, provider_name);
+        }
+        Some(ConfirmAction::Adopt { container_name, .. }) => {
+            draw_simple_confirm_dialog(
+                frame,
+                app,
+                area,
+                &format!("Adopt '{}' into devc management?", container_name),
+            );
         }
         None => {}
     }
