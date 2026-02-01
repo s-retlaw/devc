@@ -177,9 +177,99 @@ pub struct App {
     pub containers_table_state: TableState,
     /// Table state for discovered containers view
     pub discovered_table_state: TableState,
+    /// Table state for providers view
+    pub providers_table_state: TableState,
 }
 
 impl App {
+    /// Create an App for testing without requiring a ContainerManager
+    ///
+    /// This is useful for unit tests and snapshot tests.
+    pub fn new_for_testing() -> Self {
+        use devc_provider::ProviderType;
+
+        let config = GlobalConfig::default();
+        let manager = ContainerManager::disconnected(config.clone(), "Test mode".to_string())
+            .expect("Failed to create test manager");
+
+        Self {
+            manager: Arc::new(RwLock::new(manager)),
+            config,
+            tab: Tab::Containers,
+            view: View::Main,
+            active_provider: Some(ProviderType::Docker),
+            providers: vec![
+                ProviderStatus {
+                    provider_type: ProviderType::Docker,
+                    name: "Docker".to_string(),
+                    socket: "/var/run/docker.sock".to_string(),
+                    connected: true,
+                    is_active: true,
+                },
+                ProviderStatus {
+                    provider_type: ProviderType::Podman,
+                    name: "Podman".to_string(),
+                    socket: "/run/user/1000/podman/podman.sock".to_string(),
+                    connected: false,
+                    is_active: false,
+                },
+            ],
+            selected_provider: 0,
+            connection_error: None,
+            containers: Vec::new(),
+            selected: 0,
+            build_output: Vec::new(),
+            build_output_scroll: 0,
+            build_auto_scroll: true,
+            build_complete: false,
+            build_progress_rx: None,
+            logs: Vec::new(),
+            logs_scroll: 0,
+            status_message: None,
+            should_quit: false,
+            confirm_action: None,
+            loading: false,
+            rebuild_no_cache: false,
+            dialog_focus: DialogFocus::default(),
+            settings_state: SettingsState::new(&GlobalConfig::default()),
+            provider_detail_state: ProviderDetailState::new(),
+            discover_mode: false,
+            discovered_containers: Vec::new(),
+            selected_discovered: 0,
+            containers_table_state: TableState::default().with_selected(0),
+            discovered_table_state: TableState::default().with_selected(0),
+            providers_table_state: TableState::default().with_selected(0),
+        }
+    }
+
+    /// Create a test container state for testing
+    ///
+    /// This is useful for unit tests and snapshot tests.
+    /// Uses a fixed timestamp to ensure deterministic test output.
+    pub fn create_test_container(name: &str, status: DevcContainerStatus) -> ContainerState {
+        use chrono::{TimeZone, Utc};
+        use devc_provider::ProviderType;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        // Use fixed timestamp for deterministic snapshots
+        let fixed_time = Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap();
+
+        ContainerState {
+            id: format!("test-{}", name),
+            name: name.to_string(),
+            provider: ProviderType::Docker,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            image_id: Some("sha256:abc123".to_string()),
+            container_id: Some(format!("container-{}", name)),
+            status,
+            created_at: fixed_time,
+            last_used: fixed_time,
+            workspace_path: PathBuf::from("/tmp/test"),
+            metadata: HashMap::new(),
+        }
+    }
+
     /// Create a new application
     pub async fn new(manager: ContainerManager) -> AppResult<Self> {
         let containers = manager.list().await?;
@@ -249,6 +339,7 @@ impl App {
             selected_discovered: 0,
             containers_table_state: TableState::default().with_selected(0),
             discovered_table_state: TableState::default().with_selected(0),
+            providers_table_state: TableState::default().with_selected(0),
         })
     }
 
@@ -698,6 +789,7 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => {
                 if !self.providers.is_empty() {
                     self.selected_provider = (self.selected_provider + 1) % self.providers.len();
+                    self.providers_table_state.select(Some(self.selected_provider));
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
@@ -705,6 +797,7 @@ impl App {
                     self.selected_provider = self.selected_provider
                         .checked_sub(1)
                         .unwrap_or(self.providers.len() - 1);
+                    self.providers_table_state.select(Some(self.selected_provider));
                 }
             }
 

@@ -3,6 +3,7 @@
 //! Global settings organized into logical sections.
 //! Provider-specific settings are handled in the Providers tab.
 
+use crate::widgets::TextInputState;
 use devc_config::GlobalConfig;
 
 /// Settings section for visual grouping
@@ -113,14 +114,25 @@ pub struct SettingsState {
     pub focused: usize,
     /// Whether we're in edit mode for the current field
     pub editing: bool,
-    /// Edit buffer for text fields
-    pub edit_buffer: String,
-    /// Cursor position in edit buffer
-    pub cursor: usize,
+    /// Text input state for editing
+    input: TextInputState,
     /// Pending changes (not yet saved)
     pub draft: SettingsDraft,
     /// Whether changes have been made
     pub dirty: bool,
+}
+
+// Legacy accessor methods for backwards compatibility with existing code
+impl SettingsState {
+    /// Get the edit buffer (for display)
+    pub fn edit_buffer(&self) -> &str {
+        self.input.value()
+    }
+
+    /// Get the cursor position (for display)
+    pub fn cursor(&self) -> usize {
+        self.input.cursor()
+    }
 }
 
 /// Draft settings that haven't been saved yet
@@ -142,8 +154,7 @@ impl SettingsState {
         Self {
             focused: 0,
             editing: false,
-            edit_buffer: String::new(),
-            cursor: 0,
+            input: TextInputState::new(),
             draft: SettingsDraft::from_config(config),
             dirty: false,
         }
@@ -170,8 +181,7 @@ impl SettingsState {
         let field = self.focused_field();
         if field.is_editable() {
             self.editing = true;
-            self.edit_buffer = self.draft.get_value(&field);
-            self.cursor = self.edit_buffer.len();
+            self.input.set_value(&self.draft.get_value(&field));
         } else if field.is_toggle() {
             // Toggle immediately
             self.toggle_field();
@@ -188,45 +198,37 @@ impl SettingsState {
 
     pub fn cancel_edit(&mut self) {
         self.editing = false;
-        self.edit_buffer.clear();
-        self.cursor = 0;
+        self.input.clear();
     }
 
     pub fn confirm_edit(&mut self) {
         if self.editing {
             let field = self.focused_field();
-            self.draft.set_value(&field, &self.edit_buffer);
+            self.draft.set_value(&field, self.input.value());
             self.dirty = true;
             self.editing = false;
-            self.edit_buffer.clear();
-            self.cursor = 0;
+            self.input.clear();
         }
     }
 
     pub fn insert_char(&mut self, c: char) {
         if self.editing {
-            self.edit_buffer.insert(self.cursor, c);
-            self.cursor += 1;
+            self.input.insert(c);
         }
     }
 
     pub fn delete_char(&mut self) {
-        if self.editing && self.cursor > 0 {
-            self.cursor -= 1;
-            self.edit_buffer.remove(self.cursor);
+        if self.editing {
+            self.input.backspace();
         }
     }
 
     pub fn move_cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-        }
+        self.input.move_left();
     }
 
     pub fn move_cursor_right(&mut self) {
-        if self.cursor < self.edit_buffer.len() {
-            self.cursor += 1;
-        }
+        self.input.move_right();
     }
 
     /// Apply draft to a config
@@ -297,10 +299,8 @@ pub struct ProviderDetailState {
     pub focused: usize,
     /// Whether we're editing
     pub editing: bool,
-    /// Edit buffer
-    pub edit_buffer: String,
-    /// Cursor position
-    pub cursor: usize,
+    /// Text input state for editing
+    input: TextInputState,
     /// Whether changes have been made
     pub dirty: bool,
     /// Connection test result (None = not tested, Some(true) = connected, Some(false) = failed)
@@ -309,13 +309,25 @@ pub struct ProviderDetailState {
     pub connection_error: Option<String>,
 }
 
+// Legacy accessor methods for backwards compatibility with existing code
+impl ProviderDetailState {
+    /// Get the edit buffer (for display)
+    pub fn edit_buffer(&self) -> &str {
+        self.input.value()
+    }
+
+    /// Get the cursor position (for display)
+    pub fn cursor(&self) -> usize {
+        self.input.cursor()
+    }
+}
+
 impl ProviderDetailState {
     pub fn new() -> Self {
         Self {
             focused: 0,
             editing: false,
-            edit_buffer: String::new(),
-            cursor: 0,
+            input: TextInputState::new(),
             dirty: false,
             connection_status: None,
             connection_error: None,
@@ -324,23 +336,20 @@ impl ProviderDetailState {
 
     pub fn start_edit(&mut self, current_value: &str) {
         self.editing = true;
-        self.edit_buffer = current_value.to_string();
-        self.cursor = self.edit_buffer.len();
+        self.input.set_value(current_value);
     }
 
     pub fn cancel_edit(&mut self) {
         self.editing = false;
-        self.edit_buffer.clear();
-        self.cursor = 0;
+        self.input.clear();
     }
 
     pub fn confirm_edit(&mut self) -> Option<String> {
         if self.editing {
             self.editing = false;
             self.dirty = true;
-            let value = self.edit_buffer.clone();
-            self.edit_buffer.clear();
-            self.cursor = 0;
+            let value = self.input.value().to_string();
+            self.input.clear();
             Some(value)
         } else {
             None
@@ -349,28 +358,22 @@ impl ProviderDetailState {
 
     pub fn insert_char(&mut self, c: char) {
         if self.editing {
-            self.edit_buffer.insert(self.cursor, c);
-            self.cursor += 1;
+            self.input.insert(c);
         }
     }
 
     pub fn delete_char(&mut self) {
-        if self.editing && self.cursor > 0 {
-            self.cursor -= 1;
-            self.edit_buffer.remove(self.cursor);
+        if self.editing {
+            self.input.backspace();
         }
     }
 
     pub fn move_cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-        }
+        self.input.move_left();
     }
 
     pub fn move_cursor_right(&mut self) {
-        if self.cursor < self.edit_buffer.len() {
-            self.cursor += 1;
-        }
+        self.input.move_right();
     }
 
     pub fn set_connection_result(&mut self, connected: bool, error: Option<String>) {
@@ -387,5 +390,178 @@ impl ProviderDetailState {
 impl Default for ProviderDetailState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devc_config::GlobalConfig;
+
+    // ==================== SettingsState TextInput Tests ====================
+    // Note: Low-level cursor/insert/delete behavior is tested in widgets::text_input
+    // These tests focus on the SettingsState high-level behavior
+
+    #[test]
+    fn test_start_edit_sets_cursor_at_end() {
+        let config = GlobalConfig::default();
+        let mut state = SettingsState::new(&config);
+
+        state.draft.shell = "/bin/zsh".to_string();
+        state.focused = 0; // DefaultShell
+
+        state.start_edit();
+        assert!(state.editing);
+        assert_eq!(state.edit_buffer(), "/bin/zsh");
+        assert_eq!(state.cursor(), 8); // At end of string
+    }
+
+    #[test]
+    fn test_cancel_edit_clears_buffer() {
+        let config = GlobalConfig::default();
+        let mut state = SettingsState::new(&config);
+
+        state.draft.shell = "/bin/zsh".to_string();
+        state.focused = 0;
+        state.start_edit();
+        state.insert_char('!');
+
+        state.cancel_edit();
+        assert!(!state.editing);
+        assert!(state.edit_buffer().is_empty());
+        assert_eq!(state.cursor(), 0);
+    }
+
+    #[test]
+    fn test_confirm_edit_saves_to_draft() {
+        let config = GlobalConfig::default();
+        let mut state = SettingsState::new(&config);
+
+        state.focused = 0; // DefaultShell
+        state.start_edit();
+        // Clear and type new value
+        while !state.edit_buffer().is_empty() {
+            state.delete_char();
+        }
+        for c in "/bin/fish".chars() {
+            state.insert_char(c);
+        }
+
+        state.confirm_edit();
+        assert!(!state.editing);
+        assert!(state.dirty);
+        assert_eq!(state.draft.shell, "/bin/fish");
+    }
+
+    #[test]
+    fn test_insert_only_works_when_editing() {
+        let config = GlobalConfig::default();
+        let mut state = SettingsState::new(&config);
+
+        // Not in edit mode
+        state.insert_char('X');
+        assert!(state.edit_buffer().is_empty());
+
+        // In edit mode
+        state.draft.shell = "hello".to_string();
+        state.focused = 0;
+        state.start_edit();
+        state.insert_char('!');
+        assert_eq!(state.edit_buffer(), "hello!");
+    }
+
+    // ==================== ProviderDetailState TextInput Tests ====================
+
+    #[test]
+    fn test_provider_start_edit() {
+        let mut state = ProviderDetailState::new();
+
+        state.start_edit("/var/run/docker.sock");
+        assert!(state.editing);
+        assert_eq!(state.cursor(), 20);
+        assert_eq!(state.edit_buffer(), "/var/run/docker.sock");
+    }
+
+    #[test]
+    fn test_provider_confirm_edit_returns_value() {
+        let mut state = ProviderDetailState::new();
+
+        state.start_edit("/var/run/docker.sock");
+        // Clear and type new value
+        while state.cursor() > 0 {
+            state.delete_char();
+        }
+        for c in "/run/podman/podman.sock".chars() {
+            state.insert_char(c);
+        }
+
+        let result = state.confirm_edit();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "/run/podman/podman.sock");
+        assert!(!state.editing);
+        assert!(state.dirty);
+    }
+
+    #[test]
+    fn test_provider_cancel_edit() {
+        let mut state = ProviderDetailState::new();
+
+        state.start_edit("/var/run/docker.sock");
+        state.insert_char('!');
+
+        state.cancel_edit();
+        assert!(!state.editing);
+        assert!(state.edit_buffer().is_empty());
+        assert_eq!(state.cursor(), 0);
+    }
+
+    // ==================== Navigation Tests ====================
+
+    #[test]
+    fn test_settings_navigation() {
+        let config = GlobalConfig::default();
+        let mut state = SettingsState::new(&config);
+
+        assert_eq!(state.focused, 0);
+        assert_eq!(state.focused_field(), SettingsField::DefaultShell);
+
+        state.move_down();
+        assert_eq!(state.focused_field(), SettingsField::DefaultUser);
+
+        state.move_down();
+        assert_eq!(state.focused_field(), SettingsField::DotfilesRepo);
+
+        state.move_up();
+        assert_eq!(state.focused_field(), SettingsField::DefaultUser);
+    }
+
+    #[test]
+    fn test_settings_navigation_bounds() {
+        let config = GlobalConfig::default();
+        let mut state = SettingsState::new(&config);
+
+        // At top, can't go up
+        state.focused = 0;
+        state.move_up();
+        assert_eq!(state.focused, 0);
+
+        // At bottom, can't go down
+        state.focused = SettingsField::all().len() - 1;
+        state.move_down();
+        assert_eq!(state.focused, SettingsField::all().len() - 1);
+    }
+
+    #[test]
+    fn test_toggle_field() {
+        let config = GlobalConfig::default();
+        let mut state = SettingsState::new(&config);
+
+        // Go to SSH Enabled field
+        state.focused = 4; // SshEnabled
+        let initial = state.draft.ssh_enabled;
+
+        state.toggle_field();
+        assert_eq!(state.draft.ssh_enabled, !initial);
+        assert!(state.dirty);
     }
 }

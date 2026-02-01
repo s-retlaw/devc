@@ -1,0 +1,28 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc - Dev Container Manager ────────────────────────────────────────────────┐
+│ 1:Containers  │  2:Providers  │  3:Settings                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ my-rust-project ─────────────────────────────────────────────────────────────┐
+│Name:        my-rust-project                                                  │
+│Status:      running                                                          │
+│Provider:    docker                                                           │
+│ID:          test-my-rust-project                                             │
+│                                                                              │
+│Workspace:   /tmp/test                                                        │
+│Config:      /tmp/test/.devcontainer/devcontainer.json                        │
+│                                                                              │
+│Image ID:    sha256:abc123                                                    │
+│Container:   container-my-rust-project                                        │
+│                                                                              │
+│Created:     2024-01-15 12:00:00                                              │
+│Last used:   2024-01-15 12:00:00                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│b: Build  s: Start/Stop  u: Up  R: Rebuild  l: Logs  Esc/q: Back  ?: Help     │
+└──────────────────────────────────────────────────────────────────────────────┘

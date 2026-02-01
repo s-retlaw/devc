@@ -1,0 +1,28 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc - Dev Container Manager ────────────────────────────────────────────────┐
+│ 1:Containers  │  2:Providers  │  3:Settings                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Providers - Container Runtimes ──────────────────────────────────────────────┐
+│  Active Provider   Status          Socket                                    │
+│                                                                              │
+│▶ ●      Docker     Connected       /var/run/docker.sock                      │
+│  ○      Podman     Not connected   /run/user/1000/podman/podman.sock         │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│Tab/1-3: Switch tabs  j/k: Navigate  Enter: Configure  Space/a: Set Active  s:│
+└──────────────────────────────────────────────────────────────────────────────┘

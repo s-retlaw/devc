@@ -1,0 +1,28 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc - Dev Container Manager ────────────────────────────────────────────────┐
+│ 1:Containers  │  2:Providers  │  3:Settings                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Help ────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│Global Keys                                                                   │
+│                                                                              │
+│Tab         Next tab                                                          │
+│Shift+Tab   Previous tab                                                      │
+│1/2/3       Jump to Containers/Providers/Settings tab                         │
+│?/F1        Show this help                                                    │
+│q           Quit (or go back from subview)                                    │
+│Esc         Go back / Cancel                                                  │
+│                                                                              │
+│Containers Tab                                                                │
+│                                                                              │
+│j/Down      Move selection down                                               │
+│k/Up        Move selection up                                                 │
+│g/Home      Go to first container                                             │
+│G/End       Go to last container                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│Press any key to close                                                        │
+└──────────────────────────────────────────────────────────────────────────────┘

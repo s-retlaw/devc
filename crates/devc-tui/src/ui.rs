@@ -3,11 +3,15 @@
 use ansi_to_tui::IntoText;
 use crate::app::{App, ConfirmAction, DialogFocus, Tab, View};
 use crate::settings::{SettingsField, SettingsSection};
+use crate::widgets::DialogBuilder;
 use devc_core::DevcContainerStatus;
 use devc_provider::{ContainerStatus, DevcontainerSource};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs, Wrap},
+    widgets::{
+        Block, Borders, Cell, List, ListItem, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Table, Tabs, Wrap,
+    },
 };
 
 /// Main draw function
@@ -419,73 +423,83 @@ fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Draw the providers tab
-fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
-    let mut items: Vec<ListItem> = Vec::new();
-
-    // Add a header explanation
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(
-            " Select a provider to use for new containers:",
-            Style::default().fg(Color::DarkGray).italic(),
-        ),
-    ])));
-    items.push(ListItem::new(Line::from("")));
-
-    for (i, provider) in app.providers.iter().enumerate() {
-        let is_selected = i == app.selected_provider;
-
-        let active_indicator = if provider.is_active {
-            "● ACTIVE"
-        } else {
-            "○       "
-        };
-
-        let status_indicator = if provider.connected {
-            Span::styled("Connected", Style::default().fg(Color::Green))
-        } else {
-            Span::styled("Not connected", Style::default().fg(Color::Red))
-        };
-
-        let style = if is_selected {
-            Style::default().bg(Color::DarkGray).fg(Color::White)
-        } else {
-            Style::default()
-        };
-
-        // Provider name and active status
-        let line1 = Line::from(vec![
-            Span::styled(
-                format!(" {} ", active_indicator),
-                if provider.is_active {
-                    Style::default().fg(Color::Green).bold()
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                },
-            ),
-            Span::styled(format!("{:<10}", provider.name), style.bold()),
-            status_indicator,
-        ]);
-
-        // Socket path
-        let line2 = Line::from(vec![
-            Span::raw("          "),
-            Span::styled(
-                format!("Socket: {}", provider.socket),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-
-        items.push(ListItem::new(vec![line1, line2]).style(style));
-        items.push(ListItem::new(Line::from("")));
+fn draw_providers(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.providers.is_empty() {
+        let empty = Paragraph::new("No providers available.")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .title(" Providers - Container Runtimes ")
+                    .borders(Borders::ALL),
+            );
+        frame.render_widget(empty, area);
+        return;
     }
 
-    let list = List::new(items).block(
+    // Define header row
+    let header = Row::new(vec![
+        Cell::from("Active"),
+        Cell::from("Provider"),
+        Cell::from("Status"),
+        Cell::from("Socket"),
+    ])
+    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
+
+    // Build data rows
+    let rows: Vec<Row> = app
+        .providers
+        .iter()
+        .map(|provider| {
+            let active_indicator = if provider.is_active { "●" } else { "○" };
+            let active_style = if provider.is_active {
+                Style::default().fg(Color::Green).bold()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let status_text = if provider.connected {
+                "Connected"
+            } else {
+                "Not connected"
+            };
+            let status_style = if provider.connected {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Red)
+            };
+
+            Row::new(vec![
+                Cell::from(Span::styled(active_indicator, active_style)),
+                Cell::from(provider.name.clone()),
+                Cell::from(Span::styled(status_text, status_style)),
+                Cell::from(Span::styled(
+                    provider.socket.clone(),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(6),  // Active
+            Constraint::Length(10), // Provider
+            Constraint::Length(15), // Status
+            Constraint::Min(30),    // Socket
+        ],
+    )
+    .header(header)
+    .block(
         Block::default()
             .title(" Providers - Container Runtimes ")
             .borders(Borders::ALL),
-    );
+    )
+    .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+    .highlight_symbol("▶ ");
 
-    frame.render_widget(list, area);
+    frame.render_stateful_widget(table, area, &mut app.providers_table_state);
 }
 
 /// Draw the global settings tab with sections
@@ -521,9 +535,9 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
 
             let display_value = if settings.editing && is_focused {
                 // Show edit buffer with cursor
-                let cursor_pos = settings.cursor;
-                let before = &settings.edit_buffer[..cursor_pos];
-                let after = &settings.edit_buffer[cursor_pos..];
+                let cursor_pos = settings.cursor();
+                let before = &settings.edit_buffer()[..cursor_pos];
+                let after = &settings.edit_buffer()[cursor_pos..];
                 format!("{}│{}", before, after)
             } else if field.is_toggle() {
                 if let SettingsField::SshEnabled = field {
@@ -600,9 +614,9 @@ fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
     // Socket path (editable)
     let socket_label = "Socket Path:";
     let socket_value = if detail_state.editing {
-        let cursor_pos = detail_state.cursor;
-        let before = &detail_state.edit_buffer[..cursor_pos];
-        let after = &detail_state.edit_buffer[cursor_pos..];
+        let cursor_pos = detail_state.cursor();
+        let before = &detail_state.edit_buffer()[..cursor_pos];
+        let after = &detail_state.edit_buffer()[cursor_pos..];
         format!("{}│{}", before, after)
     } else {
         provider.socket.clone()
@@ -868,6 +882,24 @@ fn draw_build_output(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     frame.render_widget(output, area);
+
+    // Render scrollbar if content exceeds visible area
+    if total_lines > inner_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+        let mut scrollbar_state =
+            ScrollbarState::new(total_lines.saturating_sub(inner_height)).position(scroll);
+
+        // Render scrollbar in a slightly inset area
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y + 1,
+            width: 1,
+            height: area.height.saturating_sub(2),
+        };
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
 /// Draw logs view with scrolling
@@ -922,6 +954,24 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     frame.render_widget(logs, area);
+
+    // Render scrollbar if content exceeds visible area
+    if total_lines > inner_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+        let mut scrollbar_state = ScrollbarState::new(total_lines.saturating_sub(inner_height))
+            .position(app.logs_scroll);
+
+        // Render scrollbar in a slightly inset area
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y + 1,
+            width: 1,
+            height: area.height.saturating_sub(2),
+        };
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
 /// Draw help view - context-sensitive based on current tab
@@ -1045,110 +1095,37 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Draw a simple yes/no confirmation dialog
 fn draw_simple_confirm_dialog(frame: &mut Frame, app: &App, area: Rect, message: &str) {
-    let dialog_width = 50;
-    let dialog_height = 8;
-    let dialog_area = Rect {
-        x: (area.width.saturating_sub(dialog_width)) / 2,
-        y: (area.height.saturating_sub(dialog_height)) / 2,
-        width: dialog_width.min(area.width),
-        height: dialog_height.min(area.height),
-    };
-
-    frame.render_widget(Clear, dialog_area);
-
-    // Button styles based on focus
-    let confirm_style = if app.dialog_focus == DialogFocus::Confirm {
-        Style::default().bg(Color::Green).fg(Color::Black).bold()
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    let cancel_style = if app.dialog_focus == DialogFocus::Cancel {
-        Style::default().bg(Color::Red).fg(Color::White).bold()
-    } else {
-        Style::default().fg(Color::Red)
-    };
-
-    let dialog = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(message.to_string()),
-        Line::from(""),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Confirm  ", confirm_style),
-            Span::raw("    "),
-            Span::styled("  Cancel  ", cancel_style),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Tab: Switch  Enter: Select  Esc: Cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ])
-    .alignment(Alignment::Center)
-    .block(
-        Block::default()
-            .title(" Confirm ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow)),
-    );
-
-    frame.render_widget(dialog, dialog_area);
+    DialogBuilder::new("Confirm")
+        .width(50)
+        .empty_line()
+        .message(message)
+        .empty_line()
+        .empty_line()
+        .buttons(app.dialog_focus)
+        .empty_line()
+        .help("Tab: Switch  Enter: Select  Esc: Cancel")
+        .render(frame, area);
 }
 
 /// Draw the set default provider confirmation dialog
 fn draw_set_provider_confirm_dialog(frame: &mut Frame, app: &App, area: Rect, provider_name: &str) {
-    let dialog_width = 55;
-    let dialog_height = 10;
-    let dialog_area = Rect {
-        x: (area.width.saturating_sub(dialog_width)) / 2,
-        y: (area.height.saturating_sub(dialog_height)) / 2,
-        width: dialog_width.min(area.width),
-        height: dialog_height.min(area.height),
-    };
+    let message = format!("Set {} as default provider?", provider_name);
 
-    frame.render_widget(Clear, dialog_area);
-
-    // Button styles based on focus
-    let confirm_style = if app.dialog_focus == DialogFocus::Confirm {
-        Style::default().bg(Color::Green).fg(Color::Black).bold()
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    let cancel_style = if app.dialog_focus == DialogFocus::Cancel {
-        Style::default().bg(Color::Red).fg(Color::White).bold()
-    } else {
-        Style::default().fg(Color::Red)
-    };
-
-    let dialog = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(format!("Set {} as default provider?", provider_name)),
-        Line::from(""),
-        Line::from(Span::styled(
+    DialogBuilder::new("Set Default Provider")
+        .width(55)
+        .border_color(Color::Cyan)
+        .empty_line()
+        .message(&message)
+        .empty_line()
+        .styled_message(Line::from(Span::styled(
             "This will save the setting and reconnect.",
             Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Confirm  ", confirm_style),
-            Span::raw("    "),
-            Span::styled("  Cancel  ", cancel_style),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Tab: Switch  Enter: Select  Esc: Cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ])
-    .alignment(Alignment::Center)
-    .block(
-        Block::default()
-            .title(" Set Default Provider ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
-
-    frame.render_widget(dialog, dialog_area);
+        )))
+        .empty_line()
+        .buttons(app.dialog_focus)
+        .empty_line()
+        .help("Tab: Switch  Enter: Select  Esc: Cancel")
+        .render(frame, area);
 }
 
 /// Draw the rebuild confirmation dialog with provider change warning and no-cache toggle
@@ -1159,86 +1136,36 @@ fn draw_rebuild_confirm_dialog(
     name: &str,
     provider_change: Option<&(devc_provider::ProviderType, devc_provider::ProviderType)>,
 ) {
-    let dialog_width = 50;
-    let dialog_height = if provider_change.is_some() { 13 } else { 11 };
-    let dialog_area = Rect {
-        x: (area.width.saturating_sub(dialog_width)) / 2,
-        y: (area.height.saturating_sub(dialog_height)) / 2,
-        width: dialog_width.min(area.width),
-        height: dialog_height.min(area.height),
-    };
+    // Pre-format strings to avoid lifetime issues
+    let message = format!("Rebuild '{}'?", name);
+    let warning_text = provider_change
+        .map(|(old, new)| format!("{} -> {}", old, new));
 
-    frame.render_widget(Clear, dialog_area);
-
-    // Styles based on focus state
-    let checkbox_style = if app.dialog_focus == DialogFocus::Checkbox {
-        Style::default().bg(Color::Cyan).fg(Color::Black).bold()
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-    let confirm_style = if app.dialog_focus == DialogFocus::Confirm {
-        Style::default().bg(Color::Green).fg(Color::Black).bold()
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    let cancel_style = if app.dialog_focus == DialogFocus::Cancel {
-        Style::default().bg(Color::Red).fg(Color::White).bold()
-    } else {
-        Style::default().fg(Color::Red)
-    };
-
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(format!("Rebuild '{}'?", name)),
-        Line::from(""),
-    ];
+    let mut builder = DialogBuilder::new("Rebuild Container")
+        .width(50)
+        .empty_line()
+        .message(&message)
+        .empty_line();
 
     // Add provider change warning if applicable
-    if let Some((old, new)) = provider_change {
-        lines.push(Line::from(vec![
+    if let Some(warning) = &warning_text {
+        builder = builder.styled_message(Line::from(vec![
             Span::styled("  Warning: ", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(format!("{} -> {}", old, new), Style::default().fg(Color::Yellow)),
+            Span::styled(warning.clone(), Style::default().fg(Color::Yellow)),
         ]));
-        lines.push(Line::from(""));
+        builder = builder.empty_line();
     }
 
-    // Add no-cache checkbox with focus indicator
-    let checkbox = if app.rebuild_no_cache { "[X]" } else { "[ ]" };
-    let focus_indicator = if app.dialog_focus == DialogFocus::Checkbox { "▶ " } else { "  " };
-    lines.push(Line::from(vec![
-        Span::raw(focus_indicator),
-        Span::styled(checkbox, checkbox_style),
-        Span::styled(" Force rebuild (no cache)", if app.dialog_focus == DialogFocus::Checkbox {
-            Style::default().bold()
-        } else {
-            Style::default()
-        }),
-    ]));
-    lines.push(Line::from(""));
-
-    // Add button row with focus indicators
-    lines.push(Line::from(vec![
-        Span::styled("  Confirm  ", confirm_style),
-        Span::raw("    "),
-        Span::styled("  Cancel  ", cancel_style),
-    ]));
-    lines.push(Line::from(""));
-
-    // Help text
-    lines.push(Line::from(Span::styled(
-        "Tab: Switch  Enter/Space: Select  Esc: Cancel",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    let dialog = Paragraph::new(lines)
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .title(" Rebuild Container ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
-        );
-
-    frame.render_widget(dialog, dialog_area);
+    builder
+        .checkbox(
+            "Force rebuild (no cache)",
+            app.rebuild_no_cache,
+            app.dialog_focus == DialogFocus::Checkbox,
+        )
+        .empty_line()
+        .buttons(app.dialog_focus)
+        .empty_line()
+        .help("Tab: Switch  Enter/Space: Select  Esc: Cancel")
+        .render(frame, area);
 }
 

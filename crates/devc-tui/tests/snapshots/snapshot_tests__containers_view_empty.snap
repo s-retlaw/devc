@@ -1,0 +1,28 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc - Dev Container Manager ────────────────────────────────────────────────┐
+│ 1:Containers  │  2:Providers  │  3:Settings                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Containers ──────────────────────────────────────────────────────────────────┐
+│No containers found.                                                          │
+│                                                                              │
+│Use 'devc init' in a directory with devcontainer.json to add a container.     │
+│                                                                              │
+│Press 'D' to discover existing devcontainers.                                 │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│D: Discover  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R:│
+└──────────────────────────────────────────────────────────────────────────────┘

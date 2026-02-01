@@ -2,13 +2,14 @@
 //!
 //! Built with Ratatui for a modern terminal UI experience.
 
-mod app;
+pub mod app;
 mod demo;
 mod event;
-mod settings;
-mod ui;
+pub mod settings;
+pub mod ui;
+pub mod widgets;
 
-pub use app::{App, AppResult};
+pub use app::{App, AppResult, ConfirmAction, DialogFocus, Tab, View};
 pub use demo::DemoApp;
 pub use event::{Event, EventHandler};
 

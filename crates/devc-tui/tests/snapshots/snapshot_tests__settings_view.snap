@@ -1,0 +1,28 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc - Dev Container Manager ────────────────────────────────────────────────┐
+│ 1:Containers  │  2:Providers  │  3:Settings                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Settings ────────────────────────────────────────────────────────────────────┐
+│ Global settings that apply to all containers:                                │
+│                                                                              │
+│ CONTAINER DEFAULTS                                                           │
+│   Default Shell   /bin/bash                                                  │
+│   Default User    (not set)                                                  │
+│                                                                              │
+│ DOTFILES                                                                     │
+│   Repository URL  (not set)                                                  │
+│   Local Path      (not set)                                                  │
+│                                                                              │
+│ SSH / CONNECTION                                                             │
+│   SSH Enabled     [●] Enabled  [ ] Disabled                                  │
+│   SSH Key Path    (not set)                                                  │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│Tab/1-3: Switch tabs  j/k: Navigate  Enter/Space: Edit  s: Save  r: Reset  ?: │
+└──────────────────────────────────────────────────────────────────────────────┘

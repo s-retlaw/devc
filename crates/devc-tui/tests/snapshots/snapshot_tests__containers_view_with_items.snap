@@ -1,0 +1,28 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc - Dev Container Manager ────────────────────────────────────────────────┐
+│ 1:Containers  │  2:Providers  │  3:Settings                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Containers ──────────────────────────────────────────────────────────────────┐
+│      Name                   Status       Provider   Workspace                │
+│                                                                              │
+│▶ ●   my-rust-project        running      docker     /tmp/test                │
+│  ○   python-api             stopped      docker     /tmp/test                │
+│  ◐   frontend-app           building     docker     /tmp/test                │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│D: Discover  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R:│
+└──────────────────────────────────────────────────────────────────────────────┘

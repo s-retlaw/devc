@@ -1,0 +1,28 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc - Dev Container Manager ────────────────────────────────────────────────┐
+│ 1:Containers  │  2:Providers  │  3:Settings                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Containers ──────────────────────────────────────────────────────────────────┐
+│      Name                   Status       Provider   Workspace                │
+│                                                                              │
+│▶ ●   test-container         running      docker     /tmp/test                │
+│              ┌ Rebuild Container ─────────────────────────────┐              │
+│              │                                                │              │
+│              │            Rebuild 'test-container'?           │              │
+│              │                                                │              │
+│              │         ▶ [X] Force rebuild (no cache)         │              │
+│              │                                                │              │
+│              │              Confirm        Cancel             │              │
+│              │                                                │              │
+│              │  Tab: Switch  Enter/Space: Select  Esc: Cancel │              │
+│              └────────────────────────────────────────────────┘              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│y/Enter: Confirm  n/Esc: Cancel  Space: Toggle no-cache                       │
+└──────────────────────────────────────────────────────────────────────────────┘
