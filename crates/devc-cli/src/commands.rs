@@ -605,7 +605,9 @@ pub async fn rebuild(
     let state = find_container(manager, container).await?;
 
     // Check for provider change
-    let current_provider = manager.provider_type();
+    let current_provider = manager
+        .provider_type()
+        .ok_or_else(|| anyhow::anyhow!("Not connected to a container provider"))?;
     let provider_changed = state.provider != current_provider;
 
     // Show confirmation unless --yes

@@ -42,6 +42,9 @@ pub enum CoreError {
 
     #[error("State file corrupted: {0}")]
     StateCorrupted(String),
+
+    #[error("Not connected to container provider: {0}")]
+    NotConnected(String),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

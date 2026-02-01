@@ -13,41 +13,91 @@ use ratatui::{
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.size();
 
-    // Main layout: header with tabs, content, footer with help
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header with tabs
-            Constraint::Min(0),    // Content
-            Constraint::Length(3), // Footer
-        ])
-        .split(area);
+    // Check if we need a warning banner
+    let show_warning = !app.is_connected();
+
+    // Main layout: header with tabs, optional warning, content, footer with help
+    let chunks = if show_warning {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header with tabs
+                Constraint::Length(3), // Warning banner
+                Constraint::Min(0),    // Content
+                Constraint::Length(3), // Footer
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header with tabs
+                Constraint::Min(0),    // Content
+                Constraint::Length(3), // Footer
+            ])
+            .split(area)
+    };
 
     draw_header_with_tabs(frame, app, chunks[0]);
 
+    let content_area;
+    let footer_area;
+
+    if show_warning {
+        draw_disconnection_warning(frame, app, chunks[1]);
+        content_area = chunks[2];
+        footer_area = chunks[3];
+    } else {
+        content_area = chunks[1];
+        footer_area = chunks[2];
+    }
+
     match app.view {
         View::Main => match app.tab {
-            Tab::Containers => draw_containers(frame, app, chunks[1]),
-            Tab::Providers => draw_providers(frame, app, chunks[1]),
-            Tab::Settings => draw_settings(frame, app, chunks[1]),
+            Tab::Containers => draw_containers(frame, app, content_area),
+            Tab::Providers => draw_providers(frame, app, content_area),
+            Tab::Settings => draw_settings(frame, app, content_area),
         },
-        View::ContainerDetail => draw_detail(frame, app, chunks[1]),
-        View::ProviderDetail => draw_provider_detail(frame, app, chunks[1]),
-        View::BuildOutput => draw_build_output(frame, app, chunks[1]),
-        View::Logs => draw_logs(frame, app, chunks[1]),
-        View::Help => draw_help(frame, app, chunks[1]),
+        View::ContainerDetail => draw_detail(frame, app, content_area),
+        View::ProviderDetail => draw_provider_detail(frame, app, content_area),
+        View::BuildOutput => draw_build_output(frame, app, content_area),
+        View::Logs => draw_logs(frame, app, content_area),
+        View::Help => draw_help(frame, app, content_area),
         View::Confirm => {
             // Draw the main content behind the dialog
             match app.tab {
-                Tab::Containers => draw_containers(frame, app, chunks[1]),
-                Tab::Providers => draw_providers(frame, app, chunks[1]),
-                Tab::Settings => draw_settings(frame, app, chunks[1]),
+                Tab::Containers => draw_containers(frame, app, content_area),
+                Tab::Providers => draw_providers(frame, app, content_area),
+                Tab::Settings => draw_settings(frame, app, content_area),
             }
             draw_confirm_dialog(frame, app, area);
         }
     }
 
-    draw_footer(frame, app, chunks[2]);
+    draw_footer(frame, app, footer_area);
+}
+
+/// Draw disconnection warning banner
+fn draw_disconnection_warning(frame: &mut Frame, app: &App, area: Rect) {
+    let message = app
+        .connection_error
+        .as_deref()
+        .unwrap_or("Not connected to container provider");
+
+    let warning = Paragraph::new(Line::from(vec![
+        Span::styled(" ⚠ ", Style::default().fg(Color::Yellow).bold()),
+        Span::styled("DISCONNECTED: ", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(message, Style::default().fg(Color::White)),
+        Span::styled(" - Go to Providers tab and press 'c' to retry connection", Style::default().fg(Color::Gray)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .style(Style::default().bg(Color::Rgb(60, 40, 0))),
+    );
+
+    frame.render_widget(warning, area);
 }
 
 /// Draw header with tab bar

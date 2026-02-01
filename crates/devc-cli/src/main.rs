@@ -178,20 +178,31 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // All other commands need a provider
-    let provider = match cli.provider.as_deref() {
-        Some("docker") => create_provider(ProviderType::Docker, &config).await?,
-        Some("podman") => create_provider(ProviderType::Podman, &config).await?,
-        _ => create_default_provider(&config).await?,
+    // Try to create a provider
+    let provider_result = match cli.provider.as_deref() {
+        Some("docker") => create_provider(ProviderType::Docker, &config).await,
+        Some("podman") => create_provider(ProviderType::Podman, &config).await,
+        _ => create_default_provider(&config).await,
     };
-    let manager = ContainerManager::new(provider).await?;
 
+    // Handle TUI launch specially - allow starting in disconnected mode
     match cli.command {
         None => {
-            // Launch TUI
+            // Launch TUI - create disconnected manager if provider fails
+            let manager = match provider_result {
+                Ok(provider) => ContainerManager::new(provider).await?,
+                Err(e) => {
+                    // Create disconnected manager for TUI
+                    ContainerManager::disconnected(config, e.to_string())?
+                }
+            };
             devc_tui::run(manager).await?;
         }
         Some(cmd) => {
+            // CLI commands require a working provider
+            let provider = provider_result?;
+            let manager = ContainerManager::new(provider).await?;
+
             // Get containers for selection (only when needed)
             let get_containers = || async { manager.list().await };
 

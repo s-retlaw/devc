@@ -16,12 +16,14 @@ use tokio::sync::RwLock;
 
 /// Main container manager
 pub struct ContainerManager {
-    /// Container provider
-    provider: Box<dyn ContainerProvider>,
+    /// Container provider (None when disconnected)
+    provider: Option<Box<dyn ContainerProvider>>,
     /// State store
     state: Arc<RwLock<StateStore>>,
     /// Global configuration
     global_config: GlobalConfig,
+    /// Error message when disconnected
+    connection_error: Option<String>,
 }
 
 /// Build progress callback
@@ -34,9 +36,10 @@ impl ContainerManager {
         let state = StateStore::load()?;
 
         Ok(Self {
-            provider,
+            provider: Some(provider),
             state: Arc::new(RwLock::new(state)),
             global_config,
+            connection_error: None,
         })
     }
 
@@ -48,15 +51,60 @@ impl ContainerManager {
         let state = StateStore::load()?;
 
         Ok(Self {
-            provider,
+            provider: Some(provider),
             state: Arc::new(RwLock::new(state)),
             global_config,
+            connection_error: None,
         })
     }
 
-    /// Get the provider type
-    pub fn provider_type(&self) -> ProviderType {
-        self.provider.info().provider_type
+    /// Create a disconnected manager (no provider available)
+    pub fn disconnected(global_config: GlobalConfig, error: String) -> Result<Self> {
+        let state = StateStore::load()?;
+
+        Ok(Self {
+            provider: None,
+            state: Arc::new(RwLock::new(state)),
+            global_config,
+            connection_error: Some(error),
+        })
+    }
+
+    /// Check if connected to a provider
+    pub fn is_connected(&self) -> bool {
+        self.provider.is_some()
+    }
+
+    /// Get the connection error message (if disconnected)
+    pub fn connection_error(&self) -> Option<&str> {
+        self.connection_error.as_deref()
+    }
+
+    /// Connect to a provider (for reconnection)
+    pub fn connect(&mut self, provider: Box<dyn ContainerProvider>) {
+        self.provider = Some(provider);
+        self.connection_error = None;
+    }
+
+    /// Get the provider, returning an error if not connected
+    fn require_provider(&self) -> Result<&Box<dyn ContainerProvider>> {
+        self.provider.as_ref().ok_or_else(|| {
+            CoreError::NotConnected(
+                self.connection_error
+                    .clone()
+                    .unwrap_or_else(|| "No container provider available".to_string()),
+            )
+        })
+    }
+
+    /// Get the provider type (None if disconnected)
+    pub fn provider_type(&self) -> Option<ProviderType> {
+        self.provider.as_ref().map(|p| p.info().provider_type)
+    }
+
+    /// Get the global config
+    pub fn global_config(&self) -> &GlobalConfig {
+        &self.global_config
     }
 
     /// List all managed containers
@@ -79,6 +127,10 @@ impl ContainerManager {
 
     /// Initialize a new container from a workspace
     pub async fn init(&self, workspace_path: &Path) -> Result<ContainerState> {
+        let provider_type = self
+            .provider_type()
+            .ok_or_else(|| CoreError::NotConnected("Cannot init: no provider available".to_string()))?;
+
         let container = Container::from_workspace(workspace_path)?;
 
         let mut state = self.state.write().await;
@@ -90,7 +142,7 @@ impl ContainerManager {
 
         let container_state = ContainerState::new(
             container.name.clone(),
-            self.provider_type(),
+            provider_type,
             container.config_path.clone(),
             container.workspace_path.clone(),
         );
@@ -108,6 +160,8 @@ impl ContainerManager {
 
     /// Build a container image with options
     pub async fn build_with_options(&self, id: &str, no_cache: bool) -> Result<String> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -160,7 +214,7 @@ impl ContainerManager {
                         pull: true,
                     };
 
-                    let result = self.provider.build(&build_config).await;
+                    let result = provider.build(&build_config).await;
                     match result {
                         Ok(id) => id.0,
                         Err(e) => {
@@ -171,7 +225,7 @@ impl ContainerManager {
                 } else {
                     // Just pull the image directly (no SSH support)
                     tracing::info!("Pulling image: {}", image);
-                    let result = self.provider.pull(&image).await;
+                    let result = provider.pull(&image).await;
                     match result {
                         Ok(id) => id.0,
                         Err(e) => {
@@ -200,7 +254,7 @@ impl ContainerManager {
                     build_config.context = enhanced_ctx.context_path().to_path_buf();
                     build_config.dockerfile = enhanced_ctx.dockerfile_name().to_string();
 
-                    let result = self.provider.build(&build_config).await;
+                    let result = provider.build(&build_config).await;
                     match result {
                         Ok(id) => id.0,
                         Err(e) => {
@@ -215,7 +269,7 @@ impl ContainerManager {
                         no_cache
                     );
 
-                    let result = self.provider.build(&build_config).await;
+                    let result = provider.build(&build_config).await;
                     match result {
                         Ok(id) => id.0,
                         Err(e) => {
@@ -254,6 +308,8 @@ impl ContainerManager {
 
     /// Create a container from a built image
     pub async fn create(&self, id: &str) -> Result<ContainerId> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -269,7 +325,7 @@ impl ContainerManager {
         let container = Container::from_config(&container_state.config_path)?;
         let create_config = container.create_config(image_id);
 
-        let container_id = self.provider.create(&create_config).await?;
+        let container_id = provider.create(&create_config).await?;
 
         // Update state with container ID
         {
@@ -286,6 +342,8 @@ impl ContainerManager {
 
     /// Start a container
     pub async fn start(&self, id: &str) -> Result<()> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -305,7 +363,7 @@ impl ContainerManager {
             CoreError::InvalidState("Container not created yet".to_string())
         })?;
 
-        self.provider.start(&ContainerId::new(container_id)).await?;
+        provider.start(&ContainerId::new(container_id)).await?;
 
         // Update status
         self.set_status(id, DevcContainerStatus::Running).await?;
@@ -319,7 +377,7 @@ impl ContainerManager {
         let container = Container::from_config(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.post_start_command {
             run_lifecycle_command(
-                self.provider.as_ref(),
+                provider.as_ref(),
                 &ContainerId::new(container_id),
                 cmd,
                 container.devcontainer.effective_user(),
@@ -333,6 +391,8 @@ impl ContainerManager {
 
     /// Ensure the SSH daemon (dropbear) is running in the container
     async fn ensure_ssh_daemon_running(&self, container_id: &ContainerId) -> Result<()> {
+        let provider = self.require_provider()?;
+
         let script = r#"
 if ! pgrep -x dropbear >/dev/null 2>&1; then
     /usr/sbin/dropbear -s -r /etc/dropbear/dropbear_ed25519_host_key -p 127.0.0.1:2222 2>/dev/null
@@ -348,7 +408,7 @@ fi
             privileged: false,
         };
 
-        match self.provider.exec(container_id, &config).await {
+        match provider.exec(container_id, &config).await {
             Ok(_) => {
                 tracing::debug!("SSH daemon check/start completed");
                 Ok(())
@@ -363,6 +423,8 @@ fi
 
     /// Stop a container
     pub async fn stop(&self, id: &str) -> Result<()> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -382,7 +444,7 @@ fi
             CoreError::InvalidState("Container not created".to_string())
         })?;
 
-        self.provider
+        provider
             .stop(&ContainerId::new(container_id), Some(10))
             .await?;
 
@@ -408,12 +470,13 @@ fi
             )));
         }
 
-        // Remove the container if it exists
+        // Remove the container if it exists (only if we have a provider)
         if let Some(ref container_id) = container_state.container_id {
-            let _ = self
-                .provider
-                .remove(&ContainerId::new(container_id), force)
-                .await;
+            if let Some(ref provider) = self.provider {
+                let _ = provider
+                    .remove(&ContainerId::new(container_id), force)
+                    .await;
+            }
         }
 
         // Remove from state
@@ -428,6 +491,8 @@ fi
 
     /// Stop and remove the runtime container, but keep the state so it can be recreated with `up`
     pub async fn down(&self, id: &str) -> Result<()> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -439,8 +504,7 @@ fi
         // Stop if running
         if container_state.status == DevcContainerStatus::Running {
             if let Some(ref container_id) = container_state.container_id {
-                let _ = self
-                    .provider
+                let _ = provider
                     .stop(&ContainerId::new(container_id), Some(10))
                     .await;
             }
@@ -448,8 +512,7 @@ fi
 
         // Remove the runtime container if it exists
         if let Some(ref container_id) = container_state.container_id {
-            let _ = self
-                .provider
+            let _ = provider
                 .remove(&ContainerId::new(container_id), true)
                 .await;
         }
@@ -481,6 +544,10 @@ fi
     /// 3. Build image with optional --no-cache
     /// 4. Create and start the new container
     pub async fn rebuild(&self, id: &str, no_cache: bool) -> Result<()> {
+        let new_provider = self
+            .provider_type()
+            .ok_or_else(|| CoreError::NotConnected("Cannot rebuild: no provider available".to_string()))?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -490,7 +557,6 @@ fi
         };
 
         let old_provider = container_state.provider;
-        let new_provider = self.provider_type();
         let provider_changed = old_provider != new_provider;
 
         // 1. Stop and remove runtime container
@@ -537,6 +603,10 @@ fi
         no_cache: bool,
         progress: mpsc::UnboundedSender<String>,
     ) -> Result<()> {
+        let new_provider = self
+            .provider_type()
+            .ok_or_else(|| CoreError::NotConnected("Cannot rebuild: no provider available".to_string()))?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -546,7 +616,6 @@ fi
         };
 
         let old_provider = container_state.provider;
-        let new_provider = self.provider_type();
         let provider_changed = old_provider != new_provider;
 
         // 1. Stop and remove runtime container
@@ -593,6 +662,8 @@ fi
         no_cache: bool,
         progress: mpsc::UnboundedSender<String>,
     ) -> Result<String> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -644,8 +715,7 @@ fi
                         pull: true,
                     };
 
-                    let result = self
-                        .provider
+                    let result = provider
                         .build_with_progress(&build_config, progress.clone())
                         .await;
                     match result {
@@ -657,7 +727,7 @@ fi
                     }
                 } else {
                     let _ = progress.send(format!("Pulling image: {}", image));
-                    let result = self.provider.pull(&image).await;
+                    let result = provider.pull(&image).await;
                     match result {
                         Ok(id) => id.0,
                         Err(e) => {
@@ -684,8 +754,7 @@ fi
                     build_config.context = enhanced_ctx.context_path().to_path_buf();
                     build_config.dockerfile = enhanced_ctx.dockerfile_name().to_string();
 
-                    let result = self
-                        .provider
+                    let result = provider
                         .build_with_progress(&build_config, progress.clone())
                         .await;
                     match result {
@@ -701,8 +770,7 @@ fi
                         build_config.tag, no_cache
                     ));
 
-                    let result = self
-                        .provider
+                    let result = provider
                         .build_with_progress(&build_config, progress.clone())
                         .await;
                     match result {
@@ -743,6 +811,8 @@ fi
 
     /// Build, create, and start a container (full lifecycle)
     pub async fn up(&self, id: &str) -> Result<()> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -780,10 +850,10 @@ fi
         if container_state.status == DevcContainerStatus::Created {
             if let Some(ref cmd) = container.devcontainer.on_create_command {
                 // Start the container first for onCreate
-                self.provider.start(&container_id).await?;
+                provider.start(&container_id).await?;
 
                 run_lifecycle_command(
-                    self.provider.as_ref(),
+                    provider.as_ref(),
                     &container_id,
                     cmd,
                     container.devcontainer.effective_user(),
@@ -795,13 +865,13 @@ fi
             // Run postCreateCommand
             if let Some(ref cmd) = container.devcontainer.post_create_command {
                 // Ensure container is started
-                let details = self.provider.inspect(&container_id).await?;
+                let details = provider.inspect(&container_id).await?;
                 if details.status != ContainerStatus::Running {
-                    self.provider.start(&container_id).await?;
+                    provider.start(&container_id).await?;
                 }
 
                 run_lifecycle_command(
-                    self.provider.as_ref(),
+                    provider.as_ref(),
                     &container_id,
                     cmd,
                     container.devcontainer.effective_user(),
@@ -813,9 +883,9 @@ fi
             // Setup SSH if enabled (for proper TTY/resize support)
             if self.global_config.defaults.ssh_enabled.unwrap_or(true) {
                 // Ensure container is running for SSH setup
-                let details = self.provider.inspect(&container_id).await?;
+                let details = provider.inspect(&container_id).await?;
                 if details.status != ContainerStatus::Running {
-                    self.provider.start(&container_id).await?;
+                    provider.start(&container_id).await?;
                 }
 
                 let ssh_manager = SshManager::new()?;
@@ -823,7 +893,7 @@ fi
 
                 let user = container.devcontainer.effective_user();
                 match ssh_manager
-                    .setup_container(self.provider.as_ref(), &container_id, user)
+                    .setup_container(provider.as_ref(), &container_id, user)
                     .await
                 {
                     Ok(()) => {
@@ -862,7 +932,7 @@ fi
             if dotfiles_manager.is_configured() {
                 dotfiles_manager
                     .inject(
-                        self.provider.as_ref(),
+                        provider.as_ref(),
                         &container_id,
                         container.devcontainer.effective_user(),
                     )
@@ -871,7 +941,7 @@ fi
         }
 
         // Start if not running
-        let details = self.provider.inspect(&container_id).await?;
+        let details = provider.inspect(&container_id).await?;
         if details.status != ContainerStatus::Running {
             self.start(id).await?;
         } else {
@@ -892,6 +962,8 @@ fi
 
     /// Execute a command in a container
     pub async fn exec(&self, id: &str, cmd: Vec<String>, tty: bool) -> Result<i64> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -910,8 +982,7 @@ fi
         let container = Container::from_config(&container_state.config_path)?;
 
         let config = container.exec_config(cmd, tty, tty);
-        let result = self
-            .provider
+        let result = provider
             .exec(&ContainerId::new(container_id), &config)
             .await?;
 
@@ -927,6 +998,8 @@ fi
 
     /// Execute a command interactively with PTY
     pub async fn exec_interactive(&self, id: &str, cmd: Vec<String>) -> Result<ExecStream> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -945,8 +1018,7 @@ fi
         let container = Container::from_config(&container_state.config_path)?;
 
         let config = container.exec_config(cmd, true, true);
-        let stream = self
-            .provider
+        let stream = provider
             .exec_interactive(&ContainerId::new(container_id), &config)
             .await?;
 
@@ -962,6 +1034,8 @@ fi
 
     /// Open an interactive shell in a container
     pub async fn shell(&self, id: &str) -> Result<ExecStream> {
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -980,8 +1054,7 @@ fi
         let container = Container::from_config(&container_state.config_path)?;
 
         let config = container.shell_config();
-        let stream = self
-            .provider
+        let stream = provider
             .exec_interactive(&ContainerId::new(container_id), &config)
             .await?;
 
@@ -996,6 +1069,8 @@ fi
     }
 
     /// Sync container status with actual provider status
+    ///
+    /// If not connected to a provider, returns the current status without syncing.
     pub async fn sync_status(&self, id: &str) -> Result<DevcContainerStatus> {
         let container_state = {
             let state = self.state.read().await;
@@ -1005,8 +1080,14 @@ fi
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
+        // If no provider, just return current status
+        let provider = match self.provider.as_ref() {
+            Some(p) => p,
+            None => return Ok(container_state.status),
+        };
+
         let new_status = if let Some(ref container_id) = container_state.container_id {
-            match self.provider.inspect(&ContainerId::new(container_id)).await {
+            match provider.inspect(&ContainerId::new(container_id)).await {
                 Ok(details) => match details.status {
                     ContainerStatus::Running => DevcContainerStatus::Running,
                     ContainerStatus::Exited | ContainerStatus::Dead => DevcContainerStatus::Stopped,
@@ -1042,6 +1123,8 @@ fi
     pub async fn logs(&self, id: &str, tail: Option<u64>) -> Result<Vec<String>> {
         use tokio::io::AsyncBufReadExt;
 
+        let provider = self.require_provider()?;
+
         let container_state = {
             let state = self.state.read().await;
             state
@@ -1065,8 +1148,7 @@ fi
             until: None,
         };
 
-        let log_stream = self
-            .provider
+        let log_stream = provider
             .logs(&ContainerId::new(container_id), &config)
             .await?;
 
@@ -1095,7 +1177,8 @@ fi
     /// Discover all devcontainers from the current provider
     /// Includes containers not managed by devc (e.g., VS Code-created)
     pub async fn discover(&self) -> Result<Vec<DiscoveredContainer>> {
-        self.provider.discover_devcontainers().await.map_err(Into::into)
+        let provider = self.require_provider()?;
+        provider.discover_devcontainers().await.map_err(Into::into)
     }
 
     /// Adopt an existing devcontainer into devc management
@@ -1105,9 +1188,13 @@ fi
         container_id: &str,
         workspace_path: Option<&str>,
     ) -> Result<ContainerState> {
+        let provider = self.require_provider()?;
+        let provider_type = self
+            .provider_type()
+            .ok_or_else(|| CoreError::NotConnected("Cannot adopt: no provider available".to_string()))?;
+
         // Inspect the container to get details
-        let details = self
-            .provider
+        let details = provider
             .inspect(&ContainerId::new(container_id))
             .await?;
 
@@ -1156,7 +1243,7 @@ fi
         // Create state entry
         let mut container_state = ContainerState::new(
             name,
-            self.provider_type(),
+            provider_type,
             config_path,
             workspace,
         );

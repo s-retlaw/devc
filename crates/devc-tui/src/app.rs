@@ -6,12 +6,12 @@ use crate::ui;
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
 use devc_core::{ContainerManager, ContainerState, DevcContainerStatus};
-use devc_provider::ProviderType;
+use devc_provider::{create_provider, ProviderType};
 use ratatui::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -108,20 +108,22 @@ pub struct ProviderStatus {
 
 /// Application state
 pub struct App {
-    /// Container manager (wrapped in Arc for sharing with background tasks)
-    pub manager: Arc<ContainerManager>,
+    /// Container manager (wrapped in Arc<RwLock> for reconnection support)
+    pub manager: Arc<RwLock<ContainerManager>>,
     /// Global configuration
     pub config: GlobalConfig,
     /// Current tab
     pub tab: Tab,
     /// Current view within the tab
     pub view: View,
-    /// Active provider type (for new containers)
-    pub active_provider: ProviderType,
+    /// Active provider type (for new containers), None if disconnected
+    pub active_provider: Option<ProviderType>,
     /// Provider statuses
     pub providers: Vec<ProviderStatus>,
     /// Selected provider index (in Providers tab)
     pub selected_provider: usize,
+    /// Connection error message (if disconnected)
+    pub connection_error: Option<String>,
     /// List of containers
     pub containers: Vec<ContainerState>,
     /// Currently selected container index
@@ -164,6 +166,7 @@ impl App {
         let containers = manager.list().await?;
         let config = GlobalConfig::load().unwrap_or_default();
         let active_provider = manager.provider_type();
+        let connection_error = manager.connection_error().map(|s| s.to_string());
         let settings_state = SettingsState::new(&config);
 
         // Build provider status list
@@ -172,26 +175,27 @@ impl App {
                 provider_type: ProviderType::Podman,
                 name: "Podman".to_string(),
                 socket: config.providers.podman.socket.clone(),
-                connected: active_provider == ProviderType::Podman,
-                is_active: active_provider == ProviderType::Podman,
+                connected: active_provider == Some(ProviderType::Podman),
+                is_active: active_provider == Some(ProviderType::Podman),
             },
             ProviderStatus {
                 provider_type: ProviderType::Docker,
                 name: "Docker".to_string(),
                 socket: config.providers.docker.socket.clone(),
-                connected: active_provider == ProviderType::Docker,
-                is_active: active_provider == ProviderType::Docker,
+                connected: active_provider == Some(ProviderType::Docker),
+                is_active: active_provider == Some(ProviderType::Docker),
             },
         ];
 
         Ok(Self {
-            manager: Arc::new(manager),
+            manager: Arc::new(RwLock::new(manager)),
             config,
             tab: Tab::Containers,
             view: View::Main,
             active_provider,
             providers,
-            selected_provider: if active_provider == ProviderType::Podman { 0 } else { 1 },
+            selected_provider: if active_provider == Some(ProviderType::Podman) { 0 } else { 1 },
+            connection_error,
             containers,
             selected: 0,
             build_output: Vec::new(),
@@ -210,6 +214,11 @@ impl App {
             settings_state,
             provider_detail_state: ProviderDetailState::new(),
         })
+    }
+
+    /// Check if connected to a container provider
+    pub fn is_connected(&self) -> bool {
+        self.active_provider.is_some()
     }
 
     /// Run the application main loop
@@ -531,10 +540,10 @@ impl App {
                 self.status_message = Some("Refreshed".to_string());
             }
             KeyCode::Char('R') => {
-                if !self.containers.is_empty() {
+                if !self.containers.is_empty() && self.is_connected() {
                     let container = &self.containers[self.selected];
                     let old_provider = container.provider;
-                    let new_provider = self.active_provider;
+                    let new_provider = self.active_provider.unwrap(); // Safe: checked is_connected
                     let provider_change = if old_provider != new_provider {
                         Some((old_provider, new_provider))
                     } else {
@@ -548,6 +557,8 @@ impl App {
                         provider_change,
                     });
                     self.view = View::Confirm;
+                } else if !self.is_connected() {
+                    self.status_message = Some("Not connected to provider".to_string());
                 }
             }
 
@@ -596,7 +607,7 @@ impl App {
                     for p in &mut self.providers {
                         p.is_active = p.provider_type == new_provider;
                     }
-                    self.active_provider = new_provider;
+                    self.active_provider = Some(new_provider);
 
                     // Update config
                     self.config.defaults.provider = match new_provider {
@@ -617,6 +628,13 @@ impl App {
                     self.status_message = Some(format!("Failed to save: {}", e));
                 } else {
                     self.status_message = Some("Provider settings saved".to_string());
+                }
+            }
+
+            // Retry connection
+            KeyCode::Char('c') => {
+                if !self.is_connected() {
+                    self.retry_connection().await?;
                 }
             }
 
@@ -689,7 +707,7 @@ impl App {
 
                     if socket_exists {
                         // Try to list containers as a connectivity test
-                        match self.manager.list().await {
+                        match self.manager.read().await.list().await {
                             Ok(_) => {
                                 self.provider_detail_state.set_connection_result(true, None);
                                 self.providers[self.selected_provider].connected = true;
@@ -717,7 +735,7 @@ impl App {
                     for p in &mut self.providers {
                         p.is_active = p.provider_type == new_provider;
                     }
-                    self.active_provider = new_provider;
+                    self.active_provider = Some(new_provider);
 
                     self.config.defaults.provider = match new_provider {
                         ProviderType::Docker => "docker".to_string(),
@@ -825,10 +843,10 @@ impl App {
                 self.fetch_logs().await?;
             }
             KeyCode::Char('R') => {
-                if !self.containers.is_empty() {
+                if !self.containers.is_empty() && self.is_connected() {
                     let container = &self.containers[self.selected];
                     let old_provider = container.provider;
-                    let new_provider = self.active_provider;
+                    let new_provider = self.active_provider.unwrap(); // Safe: checked is_connected
                     let provider_change = if old_provider != new_provider {
                         Some((old_provider, new_provider))
                     } else {
@@ -842,6 +860,8 @@ impl App {
                         provider_change,
                     });
                     self.view = View::Confirm;
+                } else if !self.is_connected() {
+                    self.status_message = Some("Not connected to provider".to_string());
                 }
             }
             _ => {}
@@ -938,15 +958,15 @@ impl App {
 
     /// Refresh container list
     async fn refresh_containers(&mut self) -> AppResult<()> {
-        self.containers = self.manager.list().await?;
+        self.containers = self.manager.read().await.list().await?;
 
         // Sync status for all containers
         for container in &self.containers {
-            let _ = self.manager.sync_status(&container.id).await;
+            let _ = self.manager.read().await.sync_status(&container.id).await;
         }
 
         // Re-fetch after sync
-        self.containers = self.manager.list().await?;
+        self.containers = self.manager.read().await.list().await?;
 
         // Ensure selected index is valid
         if !self.containers.is_empty() && self.selected >= self.containers.len() {
@@ -969,7 +989,7 @@ impl App {
         self.build_output.clear();
         self.build_output.push(format!("Building container: {}", container.name));
 
-        match self.manager.build(&container.id).await {
+        match self.manager.read().await.build(&container.id).await {
             Ok(image_id) => {
                 self.build_output.push(format!("Built image: {}", image_id));
                 self.status_message = Some(format!("Built {}", container.name));
@@ -997,7 +1017,7 @@ impl App {
         match container.status {
             DevcContainerStatus::Running => {
                 self.status_message = Some(format!("Stopping {}...", container.name));
-                match self.manager.stop(&container.id).await {
+                match self.manager.read().await.stop(&container.id).await {
                     Ok(()) => {
                         self.status_message = Some(format!("Stopped {}", container.name));
                     }
@@ -1008,7 +1028,7 @@ impl App {
             }
             DevcContainerStatus::Stopped | DevcContainerStatus::Created => {
                 self.status_message = Some(format!("Starting {}...", container.name));
-                match self.manager.start(&container.id).await {
+                match self.manager.read().await.start(&container.id).await {
                     Ok(()) => {
                         self.status_message = Some(format!("Started {}", container.name));
                     }
@@ -1040,7 +1060,7 @@ impl App {
         self.build_output.clear();
         self.build_output.push(format!("Starting container: {}", container.name));
 
-        match self.manager.up(&container.id).await {
+        match self.manager.read().await.up(&container.id).await {
             Ok(()) => {
                 self.build_output.push("Container is running".to_string());
                 self.status_message = Some(format!("{} is running", container.name));
@@ -1072,7 +1092,7 @@ impl App {
         self.status_message = Some(format!("Loading logs for {}...", container.name));
         self.loading = true;
 
-        match self.manager.logs(&container.id, Some(1000)).await {
+        match self.manager.read().await.logs(&container.id, Some(1000)).await {
             Ok(lines) => {
                 self.logs = lines;
                 self.logs_scroll = self.logs.len().saturating_sub(1);
@@ -1093,7 +1113,7 @@ impl App {
         match action {
             ConfirmAction::Delete(id) => {
                 self.loading = true;
-                match self.manager.remove(&id, true).await {
+                match self.manager.read().await.remove(&id, true).await {
                     Ok(()) => {
                         self.status_message = Some("Container deleted".to_string());
                     }
@@ -1106,7 +1126,7 @@ impl App {
             }
             ConfirmAction::Stop(id) => {
                 self.loading = true;
-                match self.manager.stop(&id).await {
+                match self.manager.read().await.stop(&id).await {
                     Ok(()) => {
                         self.status_message = Some("Container stopped".to_string());
                     }
@@ -1137,7 +1157,7 @@ impl App {
                 // Spawn background task for rebuild
                 tokio::spawn(async move {
                     let _ = tx.send("Starting rebuild...".to_string());
-                    match manager.rebuild_with_progress(&id, no_cache, tx.clone()).await {
+                    match manager.read().await.rebuild_with_progress(&id, no_cache, tx.clone()).await {
                         Ok(()) => {
                             // Success message is sent by rebuild_with_progress
                         }
@@ -1154,5 +1174,45 @@ impl App {
     /// Get the currently selected container
     pub fn selected_container(&self) -> Option<&ContainerState> {
         self.containers.get(self.selected)
+    }
+
+    /// Retry connection to the selected provider
+    async fn retry_connection(&mut self) -> AppResult<()> {
+        self.status_message = Some("Attempting to connect...".to_string());
+
+        // Get the provider type from the selected provider
+        let provider_type = self.providers[self.selected_provider].provider_type;
+
+        // Try to create the provider
+        match create_provider(provider_type, &self.config).await {
+            Ok(provider) => {
+                // Successfully connected - update the manager
+                {
+                    let mut manager = self.manager.write().await;
+                    manager.connect(provider);
+                }
+
+                // Update app state
+                self.active_provider = Some(provider_type);
+                self.connection_error = None;
+
+                // Update provider status
+                for p in &mut self.providers {
+                    p.connected = p.provider_type == provider_type;
+                    p.is_active = p.provider_type == provider_type;
+                }
+
+                // Refresh container list
+                self.containers = self.manager.read().await.list().await?;
+
+                self.status_message = Some(format!("Connected to {}", provider_type));
+            }
+            Err(e) => {
+                self.connection_error = Some(e.to_string());
+                self.status_message = Some(format!("Connection failed: {}", e));
+            }
+        }
+
+        Ok(())
     }
 }
