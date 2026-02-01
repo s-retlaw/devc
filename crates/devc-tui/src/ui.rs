@@ -1,5 +1,6 @@
 //! UI rendering for the TUI application
 
+use ansi_to_tui::IntoText;
 use crate::app::{App, ConfirmAction, Tab, View};
 use crate::settings::{SettingsField, SettingsSection};
 use devc_core::DevcContainerStatus;
@@ -607,6 +608,7 @@ fn draw_build_output(frame: &mut Frame, app: &App, area: Rect) {
         app.build_output_scroll
     };
 
+    // Build text lines using ansi-to-tui for proper ANSI handling
     let text: Vec<Line> = app
         .build_output
         .iter()
@@ -614,13 +616,31 @@ fn draw_build_output(frame: &mut Frame, app: &App, area: Rect) {
         .skip(scroll)
         .take(inner_height)
         .map(|(i, line)| {
-            Line::from(vec![
-                Span::styled(
-                    format!("{:>4} ", i + 1),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(line.as_str()),
-            ])
+            // Replace carriage returns with nothing (they cause in-place overwrites)
+            // ansi-to-tui handles ANSI escape sequences properly
+            let clean_line = line.replace('\r', "");
+
+            // Convert ANSI to ratatui spans, preserving colors
+            let line_num = Span::styled(
+                format!("{:>4} ", i + 1),
+                Style::default().fg(Color::DarkGray),
+            );
+
+            // Use ansi-to-tui to parse the line content
+            match clean_line.into_text() {
+                Ok(text) => {
+                    // Combine line number with parsed content
+                    let mut spans = vec![line_num];
+                    if let Some(first_line) = text.lines.into_iter().next() {
+                        spans.extend(first_line.spans);
+                    }
+                    Line::from(spans)
+                }
+                Err(_) => {
+                    // Fallback to raw text if parsing fails
+                    Line::from(vec![line_num, Span::raw(clean_line)])
+                }
+            }
         })
         .collect();
 
