@@ -112,12 +112,18 @@ async fn ssh_via_dropbear(state: &ContainerState) -> Result<std::process::ExitSt
     let key_path_str = key_path.to_str()
         .ok_or_else(|| anyhow!("SSH key path contains invalid UTF-8"))?;
 
+    // Get terminal environment from host to pass through
+    let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+    let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "truecolor".to_string());
+
     let status = std::process::Command::new("ssh")
         .args([
             "-o", &format!("ProxyCommand={}", proxy_cmd),
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "LogLevel=ERROR",
+            // Pass through terminal and locale settings for proper rendering
+            "-o", &format!("SetEnv=TERM={} COLORTERM={} LANG=C.UTF-8 LC_ALL=C.UTF-8", term, colorterm),
             "-i", key_path_str,
             "-t",  // Force PTY allocation
             &format!("{}@localhost", user),

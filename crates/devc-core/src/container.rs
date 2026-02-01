@@ -262,8 +262,13 @@ impl Container {
             env.extend(container_env.clone());
         }
 
-        // Add default environment variables
+        // Add default environment variables for terminal support
         env.insert("TERM".to_string(), "xterm-256color".to_string());
+        // Enable 24-bit true color support (needed by nvim, tmux, etc.)
+        env.insert("COLORTERM".to_string(), "truecolor".to_string());
+        // Set UTF-8 locale for proper Unicode rendering (box-drawing chars, etc.)
+        env.insert("LANG".to_string(), "C.UTF-8".to_string());
+        env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
 
         // Build labels
         let mut labels = HashMap::new();
@@ -325,6 +330,11 @@ impl Container {
             env.extend(container_env.clone());
         }
         env.insert("TERM".to_string(), "xterm-256color".to_string());
+        // Enable 24-bit true color support (needed by nvim, tmux, etc.)
+        env.insert("COLORTERM".to_string(), "truecolor".to_string());
+        // Set UTF-8 locale for proper Unicode rendering (box-drawing chars, etc.)
+        env.insert("LANG".to_string(), "C.UTF-8".to_string());
+        env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
 
         ExecConfig {
             cmd,
