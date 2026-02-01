@@ -122,6 +122,41 @@ pub async fn create_provider(
     }
 }
 
+/// Test if a specific provider is available and responsive
+/// Returns Ok(true) if connected, Ok(false) if not available, Err on unexpected error
+pub async fn test_provider_connectivity(
+    provider_type: ProviderType,
+    config: &devc_config::GlobalConfig,
+) -> Result<bool> {
+    match create_provider(provider_type, config).await {
+        Ok(provider) => {
+            match provider.ping().await {
+                Ok(()) => Ok(true),
+                Err(_) => Ok(false),
+            }
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+/// Detect which providers are available on the system
+/// Returns a list of (ProviderType, is_available) pairs
+/// Tests Docker first, then Podman
+pub async fn detect_available_providers(
+    config: &devc_config::GlobalConfig,
+) -> Vec<(ProviderType, bool)> {
+    // Test both providers in parallel
+    let (docker_result, podman_result) = tokio::join!(
+        test_provider_connectivity(ProviderType::Docker, config),
+        test_provider_connectivity(ProviderType::Podman, config)
+    );
+
+    vec![
+        (ProviderType::Docker, docker_result.unwrap_or(false)),
+        (ProviderType::Podman, podman_result.unwrap_or(false)),
+    ]
+}
+
 /// Check if we're running inside a Fedora Toolbox or similar container
 #[cfg(target_os = "linux")]
 fn is_in_toolbox() -> bool {
@@ -130,6 +165,7 @@ fn is_in_toolbox() -> bool {
 
 /// Create the default provider based on global config
 /// Auto-detects Toolbox environment and uses host podman if needed
+/// If provider is not configured (empty), auto-detects by trying Docker first, then Podman
 pub async fn create_default_provider(
     config: &devc_config::GlobalConfig,
 ) -> Result<Box<dyn ContainerProvider>> {
@@ -145,10 +181,31 @@ pub async fn create_default_provider(
         }
     }
 
-    // Try configured provider
+    // Determine provider type - auto-detect if empty
     let provider_type = match config.defaults.provider.as_str() {
         "podman" => ProviderType::Podman,
-        _ => ProviderType::Docker,
+        "docker" => ProviderType::Docker,
+        "" => {
+            // Auto-detect: try Docker first (more common on Windows/Mac), then Podman
+            tracing::info!("No provider configured, auto-detecting...");
+            let available = detect_available_providers(config).await;
+
+            // Find first available provider (Docker is first in list)
+            let detected = available.iter().find(|(_, available)| *available);
+
+            match detected {
+                Some((provider_type, _)) => {
+                    tracing::info!("Auto-detected provider: {}", provider_type);
+                    *provider_type
+                }
+                None => {
+                    // Neither available, default to Docker for better error messages
+                    tracing::warn!("No providers detected, defaulting to Docker");
+                    ProviderType::Docker
+                }
+            }
+        }
+        _ => ProviderType::Docker, // Unknown provider, default to Docker
     };
 
     let socket_path = match provider_type {

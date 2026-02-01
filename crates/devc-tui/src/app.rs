@@ -6,7 +6,7 @@ use crate::ui;
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
 use devc_core::{ContainerManager, ContainerState, DevcContainerStatus};
-use devc_provider::{create_provider, ProviderType};
+use devc_provider::{create_provider, detect_available_providers, ProviderType};
 use ratatui::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,6 +82,8 @@ pub enum ConfirmAction {
         id: String,
         provider_change: Option<(ProviderType, ProviderType)>, // (old, new)
     },
+    /// Set a provider as the default and save to config
+    SetDefaultProvider(ProviderType),
 }
 
 /// Dialog focus state for keyboard navigation
@@ -169,21 +171,33 @@ impl App {
         let connection_error = manager.connection_error().map(|s| s.to_string());
         let settings_state = SettingsState::new(&config);
 
-        // Build provider status list
+        // Test all providers at startup to show accurate connection status
+        let available_providers = detect_available_providers(&config).await;
+        let docker_connected = available_providers.iter()
+            .find(|(t, _)| *t == ProviderType::Docker)
+            .map(|(_, connected)| *connected)
+            .unwrap_or(false);
+        let podman_connected = available_providers.iter()
+            .find(|(t, _)| *t == ProviderType::Podman)
+            .map(|(_, connected)| *connected)
+            .unwrap_or(false);
+
+        // Build provider status list with accurate connection status
+        // Put Docker first (more common on Windows/Mac)
         let providers = vec![
-            ProviderStatus {
-                provider_type: ProviderType::Podman,
-                name: "Podman".to_string(),
-                socket: config.providers.podman.socket.clone(),
-                connected: active_provider == Some(ProviderType::Podman),
-                is_active: active_provider == Some(ProviderType::Podman),
-            },
             ProviderStatus {
                 provider_type: ProviderType::Docker,
                 name: "Docker".to_string(),
                 socket: config.providers.docker.socket.clone(),
-                connected: active_provider == Some(ProviderType::Docker),
+                connected: docker_connected,
                 is_active: active_provider == Some(ProviderType::Docker),
+            },
+            ProviderStatus {
+                provider_type: ProviderType::Podman,
+                name: "Podman".to_string(),
+                socket: config.providers.podman.socket.clone(),
+                connected: podman_connected,
+                is_active: active_provider == Some(ProviderType::Podman),
             },
         ];
 
@@ -194,7 +208,7 @@ impl App {
             view: View::Main,
             active_provider,
             providers,
-            selected_provider: if active_provider == Some(ProviderType::Podman) { 0 } else { 1 },
+            selected_provider: if active_provider == Some(ProviderType::Podman) { 1 } else { 0 },
             connection_error,
             containers,
             selected: 0,
@@ -597,32 +611,20 @@ impl App {
                 }
             }
 
-            // Set as active provider (quick toggle)
+            // Set as active provider - show confirmation dialog
             KeyCode::Char(' ') | KeyCode::Char('a') => {
                 if !self.providers.is_empty() {
                     let new_provider = self.providers[self.selected_provider].provider_type;
-                    let provider_name = self.providers[self.selected_provider].name.clone();
-
-                    // Update active status
-                    for p in &mut self.providers {
-                        p.is_active = p.provider_type == new_provider;
+                    // Only show confirmation if it's a different provider
+                    if self.active_provider != Some(new_provider) {
+                        self.dialog_focus = DialogFocus::Confirm;
+                        self.confirm_action = Some(ConfirmAction::SetDefaultProvider(new_provider));
+                        self.view = View::Confirm;
                     }
-                    self.active_provider = Some(new_provider);
-
-                    // Update config
-                    self.config.defaults.provider = match new_provider {
-                        ProviderType::Docker => "docker".to_string(),
-                        ProviderType::Podman => "podman".to_string(),
-                    };
-
-                    self.status_message = Some(format!(
-                        "Active provider set to {}. Press 's' to save.",
-                        provider_name
-                    ));
                 }
             }
 
-            // Save changes
+            // Save changes (for socket path edits)
             KeyCode::Char('s') => {
                 if let Err(e) = self.config.save() {
                     self.status_message = Some(format!("Failed to save: {}", e));
@@ -727,22 +729,15 @@ impl App {
                     }
                 }
 
-                // Set as active provider
+                // Set as active provider - show confirmation dialog
                 KeyCode::Char('a') | KeyCode::Char(' ') => {
                     let new_provider = self.providers[self.selected_provider].provider_type;
-                    let provider_name = self.providers[self.selected_provider].name.clone();
-
-                    for p in &mut self.providers {
-                        p.is_active = p.provider_type == new_provider;
+                    // Only show confirmation if it's a different provider
+                    if self.active_provider != Some(new_provider) {
+                        self.dialog_focus = DialogFocus::Confirm;
+                        self.confirm_action = Some(ConfirmAction::SetDefaultProvider(new_provider));
+                        self.view = View::Confirm;
                     }
-                    self.active_provider = Some(new_provider);
-
-                    self.config.defaults.provider = match new_provider {
-                        ProviderType::Docker => "docker".to_string(),
-                        ProviderType::Podman => "podman".to_string(),
-                    };
-
-                    self.status_message = Some(format!("{} set as active. Press 's' to save.", provider_name));
                 }
 
                 // Save changes
@@ -1166,6 +1161,34 @@ impl App {
                         }
                     }
                 });
+            }
+            ConfirmAction::SetDefaultProvider(new_provider) => {
+                let provider_name = match new_provider {
+                    ProviderType::Docker => "Docker",
+                    ProviderType::Podman => "Podman",
+                };
+
+                // Update active status in providers list
+                for p in &mut self.providers {
+                    p.is_active = p.provider_type == new_provider;
+                }
+                self.active_provider = Some(new_provider);
+
+                // Update config
+                self.config.defaults.provider = match new_provider {
+                    ProviderType::Docker => "docker".to_string(),
+                    ProviderType::Podman => "podman".to_string(),
+                };
+
+                // Save immediately
+                if let Err(e) = self.config.save() {
+                    self.status_message = Some(format!("Failed to save: {}", e));
+                } else {
+                    self.status_message = Some(format!("{} set as default provider", provider_name));
+
+                    // Try to reconnect with the new provider
+                    self.retry_connection().await?;
+                }
             }
         }
         Ok(())

@@ -4,10 +4,11 @@ mod commands;
 mod selector;
 
 use clap::{Parser, Subcommand};
+use dialoguer::{theme::ColorfulTheme, Select};
 use selector::{select_container, SelectionContext};
 use devc_config::GlobalConfig;
 use devc_core::ContainerManager;
-use devc_provider::{create_default_provider, create_provider, ProviderType};
+use devc_provider::{create_default_provider, create_provider, detect_available_providers, ProviderType};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser)]
@@ -164,12 +165,28 @@ async fn run() -> anyhow::Result<()> {
         .init();
 
     // Load global config
-    let config = GlobalConfig::load().unwrap_or_default();
+    let mut config = GlobalConfig::load().unwrap_or_default();
 
     // Handle config command separately (doesn't need provider)
     if let Some(Commands::Config { edit }) = &cli.command {
         commands::config(*edit).await?;
         return Ok(());
+    }
+
+    // First-run provider detection - only for CLI commands, not TUI
+    // TUI handles provider selection itself with better UI
+    if config.is_first_run() && !cli.demo && cli.provider.is_none() && cli.command.is_some() {
+        if let Some(selected) = detect_and_select_provider(&config).await? {
+            config.defaults.provider = match selected {
+                ProviderType::Docker => "docker".to_string(),
+                ProviderType::Podman => "podman".to_string(),
+            };
+            if let Err(e) = config.save() {
+                eprintln!("Warning: Could not save provider selection: {}", e);
+            } else {
+                eprintln!("Provider '{}' saved to config", config.defaults.provider);
+            }
+        }
     }
 
     // Demo mode - run TUI without container runtime
@@ -320,4 +337,61 @@ async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Detect available providers and prompt user to select one if multiple are available
+async fn detect_and_select_provider(config: &GlobalConfig) -> anyhow::Result<Option<ProviderType>> {
+    eprintln!("First run detected - checking for container providers...");
+
+    let available = detect_available_providers(config).await;
+
+    let docker_available = available.iter()
+        .find(|(t, _)| *t == ProviderType::Docker)
+        .map(|(_, a)| *a)
+        .unwrap_or(false);
+    let podman_available = available.iter()
+        .find(|(t, _)| *t == ProviderType::Podman)
+        .map(|(_, a)| *a)
+        .unwrap_or(false);
+
+    match (docker_available, podman_available) {
+        (false, false) => {
+            eprintln!("No container providers detected.");
+            eprintln!("Please install Docker or Podman and try again.");
+            Ok(None)
+        }
+        (true, false) => {
+            eprintln!("Auto-selected Docker (only available provider)");
+            Ok(Some(ProviderType::Docker))
+        }
+        (false, true) => {
+            eprintln!("Auto-selected Podman (only available provider)");
+            Ok(Some(ProviderType::Podman))
+        }
+        (true, true) => {
+            // Both available - prompt user to choose
+            eprintln!("Both Docker and Podman are available.");
+
+            // Check if we're in a terminal that supports interactive selection
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                let items = vec!["Docker (recommended)", "Podman"];
+                let selection = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Select your preferred container provider")
+                    .items(&items)
+                    .default(0)
+                    .interact()?;
+
+                let provider = if selection == 0 {
+                    ProviderType::Docker
+                } else {
+                    ProviderType::Podman
+                };
+                Ok(Some(provider))
+            } else {
+                // Non-interactive, default to Docker
+                eprintln!("Non-interactive mode - defaulting to Docker");
+                Ok(Some(ProviderType::Docker))
+            }
+        }
+    }
 }

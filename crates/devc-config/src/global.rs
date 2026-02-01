@@ -48,7 +48,7 @@ pub struct DefaultsConfig {
 impl Default for DefaultsConfig {
     fn default() -> Self {
         Self {
-            provider: "podman".to_string(),
+            provider: String::new(), // Empty means auto-detect on first run
             dotfiles_repo: None,
             dotfiles_local: None,
             shell: "/bin/bash".to_string(),
@@ -208,6 +208,18 @@ impl GlobalConfig {
         let dirs = ProjectDirs::from("", "", "devc").ok_or(ConfigError::NoDataDir)?;
         Ok(dirs.cache_dir().to_path_buf())
     }
+
+    /// Check if this is the first run (no config file exists or provider is empty)
+    pub fn is_first_run(&self) -> bool {
+        self.defaults.provider.is_empty()
+    }
+
+    /// Check if the config file exists on disk
+    pub fn config_exists() -> bool {
+        Self::config_path()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -217,8 +229,9 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = GlobalConfig::default();
-        assert_eq!(config.defaults.provider, "podman");
+        assert!(config.defaults.provider.is_empty(), "Provider should be empty for auto-detection");
         assert_eq!(config.defaults.shell, "/bin/bash");
+        assert!(config.is_first_run(), "Default config should be first run");
     }
 
     #[test]

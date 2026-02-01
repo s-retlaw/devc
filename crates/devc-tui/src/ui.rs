@@ -884,6 +884,13 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or(id);
             draw_rebuild_confirm_dialog(frame, app, area, name, provider_change.as_ref());
         }
+        Some(ConfirmAction::SetDefaultProvider(provider_type)) => {
+            let provider_name = match provider_type {
+                devc_provider::ProviderType::Docker => "Docker",
+                devc_provider::ProviderType::Podman => "Podman",
+            };
+            draw_set_provider_confirm_dialog(frame, app, area, provider_name);
+        }
         None => {}
     }
 }
@@ -935,6 +942,62 @@ fn draw_simple_confirm_dialog(frame: &mut Frame, app: &App, area: Rect, message:
             .title(" Confirm ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow)),
+    );
+
+    frame.render_widget(dialog, dialog_area);
+}
+
+/// Draw the set default provider confirmation dialog
+fn draw_set_provider_confirm_dialog(frame: &mut Frame, app: &App, area: Rect, provider_name: &str) {
+    let dialog_width = 55;
+    let dialog_height = 10;
+    let dialog_area = Rect {
+        x: (area.width.saturating_sub(dialog_width)) / 2,
+        y: (area.height.saturating_sub(dialog_height)) / 2,
+        width: dialog_width.min(area.width),
+        height: dialog_height.min(area.height),
+    };
+
+    frame.render_widget(Clear, dialog_area);
+
+    // Button styles based on focus
+    let confirm_style = if app.dialog_focus == DialogFocus::Confirm {
+        Style::default().bg(Color::Green).fg(Color::Black).bold()
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let cancel_style = if app.dialog_focus == DialogFocus::Cancel {
+        Style::default().bg(Color::Red).fg(Color::White).bold()
+    } else {
+        Style::default().fg(Color::Red)
+    };
+
+    let dialog = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(format!("Set {} as default provider?", provider_name)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "This will save the setting and reconnect.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Confirm  ", confirm_style),
+            Span::raw("    "),
+            Span::styled("  Cancel  ", cancel_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Tab: Switch  Enter: Select  Esc: Cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ])
+    .alignment(Alignment::Center)
+    .block(
+        Block::default()
+            .title(" Set Default Provider ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
     );
 
     frame.render_widget(dialog, dialog_area);
