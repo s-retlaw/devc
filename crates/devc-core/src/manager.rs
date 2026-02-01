@@ -6,7 +6,8 @@ use crate::{
 };
 use devc_config::{GlobalConfig, ImageSource};
 use devc_provider::{
-    ContainerId, ContainerProvider, ContainerStatus, ExecStream, LogConfig, ProviderType,
+    ContainerId, ContainerProvider, ContainerStatus, DiscoveredContainer, ExecStream, LogConfig,
+    ProviderType,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -821,4 +822,103 @@ fi
         state.save()?;
         Ok(())
     }
+
+    /// Discover all devcontainers from the current provider
+    /// Includes containers not managed by devc (e.g., VS Code-created)
+    pub async fn discover(&self) -> Result<Vec<DiscoveredContainer>> {
+        self.provider.discover_devcontainers().await.map_err(Into::into)
+    }
+
+    /// Adopt an existing devcontainer into devc management
+    /// This creates a state entry for a container that was created outside devc
+    pub async fn adopt(
+        &self,
+        container_id: &str,
+        workspace_path: Option<&str>,
+    ) -> Result<ContainerState> {
+        // Inspect the container to get details
+        let details = self
+            .provider
+            .inspect(&ContainerId::new(container_id))
+            .await?;
+
+        // Determine workspace path
+        let workspace = if let Some(path) = workspace_path {
+            std::path::PathBuf::from(path)
+        } else {
+            // Try to detect from mounts or labels
+            let from_labels = details.labels.get("devcontainer.local_folder");
+            if let Some(path) = from_labels {
+                std::path::PathBuf::from(path)
+            } else {
+                // Fall back to current directory
+                std::env::current_dir()?
+            }
+        };
+
+        // Find devcontainer.json if it exists
+        let config_path = find_devcontainer_config(&workspace)?;
+
+        // Determine container name
+        let name = if !details.name.is_empty() {
+            details.name.clone()
+        } else {
+            workspace
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "adopted".to_string())
+        };
+
+        // Check if already managed
+        let state = self.state.read().await;
+        if let Some(existing) = state.find_by_name(&name) {
+            return Err(CoreError::ContainerExists(existing.name.clone()));
+        }
+        drop(state);
+
+        // Determine status from container status
+        let status = match details.status {
+            ContainerStatus::Running => DevcContainerStatus::Running,
+            ContainerStatus::Exited | ContainerStatus::Dead => DevcContainerStatus::Stopped,
+            ContainerStatus::Created | ContainerStatus::Paused => DevcContainerStatus::Created,
+            _ => DevcContainerStatus::Stopped,
+        };
+
+        // Create state entry
+        let mut container_state = ContainerState::new(
+            name,
+            self.provider_type(),
+            config_path,
+            workspace,
+        );
+        container_state.container_id = Some(container_id.to_string());
+        container_state.image_id = Some(details.image_id.clone());
+        container_state.status = status;
+
+        // Save state
+        {
+            let mut state = self.state.write().await;
+            state.add(container_state.clone());
+            state.save()?;
+        }
+
+        Ok(container_state)
+    }
+}
+
+/// Find devcontainer.json config file in a workspace
+fn find_devcontainer_config(workspace: &std::path::Path) -> Result<std::path::PathBuf> {
+    // Check standard locations
+    let devcontainer_dir = workspace.join(".devcontainer/devcontainer.json");
+    if devcontainer_dir.exists() {
+        return Ok(devcontainer_dir);
+    }
+
+    let devcontainer_root = workspace.join(".devcontainer.json");
+    if devcontainer_root.exists() {
+        return Ok(devcontainer_root);
+    }
+
+    // If not found, return a default path (will be created later if needed)
+    Ok(devcontainer_dir)
 }

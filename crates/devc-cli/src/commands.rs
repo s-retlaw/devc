@@ -319,7 +319,19 @@ pub async fn remove(manager: &ContainerManager, container: &str, force: bool) ->
 }
 
 /// List containers
-pub async fn list(manager: &ContainerManager) -> Result<()> {
+pub async fn list(manager: &ContainerManager, discover: bool, sync: bool) -> Result<()> {
+    if discover {
+        return list_discovered(manager).await;
+    }
+
+    if sync {
+        // Sync all managed containers first
+        let containers = manager.list().await?;
+        for container in &containers {
+            let _ = manager.sync_status(&container.id).await;
+        }
+    }
+
     let containers = manager.list().await?;
 
     if containers.is_empty() {
@@ -373,6 +385,71 @@ pub async fn list(manager: &ContainerManager) -> Result<()> {
             workspace
         );
     }
+
+    Ok(())
+}
+
+/// List discovered devcontainers from all providers
+async fn list_discovered(manager: &ContainerManager) -> Result<()> {
+    use devc_provider::DevcontainerSource;
+
+    let discovered = manager.discover().await?;
+
+    if discovered.is_empty() {
+        println!("No devcontainers found.");
+        println!("\nTip: Create a devcontainer with VS Code or run 'devc init' to get started.");
+        return Ok(());
+    }
+
+    // Column widths
+    const NAME_WIDTH: usize = 26;
+    const STATUS_WIDTH: usize = 12;
+    const SOURCE_WIDTH: usize = 10;
+    const MANAGED_WIDTH: usize = 7;
+
+    // Header
+    println!(
+        "  {:<NAME_WIDTH$} {:<STATUS_WIDTH$} {:<SOURCE_WIDTH$} {:<MANAGED_WIDTH$} {}",
+        "NAME", "STATUS", "SOURCE", "MANAGED", "WORKSPACE"
+    );
+    println!("{}", "-".repeat(85));
+
+    for container in discovered {
+        let status_symbol = match container.status {
+            devc_provider::ContainerStatus::Running => "●",
+            devc_provider::ContainerStatus::Exited => "○",
+            devc_provider::ContainerStatus::Created => "◔",
+            _ => "?",
+        };
+
+        let workspace = container.workspace_path.as_deref().unwrap_or("-");
+
+        let managed_str = if container.managed { "✓" } else { "-" };
+        let source_str = match container.source {
+            DevcontainerSource::Devc => "devc",
+            DevcontainerSource::VsCode => "vscode",
+            DevcontainerSource::Other => "other",
+        };
+
+        // Pad fields
+        let name_padding = NAME_WIDTH.saturating_sub(container.name.len());
+        let status_str = format!("{}", container.status);
+        let status_padding = STATUS_WIDTH.saturating_sub(status_str.len());
+        let source_padding = SOURCE_WIDTH.saturating_sub(source_str.len());
+
+        println!(
+            "{} {}{} {}{} {}{} {:<MANAGED_WIDTH$} {}",
+            status_symbol,
+            container.name, " ".repeat(name_padding),
+            status_str, " ".repeat(status_padding),
+            source_str, " ".repeat(source_padding),
+            managed_str,
+            workspace
+        );
+    }
+
+    println!();
+    println!("Tip: Use 'devc adopt <name>' to import unmanaged containers into devc.");
 
     Ok(())
 }
@@ -527,5 +604,86 @@ async fn find_container_in_cwd(manager: &ContainerManager) -> Result<ContainerSt
         .into_iter()
         .find(|c| c.workspace_path == cwd)
         .ok_or_else(|| anyhow!("No container found for current directory"))
+}
+
+/// Adopt an existing devcontainer into devc management
+pub async fn adopt(manager: &ContainerManager, container: Option<String>) -> Result<()> {
+    use devc_provider::DevcontainerSource;
+
+    // Discover all containers
+    let discovered = manager.discover().await?;
+
+    // Filter to unmanaged containers only
+    let unmanaged: Vec<_> = discovered
+        .iter()
+        .filter(|c| !c.managed)
+        .collect();
+
+    if unmanaged.is_empty() {
+        println!("No unmanaged devcontainers found to adopt.");
+        println!("\nAll discovered devcontainers are already managed by devc.");
+        return Ok(());
+    }
+
+    // Find the container to adopt
+    let to_adopt = match container {
+        Some(name_or_id) => {
+            // Find by name or ID
+            unmanaged
+                .iter()
+                .find(|c| c.name == name_or_id || c.id.0 == name_or_id || c.id.0.starts_with(&name_or_id))
+                .ok_or_else(|| anyhow!(
+                    "Container '{}' not found or already managed by devc.\nRun 'devc list --discover' to see available containers.",
+                    name_or_id
+                ))?
+        }
+        None => {
+            // Interactive selection
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                bail!("No container specified. Use 'devc adopt <name>' or run interactively.");
+            }
+
+            // Show selection dialog
+            println!("Select a container to adopt:\n");
+            for (i, c) in unmanaged.iter().enumerate() {
+                let source = match c.source {
+                    DevcontainerSource::VsCode => "vscode",
+                    DevcontainerSource::Other => "other",
+                    DevcontainerSource::Devc => "devc",
+                };
+                let workspace = c.workspace_path.as_deref().unwrap_or("-");
+                println!("  {}. {} ({}) - {}", i + 1, c.name, source, workspace);
+            }
+            println!("\nEnter number (or 'q' to cancel): ");
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+
+            if input == "q" || input == "Q" {
+                return Ok(());
+            }
+
+            let idx: usize = input.parse().context("Invalid selection")?;
+            if idx == 0 || idx > unmanaged.len() {
+                bail!("Invalid selection. Enter a number between 1 and {}", unmanaged.len());
+            }
+
+            unmanaged[idx - 1]
+        }
+    };
+
+    println!("Adopting '{}'...", to_adopt.name);
+
+    // Adopt the container
+    let state = manager.adopt(&to_adopt.id.0, to_adopt.workspace_path.as_deref()).await?;
+
+    println!("Adopted container: {}", state.name);
+    println!("\nYou can now use devc commands with this container:");
+    println!("  devc ssh {}       # Connect to the container", state.name);
+    println!("  devc stop {}      # Stop the container", state.name);
+    println!("  devc rm {}        # Remove the container", state.name);
+
+    Ok(())
 }
 

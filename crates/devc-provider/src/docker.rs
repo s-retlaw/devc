@@ -2,9 +2,9 @@
 
 use crate::{
     BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider, ContainerStatus,
-    CreateContainerConfig, ExecConfig, ExecResult, ExecStream, ImageId, LogConfig, LogStream,
-    MountInfo, MountType, NetworkInfo, NetworkSettings, PortInfo, ProviderError, ProviderInfo,
-    ProviderType, Result,
+    CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig, ExecResult,
+    ExecStream, ImageId, LogConfig, LogStream, MountInfo, MountType, NetworkInfo, NetworkSettings,
+    PortInfo, ProviderError, ProviderInfo, ProviderType, Result,
 };
 use async_trait::async_trait;
 use bollard::container::{
@@ -635,6 +635,54 @@ impl ContainerProvider for DockerProvider {
 
         Ok(())
     }
+
+    async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>> {
+        // List ALL containers (not just devc-managed ones)
+        let options = ListContainersOptions::<String> {
+            all: true,
+            ..Default::default()
+        };
+
+        let containers = self.client.list_containers(Some(options)).await?;
+
+        let mut discovered = Vec::new();
+
+        for c in containers {
+            let labels = c.labels.clone().unwrap_or_default();
+
+            // Detect source based on labels
+            let (is_devcontainer, source, managed) = detect_devcontainer_source(&labels);
+
+            if !is_devcontainer {
+                continue;
+            }
+
+            // Try to extract workspace path from labels or mounts
+            let workspace_path = extract_workspace_path(&labels, c.mounts.as_deref());
+
+            discovered.push(DiscoveredContainer {
+                id: ContainerId::new(c.id.unwrap_or_default()),
+                name: c
+                    .names
+                    .and_then(|n| n.first().cloned())
+                    .unwrap_or_default()
+                    .trim_start_matches('/')
+                    .to_string(),
+                image: c.image.unwrap_or_default(),
+                status: c
+                    .state
+                    .as_deref()
+                    .map(ContainerStatus::from)
+                    .unwrap_or(ContainerStatus::Unknown),
+                managed,
+                source,
+                workspace_path,
+                labels,
+            });
+        }
+
+        Ok(discovered)
+    }
 }
 
 /// Create a tar archive from the build context
@@ -804,4 +852,65 @@ where
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
+}
+
+/// Detect the source of a devcontainer based on labels
+/// Returns (is_devcontainer, source, managed_by_devc)
+fn detect_devcontainer_source(labels: &HashMap<String, String>) -> (bool, DevcontainerSource, bool) {
+    // Check for devc-managed container
+    if labels.contains_key("devc.managed") {
+        return (true, DevcontainerSource::Devc, true);
+    }
+
+    // Check for VS Code devcontainer labels
+    // VS Code uses: devcontainer.local_folder, devcontainer.config_file, etc.
+    if labels.contains_key("devcontainer.local_folder")
+        || labels.contains_key("devcontainer.config_file")
+        || labels.get("vscode.devcontainer").map(|v| v == "true").unwrap_or(false)
+    {
+        return (true, DevcontainerSource::VsCode, false);
+    }
+
+    // Check for common devcontainer patterns in labels
+    // GitHub Codespaces, other devcontainer tools
+    if labels.contains_key("devcontainer.metadata")
+        || labels.keys().any(|k| k.starts_with("devcontainer."))
+    {
+        return (true, DevcontainerSource::Other, false);
+    }
+
+    (false, DevcontainerSource::Other, false)
+}
+
+/// Extract workspace path from container labels or mounts
+fn extract_workspace_path(
+    labels: &HashMap<String, String>,
+    mounts: Option<&[bollard::models::MountPoint]>,
+) -> Option<String> {
+    // Try VS Code label first
+    if let Some(path) = labels.get("devcontainer.local_folder") {
+        return Some(path.clone());
+    }
+
+    // Try devc project label - note: we don't store full path in labels
+    if labels.contains_key("devc.project") {
+        return None;
+    }
+
+    // Try to find workspace mount
+    if let Some(mounts) = mounts {
+        for mount in mounts {
+            if let (Some(source), Some(dest)) = (&mount.source, &mount.destination) {
+                // Common workspace mount patterns
+                if dest.contains("/workspaces/")
+                    || dest.contains("/workspace")
+                    || dest == "/home/vscode/workspace"
+                {
+                    return Some(source.clone());
+                }
+            }
+        }
+    }
+
+    None
 }

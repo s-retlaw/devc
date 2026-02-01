@@ -5,6 +5,7 @@
 mod app;
 mod demo;
 mod event;
+mod settings;
 mod ui;
 
 pub use app::{App, AppResult};

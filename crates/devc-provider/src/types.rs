@@ -370,3 +370,45 @@ pub struct ProviderInfo {
     pub os: String,
     pub arch: String,
 }
+
+/// Source of a discovered devcontainer
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DevcontainerSource {
+    /// Created and managed by devc
+    Devc,
+    /// Created by VS Code Dev Containers extension
+    VsCode,
+    /// Created by another tool or manually with devcontainer patterns
+    Other,
+}
+
+impl std::fmt::Display for DevcontainerSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Devc => write!(f, "devc"),
+            Self::VsCode => write!(f, "vscode"),
+            Self::Other => write!(f, "other"),
+        }
+    }
+}
+
+/// A discovered devcontainer (may or may not be managed by devc)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredContainer {
+    /// Container ID
+    pub id: ContainerId,
+    /// Container name
+    pub name: String,
+    /// Image used
+    pub image: String,
+    /// Container status
+    pub status: ContainerStatus,
+    /// Whether managed by devc
+    pub managed: bool,
+    /// Source/creator of this container
+    pub source: DevcontainerSource,
+    /// Workspace folder path (if detected)
+    pub workspace_path: Option<String>,
+    /// All labels on the container
+    pub labels: HashMap<String, String>,
+}

@@ -1,36 +1,47 @@
 //! UI rendering for the TUI application
 
-use crate::app::{App, ConfirmAction, View};
+use crate::app::{App, ConfirmAction, Tab, View};
+use crate::settings::{SettingsField, SettingsSection};
 use devc_core::DevcContainerStatus;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
 /// Main draw function
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.size();
 
-    // Main layout: header, content, footer
+    // Main layout: header with tabs, content, footer with help
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
+            Constraint::Length(3), // Header with tabs
             Constraint::Min(0),    // Content
             Constraint::Length(3), // Footer
         ])
         .split(area);
 
-    draw_header(frame, app, chunks[0]);
+    draw_header_with_tabs(frame, app, chunks[0]);
 
     match app.view {
-        View::Dashboard => draw_dashboard(frame, app, chunks[1]),
+        View::Main => match app.tab {
+            Tab::Containers => draw_containers(frame, app, chunks[1]),
+            Tab::Providers => draw_providers(frame, app, chunks[1]),
+            Tab::Settings => draw_settings(frame, app, chunks[1]),
+        },
         View::ContainerDetail => draw_detail(frame, app, chunks[1]),
+        View::ProviderDetail => draw_provider_detail(frame, app, chunks[1]),
         View::BuildOutput => draw_build_output(frame, app, chunks[1]),
         View::Logs => draw_logs(frame, app, chunks[1]),
-        View::Help => draw_help(frame, chunks[1]),
+        View::Help => draw_help(frame, app, chunks[1]),
         View::Confirm => {
-            draw_dashboard(frame, app, chunks[1]);
+            // Draw the main content behind the dialog
+            match app.tab {
+                Tab::Containers => draw_containers(frame, app, chunks[1]),
+                Tab::Providers => draw_providers(frame, app, chunks[1]),
+                Tab::Settings => draw_settings(frame, app, chunks[1]),
+            }
             draw_confirm_dialog(frame, app, area);
         }
     }
@@ -38,44 +49,82 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_footer(frame, app, chunks[2]);
 }
 
-/// Draw the header
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let title = format!(
-        " devc - Dev Container Manager  [{}] ",
-        app.manager.provider_type()
-    );
+/// Draw header with tab bar
+fn draw_header_with_tabs(frame: &mut Frame, app: &App, area: Rect) {
+    let titles: Vec<Line> = Tab::all()
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            let number = format!("{}:", i + 1);
+            let label = tab.label();
+            if *tab == app.tab {
+                Line::from(vec![
+                    Span::styled(number, Style::default().fg(Color::Yellow)),
+                    Span::styled(label, Style::default().fg(Color::White).bold()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(number, Style::default().fg(Color::DarkGray)),
+                    Span::styled(label, Style::default().fg(Color::Gray)),
+                ])
+            }
+        })
+        .collect();
 
-    let header = Paragraph::new(title)
-        .style(Style::default().fg(Color::Cyan).bold())
+    let tabs = Tabs::new(titles)
         .block(
             Block::default()
+                .title(" devc - Dev Container Manager ")
+                .title_style(Style::default().fg(Color::Cyan).bold())
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
-        );
+        )
+        .select(app.tab.index())
+        .style(Style::default())
+        .highlight_style(Style::default())
+        .divider(" │ ");
 
-    frame.render_widget(header, area);
+    frame.render_widget(tabs, area);
 }
 
-/// Draw the footer with status and help
+/// Draw the footer with context-sensitive help
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.view {
-        View::Dashboard => "[j/k] Navigate  [b]uild  [s]tart/stop  [u]p  [d]elete  [?] Help  [q]uit",
-        View::ContainerDetail => "[b]uild  [s]tart/stop  [u]p  [l]ogs  [q] Back",
-        View::BuildOutput => "[q] Back",
-        View::Logs => "[j/k] Scroll  [g/G] Top/Bottom  [C-d/C-u] Page  [r]efresh  [q] Back",
+        View::Main => match app.tab {
+            Tab::Containers => {
+                "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  d: Delete  ?: Help  q: Quit"
+            }
+            Tab::Providers => {
+                "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Configure  Space/a: Set Active  s: Save  ?: Help  q: Quit"
+            }
+            Tab::Settings => {
+                if app.settings_state.editing {
+                    "Enter: Confirm  Esc: Cancel  Type to edit"
+                } else {
+                    "Tab/1-3: Switch tabs  j/k: Navigate  Enter/Space: Edit  s: Save  r: Reset  ?: Help  q: Quit"
+                }
+            }
+        },
+        View::ContainerDetail => "b: Build  s: Start/Stop  u: Up  l: Logs  Esc/q: Back  ?: Help",
+        View::ProviderDetail => {
+            if app.provider_detail_state.editing {
+                "Enter: Confirm  Esc: Cancel  Type to edit"
+            } else {
+                "e: Edit Socket  t: Test Connection  a/Space: Set Active  s: Save  Esc/q: Back"
+            }
+        }
+        View::BuildOutput => "Esc/q: Back",
+        View::Logs => "j/k: Scroll  g/G: Top/Bottom  PgUp/PgDn: Page  r: Refresh  Esc/q: Back",
         View::Help => "Press any key to close",
-        View::Confirm => "[y]es  [n]o",
+        View::Confirm => "y/Enter: Yes  n/Esc: No",
     };
 
-    let status = app
-        .status_message
-        .as_deref()
-        .unwrap_or("");
+    let status = app.status_message.as_deref().unwrap_or("");
 
     let footer_text = if status.is_empty() {
         help_text.to_string()
     } else {
-        format!("{} | {}", status, help_text)
+        format!("{} │ {}", status, help_text)
     };
 
     let footer = Paragraph::new(footer_text)
@@ -85,17 +134,21 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(footer, area);
 }
 
-/// Draw the dashboard view
-fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
+/// Draw the containers tab
+fn draw_containers(frame: &mut Frame, app: &App, area: Rect) {
     if app.containers.is_empty() {
-        let empty = Paragraph::new("No containers found.\n\nUse 'devc init' in a directory with devcontainer.json to add a container.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(
-                Block::default()
-                    .title(" Containers ")
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: true });
+        let empty = Paragraph::new(
+            "No containers found.\n\n\
+             Use 'devc init' in a directory with devcontainer.json to add a container.\n\n\
+             Or use 'devc list --discover' to find VS Code devcontainers.",
+        )
+        .style(Style::default().fg(Color::DarkGray))
+        .block(
+            Block::default()
+                .title(" Containers ")
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: true });
 
         frame.render_widget(empty, area);
         return;
@@ -126,30 +179,25 @@ fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
                 DevcContainerStatus::Configured => Color::DarkGray,
             };
 
-            let style = if i == app.selected {
+            let is_selected = i == app.selected;
+            let style = if is_selected {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else {
                 Style::default()
             };
 
             let line = Line::from(vec![
-                Span::styled(format!(" {} ", status_symbol), Style::default().fg(status_color)),
                 Span::styled(
-                    format!("{:<20}", container.name),
-                    style.bold(),
+                    format!(" {} ", status_symbol),
+                    Style::default().fg(status_color),
                 ),
-                Span::styled(
-                    format!("{:<12}", container.status),
-                    style.fg(status_color),
-                ),
+                Span::styled(format!("{:<20}", container.name), style.bold()),
+                Span::styled(format!("{:<12}", container.status), style.fg(status_color)),
                 Span::styled(
                     format!("{:<10}", container.provider),
                     style.fg(Color::DarkGray),
                 ),
-                Span::styled(
-                    format_time_ago(container.last_used.timestamp()),
-                    style.fg(Color::DarkGray),
-                ),
+                Span::styled(format_time_ago(container.last_used.timestamp()), style.fg(Color::DarkGray)),
             ]);
 
             ListItem::new(line).style(style)
@@ -165,6 +213,295 @@ fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     frame.render_widget(list, area);
+}
+
+/// Draw the providers tab
+fn draw_providers(frame: &mut Frame, app: &App, area: Rect) {
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // Add a header explanation
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(
+            " Select a provider to use for new containers:",
+            Style::default().fg(Color::DarkGray).italic(),
+        ),
+    ])));
+    items.push(ListItem::new(Line::from("")));
+
+    for (i, provider) in app.providers.iter().enumerate() {
+        let is_selected = i == app.selected_provider;
+
+        let active_indicator = if provider.is_active {
+            "● ACTIVE"
+        } else {
+            "○       "
+        };
+
+        let status_indicator = if provider.connected {
+            Span::styled("Connected", Style::default().fg(Color::Green))
+        } else {
+            Span::styled("Not connected", Style::default().fg(Color::Red))
+        };
+
+        let style = if is_selected {
+            Style::default().bg(Color::DarkGray).fg(Color::White)
+        } else {
+            Style::default()
+        };
+
+        // Provider name and active status
+        let line1 = Line::from(vec![
+            Span::styled(
+                format!(" {} ", active_indicator),
+                if provider.is_active {
+                    Style::default().fg(Color::Green).bold()
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(format!("{:<10}", provider.name), style.bold()),
+            status_indicator,
+        ]);
+
+        // Socket path
+        let line2 = Line::from(vec![
+            Span::raw("          "),
+            Span::styled(
+                format!("Socket: {}", provider.socket),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+
+        items.push(ListItem::new(vec![line1, line2]).style(style));
+        items.push(ListItem::new(Line::from("")));
+    }
+
+    let list = List::new(items).block(
+        Block::default()
+            .title(" Providers - Container Runtimes ")
+            .borders(Borders::ALL),
+    );
+
+    frame.render_widget(list, area);
+}
+
+/// Draw the global settings tab with sections
+fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
+    let settings = &app.settings_state;
+
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // Add a header explanation
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(
+            " Global settings that apply to all containers:",
+            Style::default().fg(Color::DarkGray).italic(),
+        ),
+    ])));
+
+    let mut field_index = 0;
+    for section in SettingsSection::all() {
+        // Section header
+        items.push(ListItem::new(Line::from("")));
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(
+                format!(" {}", section.label()),
+                Style::default().fg(Color::Cyan).bold(),
+            ),
+        ])));
+
+        // Fields in this section
+        for field in section.fields() {
+            let is_focused = settings.focused == field_index;
+            let label = field.label();
+            let value = settings.draft.get_value(field);
+
+            let display_value = if settings.editing && is_focused {
+                // Show edit buffer with cursor
+                let cursor_pos = settings.cursor;
+                let before = &settings.edit_buffer[..cursor_pos];
+                let after = &settings.edit_buffer[cursor_pos..];
+                format!("{}│{}", before, after)
+            } else if field.is_toggle() {
+                if let SettingsField::SshEnabled = field {
+                    if value == "true" {
+                        "[●] Enabled  [ ] Disabled".to_string()
+                    } else {
+                        "[ ] Enabled  [●] Disabled".to_string()
+                    }
+                } else {
+                    value.clone()
+                }
+            } else if value.is_empty() {
+                "(not set)".to_string()
+            } else {
+                value.clone()
+            };
+
+            let style = if is_focused {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            let line = Line::from(vec![
+                Span::styled(format!("   {:<16}", label), style.bold()),
+                Span::styled(display_value, style),
+            ]);
+
+            items.push(ListItem::new(line).style(style));
+            field_index += 1;
+        }
+    }
+
+    let title = if settings.dirty {
+        " Settings (unsaved changes) "
+    } else {
+        " Settings "
+    };
+
+    let list = List::new(items).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(if settings.dirty {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            }),
+    );
+
+    frame.render_widget(list, area);
+}
+
+/// Draw the provider detail/configuration view
+fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let provider = &app.providers[app.selected_provider];
+    let detail_state = &app.provider_detail_state;
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Provider name as title
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Provider: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(&provider.name, Style::default().bold()),
+        if provider.is_active {
+            Span::styled(" (ACTIVE)", Style::default().fg(Color::Green).bold())
+        } else {
+            Span::raw("")
+        },
+    ]));
+    lines.push(Line::from(""));
+
+    // Socket path (editable)
+    let socket_label = "Socket Path:";
+    let socket_value = if detail_state.editing {
+        let cursor_pos = detail_state.cursor;
+        let before = &detail_state.edit_buffer[..cursor_pos];
+        let after = &detail_state.edit_buffer[cursor_pos..];
+        format!("{}│{}", before, after)
+    } else {
+        provider.socket.clone()
+    };
+
+    let socket_style = if detail_state.editing {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    } else {
+        Style::default()
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<16}", socket_label), Style::default().fg(Color::DarkGray)),
+        Span::styled(socket_value, socket_style),
+        if !detail_state.editing {
+            Span::styled("  [e] to edit", Style::default().fg(Color::DarkGray).italic())
+        } else {
+            Span::raw("")
+        },
+    ]));
+    lines.push(Line::from(""));
+
+    // Connection status
+    let connection_line = match detail_state.connection_status {
+        Some(true) => Line::from(vec![
+            Span::styled("Connection:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled("● Connected", Style::default().fg(Color::Green).bold()),
+        ]),
+        Some(false) => {
+            let error_msg = detail_state.connection_error.as_deref().unwrap_or("Unknown error");
+            Line::from(vec![
+                Span::styled("Connection:     ", Style::default().fg(Color::DarkGray)),
+                Span::styled("✗ Failed: ", Style::default().fg(Color::Red).bold()),
+                Span::styled(error_msg, Style::default().fg(Color::Red)),
+            ])
+        }
+        None => {
+            // Show initial status based on provider connected flag
+            if provider.connected {
+                Line::from(vec![
+                    Span::styled("Connection:     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("● Connected", Style::default().fg(Color::Green)),
+                    Span::styled("  [t] to test", Style::default().fg(Color::DarkGray).italic()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("Connection:     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("○ Not tested", Style::default().fg(Color::Yellow)),
+                    Span::styled("  [t] to test", Style::default().fg(Color::DarkGray).italic()),
+                ])
+            }
+        }
+    };
+    lines.push(connection_line);
+    lines.push(Line::from(""));
+
+    // Tips section
+    lines.push(Line::from(vec![
+        Span::styled("─── Tips ", Style::default().fg(Color::DarkGray)),
+        Span::styled("─".repeat(40), Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(""));
+
+    match provider.provider_type {
+        devc_provider::ProviderType::Docker => {
+            lines.push(Line::from(vec![
+                Span::styled("  • Start Docker: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("sudo systemctl start docker", Style::default().fg(Color::White)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  • Default socket: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("/var/run/docker.sock", Style::default().fg(Color::White)),
+            ]));
+        }
+        devc_provider::ProviderType::Podman => {
+            lines.push(Line::from(vec![
+                Span::styled("  • Start Podman: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("systemctl --user start podman.socket", Style::default().fg(Color::White)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  • Default socket: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("$XDG_RUNTIME_DIR/podman/podman.sock", Style::default().fg(Color::White)),
+            ]));
+        }
+    }
+
+    let title = format!(" {} Configuration ", provider.name);
+
+    let detail = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(if detail_state.dirty {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                }),
+        )
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(detail, area);
 }
 
 /// Draw the container detail view
@@ -216,21 +553,11 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::raw("Image ID:    "),
-            Span::raw(
-                container
-                    .image_id
-                    .as_deref()
-                    .unwrap_or("Not built"),
-            ),
+            Span::raw(container.image_id.as_deref().unwrap_or("Not built")),
         ]),
         Line::from(vec![
             Span::raw("Container:   "),
-            Span::raw(
-                container
-                    .container_id
-                    .as_deref()
-                    .unwrap_or("Not created"),
-            ),
+            Span::raw(container.container_id.as_deref().unwrap_or("Not created")),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -280,11 +607,9 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         .map(|c| c.name.as_str())
         .unwrap_or("Unknown");
 
-    // Calculate visible area (accounting for borders)
     let inner_height = area.height.saturating_sub(2) as usize;
     let total_lines = app.logs.len();
 
-    // Build visible lines with line numbers
     let text: Vec<Line> = app
         .logs
         .iter()
@@ -302,7 +627,6 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    // Show scroll position in title
     let scroll_info = if total_lines > 0 {
         let percent = if total_lines <= inner_height {
             100
@@ -330,30 +654,67 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(logs, area);
 }
 
-/// Draw help view
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let text = vec![
+/// Draw help view - context-sensitive based on current tab
+fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
+    let general_help = vec![
         Line::from(""),
-        Line::from(Span::styled("Navigation", Style::default().bold())),
-        Line::from("  j/↓       Move down"),
-        Line::from("  k/↑       Move up"),
-        Line::from("  g         Go to top"),
-        Line::from("  G         Go to bottom"),
-        Line::from("  Enter     View details"),
+        Line::from(Span::styled("Global Keys", Style::default().bold().underlined())),
         Line::from(""),
-        Line::from(Span::styled("Actions", Style::default().bold())),
-        Line::from("  b         Build container"),
-        Line::from("  s         Start/Stop container"),
-        Line::from("  u         Up (build + create + start)"),
-        Line::from("  d         Delete container"),
-        Line::from("  r         Refresh list"),
-        Line::from("  l         View logs"),
-        Line::from(""),
-        Line::from(Span::styled("General", Style::default().bold())),
-        Line::from("  ?         Show this help"),
-        Line::from("  q/Esc     Quit / Go back"),
+        Line::from("  Tab         Next tab"),
+        Line::from("  Shift+Tab   Previous tab"),
+        Line::from("  1/2/3       Jump to Containers/Providers/Settings tab"),
+        Line::from("  ?/F1        Show this help"),
+        Line::from("  q           Quit (or go back from subview)"),
+        Line::from("  Esc         Go back / Cancel"),
         Line::from(""),
     ];
+
+    let tab_help = match app.tab {
+        Tab::Containers => vec![
+            Line::from(Span::styled("Containers Tab", Style::default().bold().underlined())),
+            Line::from(""),
+            Line::from("  j/Down      Move selection down"),
+            Line::from("  k/Up        Move selection up"),
+            Line::from("  g/Home      Go to first container"),
+            Line::from("  G/End       Go to last container"),
+            Line::from("  Enter       View container details"),
+            Line::from(""),
+            Line::from("  b           Build container image"),
+            Line::from("  s           Start or Stop container"),
+            Line::from("  u           Up - build, create, and start"),
+            Line::from("  d/Delete    Delete container"),
+            Line::from("  r/F5        Refresh list"),
+        ],
+        Tab::Providers => vec![
+            Line::from(Span::styled("Providers Tab", Style::default().bold().underlined())),
+            Line::from(""),
+            Line::from("  j/Down      Move selection down"),
+            Line::from("  k/Up        Move selection up"),
+            Line::from("  Enter       Set selected provider as active"),
+            Line::from("  Space       Set selected provider as active"),
+            Line::from("  s           Save provider settings to config"),
+            Line::from(""),
+            Line::from("  The active provider is used for new containers."),
+            Line::from("  Existing containers keep their original provider."),
+        ],
+        Tab::Settings => vec![
+            Line::from(Span::styled("Settings Tab", Style::default().bold().underlined())),
+            Line::from(""),
+            Line::from("  j/Down      Move to next setting"),
+            Line::from("  k/Up        Move to previous setting"),
+            Line::from("  Enter       Edit setting (text) or toggle (checkbox)"),
+            Line::from("  Space       Edit setting (text) or toggle (checkbox)"),
+            Line::from("  s           Save all settings to config file"),
+            Line::from("  r           Reset to saved values"),
+            Line::from(""),
+            Line::from("  When editing text:"),
+            Line::from("    Enter     Confirm change"),
+            Line::from("    Esc       Cancel change"),
+        ],
+    };
+
+    let mut text = general_help;
+    text.extend(tab_help);
 
     let help = Paragraph::new(text)
         .block(Block::default().title(" Help ").borders(Borders::ALL))
@@ -386,9 +747,8 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
-    // Center the dialog
-    let dialog_width = 40;
-    let dialog_height = 5;
+    let dialog_width = 50;
+    let dialog_height = 7;
     let dialog_area = Rect {
         x: (area.width.saturating_sub(dialog_width)) / 2,
         y: (area.height.saturating_sub(dialog_height)) / 2,
@@ -402,10 +762,12 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(message),
         Line::from(""),
-        Line::from(Span::styled(
-            "[y]es  [n]o",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [y] Yes  ", Style::default().fg(Color::Green)),
+            Span::raw("  "),
+            Span::styled("  [n] No  ", Style::default().fg(Color::Red)),
+        ]),
     ])
     .alignment(Alignment::Center)
     .block(

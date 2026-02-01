@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use selector::{select_container, SelectionContext};
 use devc_config::GlobalConfig;
 use devc_core::ContainerManager;
-use devc_provider::create_default_provider;
+use devc_provider::{create_default_provider, create_provider, ProviderType};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser)]
@@ -17,6 +17,10 @@ struct Cli {
     /// Verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Override default provider (docker or podman)
+    #[arg(long, global = true, value_parser = ["docker", "podman"])]
+    provider: Option<String>,
 
     /// Demo mode (show TUI without container runtime)
     #[arg(long)]
@@ -74,7 +78,14 @@ enum Commands {
     },
 
     /// List containers
-    List,
+    List {
+        /// Discover devcontainers from all providers (includes VS Code containers)
+        #[arg(long)]
+        discover: bool,
+        /// Sync status with container runtimes
+        #[arg(long)]
+        sync: bool,
+    },
 
     /// Initialize a new dev container from current directory
     Init,
@@ -108,6 +119,12 @@ enum Commands {
         /// Open config in editor
         #[arg(short, long)]
         edit: bool,
+    },
+
+    /// Adopt an existing devcontainer into devc management
+    Adopt {
+        /// Container name or ID (interactive selection if not specified)
+        container: Option<String>,
     },
 }
 
@@ -150,7 +167,11 @@ async fn run() -> anyhow::Result<()> {
     }
 
     // All other commands need a provider
-    let provider = create_default_provider(&config).await?;
+    let provider = match cli.provider.as_deref() {
+        Some("docker") => create_provider(ProviderType::Docker, &config).await?,
+        Some("podman") => create_provider(ProviderType::Podman, &config).await?,
+        _ => create_default_provider(&config).await?,
+    };
     let manager = ContainerManager::new(provider).await?;
 
     match cli.command {
@@ -216,8 +237,8 @@ async fn run() -> anyhow::Result<()> {
                     };
                     commands::remove(&manager, &name, force).await?;
                 }
-                Commands::List => {
-                    commands::list(&manager).await?;
+                Commands::List { discover, sync } => {
+                    commands::list(&manager, discover, sync).await?;
                 }
                 Commands::Init => {
                     commands::init(&manager).await?;
@@ -258,6 +279,9 @@ async fn run() -> anyhow::Result<()> {
                     commands::resize(&manager, container, cols, rows).await?;
                 }
                 Commands::Config { .. } => unreachable!(), // Handled above
+                Commands::Adopt { container } => {
+                    commands::adopt(&manager, container).await?;
+                }
             }
         }
     }

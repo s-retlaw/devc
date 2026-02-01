@@ -63,6 +63,10 @@ pub trait ContainerProvider: Send + Sync {
     /// Get provider information
     fn info(&self) -> ProviderInfo;
 
+    /// Discover all devcontainers (including those not managed by devc)
+    /// Returns containers with devcontainer-related labels or mounts
+    async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>>;
+
     /// Copy files into a container
     async fn copy_into(
         &self,

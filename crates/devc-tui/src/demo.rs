@@ -90,7 +90,7 @@ impl DemoApp {
             .collect();
 
         Self {
-            view: crate::app::View::Dashboard,
+            view: crate::app::View::Main,
             containers,
             selected: 0,
             build_output: Vec::new(),
@@ -135,8 +135,9 @@ impl DemoApp {
         self.draw_header(frame, chunks[0]);
 
         match self.view {
-            crate::app::View::Dashboard => self.draw_dashboard(frame, chunks[1]),
+            crate::app::View::Main => self.draw_dashboard(frame, chunks[1]),
             crate::app::View::ContainerDetail => self.draw_detail(frame, chunks[1]),
+            crate::app::View::ProviderDetail => self.draw_dashboard(frame, chunks[1]), // Not implemented in demo
             crate::app::View::Help => self.draw_help(frame, chunks[1]),
             crate::app::View::BuildOutput => self.draw_build(frame, chunks[1]),
             crate::app::View::Logs => self.draw_logs(frame, chunks[1]),
@@ -163,7 +164,7 @@ impl DemoApp {
         use ratatui::widgets::{Block, Borders, Paragraph};
 
         let help = match self.view {
-            crate::app::View::Dashboard => "[j/k] Navigate  [Enter] Details  [?] Help  [q] Quit",
+            crate::app::View::Main => "[j/k] Navigate  [Enter] Details  [?] Help  [q] Quit",
             crate::app::View::ContainerDetail => "[l]ogs  [q] Back  [?] Help",
             crate::app::View::Logs => "[j/k] Scroll  [g/G] Top/Bottom  [C-d/C-u] Page  [q] Back",
             crate::app::View::Help => "Press any key to close",
@@ -354,7 +355,7 @@ impl DemoApp {
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         if self.view == crate::app::View::Confirm {
-            self.view = crate::app::View::Dashboard;
+            self.view = crate::app::View::Main;
             return;
         }
 
@@ -393,10 +394,10 @@ impl DemoApp {
 
         match code {
             KeyCode::Char('q') | KeyCode::Esc => {
-                if self.view == crate::app::View::Dashboard {
+                if self.view == crate::app::View::Main {
                     self.should_quit = true;
                 } else {
-                    self.view = crate::app::View::Dashboard;
+                    self.view = crate::app::View::Main;
                 }
             }
             KeyCode::Char('?') => self.view = crate::app::View::Help,

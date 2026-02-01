@@ -4,7 +4,8 @@
 
 use crate::{
     BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider, ContainerStatus,
-    CreateContainerConfig, ExecConfig, ExecResult, ExecStream, ImageId, LogConfig, LogStream, MountType, NetworkSettings, ProviderError,
+    CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig, ExecResult,
+    ExecStream, ImageId, LogConfig, LogStream, MountType, NetworkSettings, ProviderError,
     ProviderInfo, ProviderType, Result,
 };
 use async_trait::async_trait;
@@ -458,4 +459,82 @@ impl ContainerProvider for HostPodmanProvider {
         self.run_cmd(&["cp", &source, &dest_str]).await?;
         Ok(())
     }
+
+    async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>> {
+        // List ALL containers with detailed format including labels
+        let format = "--format={{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Labels}}";
+        let output = self.run_cmd(&["ps", "-a", format]).await?;
+
+        let mut discovered = Vec::new();
+        for line in output.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() < 5 {
+                continue;
+            }
+
+            let labels = parse_podman_labels(parts[4]);
+            let (is_devcontainer, source, managed) = detect_devcontainer_source_from_labels(&labels);
+
+            if !is_devcontainer {
+                continue;
+            }
+
+            // Extract workspace path from labels
+            let workspace_path = labels
+                .get("devcontainer.local_folder")
+                .cloned();
+
+            discovered.push(DiscoveredContainer {
+                id: ContainerId::new(parts[0]),
+                name: parts[1].to_string(),
+                image: parts[2].to_string(),
+                status: ContainerStatus::from(parts[3]),
+                managed,
+                source,
+                workspace_path,
+                labels,
+            });
+        }
+
+        Ok(discovered)
+    }
+}
+
+/// Parse podman labels format "key=value,key2=value2" into HashMap
+fn parse_podman_labels(label_str: &str) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    for part in label_str.split(',') {
+        if let Some((key, value)) = part.split_once('=') {
+            labels.insert(key.to_string(), value.to_string());
+        }
+    }
+    labels
+}
+
+/// Detect the source of a devcontainer based on labels
+fn detect_devcontainer_source_from_labels(
+    labels: &HashMap<String, String>,
+) -> (bool, DevcontainerSource, bool) {
+    // Check for devc-managed container
+    if labels.contains_key("devc.managed") {
+        return (true, DevcontainerSource::Devc, true);
+    }
+
+    // Check for VS Code devcontainer labels
+    if labels.contains_key("devcontainer.local_folder")
+        || labels.contains_key("devcontainer.config_file")
+        || labels.get("vscode.devcontainer").map(|v| v == "true").unwrap_or(false)
+    {
+        return (true, DevcontainerSource::VsCode, false);
+    }
+
+    // Check for common devcontainer patterns
+    if labels.keys().any(|k| k.starts_with("devcontainer.")) {
+        return (true, DevcontainerSource::Other, false);
+    }
+
+    (false, DevcontainerSource::Other, false)
 }
