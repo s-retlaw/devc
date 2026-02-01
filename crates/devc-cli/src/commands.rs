@@ -595,6 +595,52 @@ async fn find_container(manager: &ContainerManager, name_or_id: &str) -> Result<
     }
 }
 
+/// Rebuild a container (destroy and rebuild, optionally with provider migration)
+pub async fn rebuild(
+    manager: &ContainerManager,
+    container: &str,
+    no_cache: bool,
+    skip_confirm: bool,
+) -> Result<()> {
+    let state = find_container(manager, container).await?;
+
+    // Check for provider change
+    let current_provider = manager.provider_type();
+    let provider_changed = state.provider != current_provider;
+
+    // Show confirmation unless --yes
+    if !skip_confirm {
+        println!("Rebuild '{}'?", state.name);
+        if provider_changed {
+            println!(
+                "  Warning: Provider will change: {} -> {}",
+                state.provider, current_provider
+            );
+        }
+        if no_cache {
+            println!("  Warning: Cache disabled - full rebuild");
+        }
+        print!("Continue? [y/N] ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_lowercase();
+
+        if input != "y" && input != "yes" {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Execute rebuild
+    println!("Rebuilding '{}'...", state.name);
+    manager.rebuild(&state.id, no_cache).await?;
+    println!("Rebuilt '{}' successfully", state.name);
+
+    Ok(())
+}
+
 /// Find container for current working directory
 async fn find_container_in_cwd(manager: &ContainerManager) -> Result<ContainerState> {
     let cwd = std::env::current_dir()?;

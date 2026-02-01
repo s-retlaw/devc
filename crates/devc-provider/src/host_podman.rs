@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 /// Host Podman provider using flatpak-spawn
 pub struct HostPodmanProvider {
@@ -89,6 +91,69 @@ impl ContainerProvider for HostPodmanProvider {
 
         let output = self.run_cmd(&args).await?;
         tracing::debug!("Build output: {}", output);
+
+        // Get the image ID
+        let inspect_output = self.run_cmd(&["inspect", "--format={{.Id}}", &config.tag]).await?;
+        Ok(ImageId::new(inspect_output.trim()))
+    }
+
+    async fn build_with_progress(
+        &self,
+        config: &BuildConfig,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<ImageId> {
+        let context = config.context.to_string_lossy();
+        let dockerfile = format!("-f={}", config.dockerfile);
+        let tag = format!("-t={}", config.tag);
+
+        let mut args = vec!["build".to_string(), dockerfile, tag];
+
+        if config.no_cache {
+            args.push("--no-cache".to_string());
+        }
+
+        // Add build args
+        for (k, v) in &config.build_args {
+            args.push(format!("--build-arg={}={}", k, v));
+        }
+
+        args.push(context.to_string());
+
+        // Spawn the build command with streaming output
+        let mut cmd = Command::new(&self.cmd_prefix[0]);
+        for prefix_arg in &self.cmd_prefix[1..] {
+            cmd.arg(prefix_arg);
+        }
+        for arg in &args {
+            cmd.arg(arg);
+        }
+
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
+
+        // Stream stderr (where build output goes for podman/docker build)
+        if let Some(stderr) = child.stderr.take() {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = progress.send(line);
+            }
+        }
+
+        // Wait for completion
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
+
+        if !status.success() {
+            let _ = progress.send("Build failed".to_string());
+            return Err(ProviderError::BuildError("Build failed".to_string()));
+        }
 
         // Get the image ID
         let inspect_output = self.run_cmd(&["inspect", "--format={{.Id}}", &config.tag]).await?;

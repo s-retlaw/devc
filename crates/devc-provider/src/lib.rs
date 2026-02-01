@@ -16,12 +16,21 @@ pub use types::*;
 use async_trait::async_trait;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
 
 /// Trait for container providers (Docker, Podman, etc.)
 #[async_trait]
 pub trait ContainerProvider: Send + Sync {
     /// Build an image from a Dockerfile
     async fn build(&self, config: &BuildConfig) -> Result<ImageId>;
+
+    /// Build an image with progress streaming
+    /// Progress updates are sent to the provided channel
+    async fn build_with_progress(
+        &self,
+        config: &BuildConfig,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<ImageId>;
 
     /// Pull an image from a registry
     async fn pull(&self, image: &str) -> Result<ImageId>;

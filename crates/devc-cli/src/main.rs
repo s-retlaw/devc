@@ -126,6 +126,18 @@ enum Commands {
         /// Container name or ID (interactive selection if not specified)
         container: Option<String>,
     },
+
+    /// Rebuild a container (destroy and rebuild, optionally on new provider)
+    Rebuild {
+        /// Container name or ID (interactive selection if not specified)
+        container: Option<String>,
+        /// Force rebuild without using cache
+        #[arg(long)]
+        no_cache: bool,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -281,6 +293,16 @@ async fn run() -> anyhow::Result<()> {
                 Commands::Config { .. } => unreachable!(), // Handled above
                 Commands::Adopt { container } => {
                     commands::adopt(&manager, container).await?;
+                }
+                Commands::Rebuild { container, no_cache, yes } => {
+                    let name = match container {
+                        Some(name) => name,
+                        None => {
+                            let containers = get_containers().await?;
+                            select_container(&containers, SelectionContext::Any, "Select container to rebuild:")?
+                        }
+                    };
+                    commands::rebuild(&manager, &name, no_cache, yes).await?;
                 }
             }
         }

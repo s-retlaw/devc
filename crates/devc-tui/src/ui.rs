@@ -92,7 +92,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.view {
         View::Main => match app.tab {
             Tab::Containers => {
-                "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  d: Delete  ?: Help  q: Quit"
+                "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R: Rebuild  d: Delete  ?: Help  q: Quit"
             }
             Tab::Providers => {
                 "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Configure  Space/a: Set Active  s: Save  ?: Help  q: Quit"
@@ -105,7 +105,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         },
-        View::ContainerDetail => "b: Build  s: Start/Stop  u: Up  l: Logs  Esc/q: Back  ?: Help",
+        View::ContainerDetail => "b: Build  s: Start/Stop  u: Up  R: Rebuild  l: Logs  Esc/q: Back  ?: Help",
         View::ProviderDetail => {
             if app.provider_detail_state.editing {
                 "Enter: Confirm  Esc: Cancel  Type to edit"
@@ -113,10 +113,22 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 "e: Edit Socket  t: Test Connection  a/Space: Set Active  s: Save  Esc/q: Back"
             }
         }
-        View::BuildOutput => "Esc/q: Back",
+        View::BuildOutput => {
+            if app.build_complete {
+                "j/k: Scroll  g/G: Top/Bottom  q/Esc: Close"
+            } else {
+                "j/k: Scroll  g/G: Top/Bottom  (building...)"
+            }
+        }
         View::Logs => "j/k: Scroll  g/G: Top/Bottom  PgUp/PgDn: Page  r: Refresh  Esc/q: Back",
         View::Help => "Press any key to close",
-        View::Confirm => "y/Enter: Yes  n/Esc: No",
+        View::Confirm => {
+            if matches!(app.confirm_action, Some(ConfirmAction::Rebuild { .. })) {
+                "y/Enter: Confirm  n/Esc: Cancel  Space: Toggle no-cache"
+            } else {
+                "y/Enter: Yes  n/Esc: No"
+            }
+        }
     };
 
     let status = app.status_message.as_deref().unwrap_or("");
@@ -581,21 +593,69 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(detail, area);
 }
 
-/// Draw build output view
+/// Draw build output view with scrolling
 fn draw_build_output(frame: &mut Frame, app: &App, area: Rect) {
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let total_lines = app.build_output.len();
+
+    // Calculate effective scroll position
+    // When auto_scroll is enabled, always show the latest lines
+    let scroll = if app.build_auto_scroll {
+        // Scroll to show last lines, but don't go negative
+        total_lines.saturating_sub(inner_height)
+    } else {
+        app.build_output_scroll
+    };
+
     let text: Vec<Line> = app
         .build_output
         .iter()
-        .map(|line| Line::from(line.as_str()))
+        .enumerate()
+        .skip(scroll)
+        .take(inner_height)
+        .map(|(i, line)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>4} ", i + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(line.as_str()),
+            ])
+        })
         .collect();
 
-    let output = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title(" Build Output ")
-                .borders(Borders::ALL),
+    let title = if app.build_complete {
+        if total_lines > 0 {
+            format!(
+                " Build Output [{}/{}] - Press q to close ",
+                scroll + 1,
+                total_lines
+            )
+        } else {
+            " Build Output - Press q to close ".to_string()
+        }
+    } else if total_lines > 0 {
+        format!(
+            " Build Output [{}/{}] - Building... ",
+            scroll + 1,
+            total_lines
         )
-        .wrap(Wrap { trim: true });
+    } else {
+        " Build Output - Building... ".to_string()
+    };
+
+    let border_color = if app.build_complete {
+        Color::Green
+    } else {
+        Color::Yellow
+    };
+
+    let output = Paragraph::new(text).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color)),
+    );
 
     frame.render_widget(output, area);
 }
@@ -682,6 +742,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             Line::from("  b           Build container image"),
             Line::from("  s           Start or Stop container"),
             Line::from("  u           Up - build, create, and start"),
+            Line::from("  R           Rebuild - destroy and rebuild container"),
             Line::from("  d/Delete    Delete container"),
             Line::from("  r/F5        Refresh list"),
         ],
@@ -725,7 +786,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Draw confirmation dialog
 fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
-    let message = match &app.confirm_action {
+    match &app.confirm_action {
         Some(ConfirmAction::Delete(id)) => {
             let name = app
                 .containers
@@ -733,7 +794,7 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 .find(|c| &c.id == id)
                 .map(|c| c.name.as_str())
                 .unwrap_or(id);
-            format!("Delete container '{}'?", name)
+            draw_simple_confirm_dialog(frame, area, &format!("Delete container '{}'?", name));
         }
         Some(ConfirmAction::Stop(id)) => {
             let name = app
@@ -742,11 +803,23 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 .find(|c| &c.id == id)
                 .map(|c| c.name.as_str())
                 .unwrap_or(id);
-            format!("Stop container '{}'?", name)
+            draw_simple_confirm_dialog(frame, area, &format!("Stop container '{}'?", name));
         }
-        None => return,
-    };
+        Some(ConfirmAction::Rebuild { id, provider_change }) => {
+            let name = app
+                .containers
+                .iter()
+                .find(|c| &c.id == id)
+                .map(|c| c.name.as_str())
+                .unwrap_or(id);
+            draw_rebuild_confirm_dialog(frame, app, area, name, provider_change.as_ref());
+        }
+        None => {}
+    }
+}
 
+/// Draw a simple yes/no confirmation dialog
+fn draw_simple_confirm_dialog(frame: &mut Frame, area: Rect, message: &str) {
     let dialog_width = 50;
     let dialog_height = 7;
     let dialog_area = Rect {
@@ -760,7 +833,7 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
 
     let dialog = Paragraph::new(vec![
         Line::from(""),
-        Line::from(message),
+        Line::from(message.to_string()),
         Line::from(""),
         Line::from(""),
         Line::from(vec![
@@ -776,6 +849,70 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow)),
     );
+
+    frame.render_widget(dialog, dialog_area);
+}
+
+/// Draw the rebuild confirmation dialog with provider change warning and no-cache toggle
+fn draw_rebuild_confirm_dialog(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    name: &str,
+    provider_change: Option<&(devc_provider::ProviderType, devc_provider::ProviderType)>,
+) {
+    let dialog_width = 50;
+    let dialog_height = if provider_change.is_some() { 11 } else { 9 };
+    let dialog_area = Rect {
+        x: (area.width.saturating_sub(dialog_width)) / 2,
+        y: (area.height.saturating_sub(dialog_height)) / 2,
+        width: dialog_width.min(area.width),
+        height: dialog_height.min(area.height),
+    };
+
+    frame.render_widget(Clear, dialog_area);
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(format!("Rebuild '{}'?", name)),
+        Line::from(""),
+    ];
+
+    // Add provider change warning if applicable
+    if let Some((old, new)) = provider_change {
+        lines.push(Line::from(vec![
+            Span::styled("  Warning: ", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(format!("{} -> {}", old, new), Style::default().fg(Color::Yellow)),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    // Add no-cache checkbox
+    let checkbox = if app.rebuild_no_cache { "[X]" } else { "[ ]" };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(checkbox, Style::default().fg(Color::Cyan)),
+        Span::raw(" Force rebuild (no cache)"),
+    ]));
+    lines.push(Line::from(""));
+
+    // Add button row
+    lines.push(Line::from(vec![
+        Span::styled(" [y] Confirm ", Style::default().fg(Color::Green)),
+        Span::raw(" "),
+        Span::styled(" [n] Cancel ", Style::default().fg(Color::Red)),
+        Span::raw(" "),
+        Span::styled(" [Space] Toggle ", Style::default().fg(Color::Cyan)),
+    ]));
+
+    let dialog = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .title(" Rebuild Container ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
 
     frame.render_widget(dialog, dialog_area);
 }

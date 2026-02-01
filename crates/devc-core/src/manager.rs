@@ -11,6 +11,7 @@ use devc_provider::{
 };
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
 /// Main container manager
@@ -470,6 +471,274 @@ fi
         }
 
         Ok(())
+    }
+
+    /// Rebuild a container, optionally migrating to current provider
+    ///
+    /// This will:
+    /// 1. Stop and remove the runtime container (via down())
+    /// 2. If provider changed: update state with new provider, clear image_id
+    /// 3. Build image with optional --no-cache
+    /// 4. Create and start the new container
+    pub async fn rebuild(&self, id: &str, no_cache: bool) -> Result<()> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        let old_provider = container_state.provider;
+        let new_provider = self.provider_type();
+        let provider_changed = old_provider != new_provider;
+
+        // 1. Stop and remove runtime container
+        if container_state.container_id.is_some() {
+            self.down(id).await?;
+        }
+
+        // 2. Handle provider migration
+        if provider_changed {
+            // Update state with new provider
+            // Image is provider-specific, so clear it to force rebuild
+            {
+                let mut state = self.state.write().await;
+                if let Some(cs) = state.get_mut(id) {
+                    cs.provider = new_provider;
+                    cs.image_id = None;
+                    cs.container_id = None;
+                    cs.status = DevcContainerStatus::Configured;
+                }
+                state.save()?;
+            }
+            tracing::info!(
+                "Provider migration: {} -> {}",
+                old_provider,
+                new_provider
+            );
+        }
+
+        // 3. Rebuild image
+        self.build_with_options(id, no_cache).await?;
+
+        // 4. Create and start container
+        self.up(id).await?;
+
+        Ok(())
+    }
+
+    /// Rebuild a container with progress updates streamed to a channel
+    ///
+    /// Same as rebuild() but sends progress updates for TUI display
+    pub async fn rebuild_with_progress(
+        &self,
+        id: &str,
+        no_cache: bool,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<()> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        let old_provider = container_state.provider;
+        let new_provider = self.provider_type();
+        let provider_changed = old_provider != new_provider;
+
+        // 1. Stop and remove runtime container
+        if container_state.container_id.is_some() {
+            let _ = progress.send("Stopping container...".to_string());
+            self.down(id).await?;
+        }
+
+        // 2. Handle provider migration
+        if provider_changed {
+            let _ = progress.send(format!(
+                "Migrating provider: {} -> {}",
+                old_provider, new_provider
+            ));
+            let mut state = self.state.write().await;
+            if let Some(cs) = state.get_mut(id) {
+                cs.provider = new_provider;
+                cs.image_id = None;
+                cs.container_id = None;
+                cs.status = DevcContainerStatus::Configured;
+            }
+            state.save()?;
+        }
+
+        // 3. Rebuild image with progress
+        let _ = progress.send("Building image...".to_string());
+        self.build_with_progress(id, no_cache, progress.clone()).await?;
+
+        // 4. Create and start container
+        let _ = progress.send("Creating container...".to_string());
+        self.create(id).await?;
+
+        let _ = progress.send("Starting container...".to_string());
+        self.start(id).await?;
+
+        let _ = progress.send("Rebuild complete!".to_string());
+        Ok(())
+    }
+
+    /// Build a container image with progress updates streamed to a channel
+    pub async fn build_with_progress(
+        &self,
+        id: &str,
+        no_cache: bool,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<String> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        // Load container config
+        let container = Container::from_config(&container_state.config_path)?;
+
+        // Update status to building
+        {
+            let mut state = self.state.write().await;
+            if let Some(cs) = state.get_mut(id) {
+                cs.status = DevcContainerStatus::Building;
+            }
+            state.save()?;
+        }
+
+        // Check if SSH injection is enabled
+        let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(true);
+
+        // Check if we need to build or pull
+        let image_id = match container.devcontainer.image_source() {
+            ImageSource::Image(image) => {
+                if inject_ssh {
+                    let _ = progress.send(format!(
+                        "Building enhanced image from {} (with SSH support)",
+                        image
+                    ));
+                    let enhanced_ctx = EnhancedBuildContext::from_image(&image)?;
+
+                    let build_config = devc_provider::BuildConfig {
+                        context: enhanced_ctx.context_path().to_path_buf(),
+                        dockerfile: enhanced_ctx.dockerfile_name().to_string(),
+                        tag: container.image_tag(),
+                        build_args: std::collections::HashMap::new(),
+                        target: None,
+                        cache_from: Vec::new(),
+                        labels: {
+                            let mut labels = std::collections::HashMap::new();
+                            labels.insert("devc.managed".to_string(), "true".to_string());
+                            labels.insert("devc.project".to_string(), container.name.clone());
+                            labels.insert("devc.base_image".to_string(), image.clone());
+                            labels
+                        },
+                        no_cache,
+                        pull: true,
+                    };
+
+                    let result = self
+                        .provider
+                        .build_with_progress(&build_config, progress.clone())
+                        .await;
+                    match result {
+                        Ok(id) => id.0,
+                        Err(e) => {
+                            self.set_status(id, DevcContainerStatus::Failed).await?;
+                            return Err(e.into());
+                        }
+                    }
+                } else {
+                    let _ = progress.send(format!("Pulling image: {}", image));
+                    let result = self.provider.pull(&image).await;
+                    match result {
+                        Ok(id) => id.0,
+                        Err(e) => {
+                            self.set_status(id, DevcContainerStatus::Failed).await?;
+                            return Err(e.into());
+                        }
+                    }
+                }
+            }
+            ImageSource::Dockerfile { .. } => {
+                let mut build_config = container.build_config()?;
+                build_config.no_cache = no_cache;
+
+                if inject_ssh {
+                    let _ = progress.send(format!(
+                        "Building enhanced image: {} (with SSH support, no_cache: {})",
+                        build_config.tag, no_cache
+                    ));
+                    let enhanced_ctx = EnhancedBuildContext::from_dockerfile(
+                        &build_config.context,
+                        &build_config.dockerfile,
+                    )?;
+
+                    build_config.context = enhanced_ctx.context_path().to_path_buf();
+                    build_config.dockerfile = enhanced_ctx.dockerfile_name().to_string();
+
+                    let result = self
+                        .provider
+                        .build_with_progress(&build_config, progress.clone())
+                        .await;
+                    match result {
+                        Ok(id) => id.0,
+                        Err(e) => {
+                            self.set_status(id, DevcContainerStatus::Failed).await?;
+                            return Err(e.into());
+                        }
+                    }
+                } else {
+                    let _ = progress.send(format!(
+                        "Building image: {} (no_cache: {})",
+                        build_config.tag, no_cache
+                    ));
+
+                    let result = self
+                        .provider
+                        .build_with_progress(&build_config, progress.clone())
+                        .await;
+                    match result {
+                        Ok(id) => id.0,
+                        Err(e) => {
+                            self.set_status(id, DevcContainerStatus::Failed).await?;
+                            return Err(e.into());
+                        }
+                    }
+                }
+            }
+            ImageSource::Compose => {
+                self.set_status(id, DevcContainerStatus::Failed).await?;
+                return Err(CoreError::InvalidState(
+                    "Docker Compose not yet supported".to_string(),
+                ));
+            }
+            ImageSource::None => {
+                self.set_status(id, DevcContainerStatus::Failed).await?;
+                return Err(CoreError::InvalidState(
+                    "No image source specified".to_string(),
+                ));
+            }
+        };
+
+        // Update state with image ID
+        {
+            let mut state = self.state.write().await;
+            if let Some(cs) = state.get_mut(id) {
+                cs.image_id = Some(image_id.clone());
+                cs.status = DevcContainerStatus::Built;
+            }
+            state.save()?;
+        }
+
+        Ok(image_id)
     }
 
     /// Build, create, and start a container (full lifecycle)

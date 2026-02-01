@@ -8,8 +8,10 @@ use devc_config::GlobalConfig;
 use devc_core::{ContainerManager, ContainerState, DevcContainerStatus};
 use devc_provider::ProviderType;
 use ratatui::prelude::*;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -76,6 +78,10 @@ pub enum View {
 pub enum ConfirmAction {
     Delete(String),
     Stop(String),
+    Rebuild {
+        id: String,
+        provider_change: Option<(ProviderType, ProviderType)>, // (old, new)
+    },
 }
 
 /// Provider status information
@@ -90,8 +96,8 @@ pub struct ProviderStatus {
 
 /// Application state
 pub struct App {
-    /// Container manager
-    pub manager: ContainerManager,
+    /// Container manager (wrapped in Arc for sharing with background tasks)
+    pub manager: Arc<ContainerManager>,
     /// Global configuration
     pub config: GlobalConfig,
     /// Current tab
@@ -110,6 +116,14 @@ pub struct App {
     pub selected: usize,
     /// Build output log
     pub build_output: Vec<String>,
+    /// Build output scroll position
+    pub build_output_scroll: usize,
+    /// Auto-scroll to bottom when new build output arrives
+    pub build_auto_scroll: bool,
+    /// Whether the build has completed (success or error)
+    pub build_complete: bool,
+    /// Channel receiver for build progress updates
+    pub build_progress_rx: Option<mpsc::UnboundedReceiver<String>>,
     /// Container logs
     pub logs: Vec<String>,
     /// Logs scroll position (line offset from top)
@@ -122,6 +136,8 @@ pub struct App {
     pub confirm_action: Option<ConfirmAction>,
     /// Is an operation in progress
     pub loading: bool,
+    /// Rebuild no-cache toggle state (for rebuild confirmation dialog)
+    pub rebuild_no_cache: bool,
     /// Settings state (for global settings)
     pub settings_state: SettingsState,
     /// Provider detail state (for provider-specific settings)
@@ -155,7 +171,7 @@ impl App {
         ];
 
         Ok(Self {
-            manager,
+            manager: Arc::new(manager),
             config,
             tab: Tab::Containers,
             view: View::Main,
@@ -165,12 +181,17 @@ impl App {
             containers,
             selected: 0,
             build_output: Vec::new(),
+            build_output_scroll: 0,
+            build_auto_scroll: true,
+            build_complete: false,
+            build_progress_rx: None,
             logs: Vec::new(),
             logs_scroll: 0,
             status_message: None,
             should_quit: false,
             confirm_action: None,
             loading: false,
+            rebuild_no_cache: false,
             settings_state,
             provider_detail_state: ProviderDetailState::new(),
         })
@@ -184,10 +205,44 @@ impl App {
             // Draw UI
             terminal.draw(|frame| ui::draw(frame, self))?;
 
-            // Handle events
-            if let Some(event) = events.next().await {
-                self.handle_event(event).await?;
+            // Use select to handle multiple event sources for immediate updates
+            tokio::select! {
+                // Terminal/keyboard events
+                event = events.next() => {
+                    if let Some(e) = event {
+                        self.handle_event(e).await?;
+                    }
+                }
+                // Build progress updates (immediate, no tick delay)
+                progress = Self::recv_progress(&mut self.build_progress_rx) => {
+                    if let Some(line) = progress {
+                        self.handle_build_progress(line).await?;
+                    }
+                }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Helper to receive from optional channel
+    async fn recv_progress(rx: &mut Option<mpsc::UnboundedReceiver<String>>) -> Option<String> {
+        match rx {
+            Some(ref mut receiver) => receiver.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Handle a single build progress message
+    async fn handle_build_progress(&mut self, line: String) -> AppResult<()> {
+        let is_complete = line.contains("complete") || line.contains("Error:");
+        self.build_output.push(line);
+
+        if is_complete {
+            self.loading = false;
+            self.build_complete = true;
+            self.build_progress_rx = None;
+            self.refresh_containers().await?;
         }
 
         Ok(())
@@ -200,8 +255,8 @@ impl App {
                 self.handle_key(key.code, key.modifiers).await?;
             }
             Event::Tick => {
-                // Refresh container list periodically (only on Containers tab)
-                if self.tab == Tab::Containers && self.view == View::Main {
+                // Refresh container list periodically (only on Containers tab main view)
+                if self.tab == Tab::Containers && self.view == View::Main && !self.loading {
                     self.refresh_containers().await?;
                 }
             }
@@ -224,11 +279,22 @@ impl App {
                     if let Some(action) = self.confirm_action.take() {
                         self.execute_confirm_action(action).await?;
                     }
-                    self.view = View::Main;
+                    // Only return to Main if the action didn't change the view
+                    // (Rebuild changes to BuildOutput)
+                    if self.view == View::Confirm {
+                        self.view = View::Main;
+                    }
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.confirm_action = None;
+                    self.rebuild_no_cache = false;
                     self.view = View::Main;
+                }
+                KeyCode::Char(' ') => {
+                    // Toggle no_cache option if this is a rebuild action
+                    if matches!(self.confirm_action, Some(ConfirmAction::Rebuild { .. })) {
+                        self.rebuild_no_cache = !self.rebuild_no_cache;
+                    }
                 }
                 _ => {}
             }
@@ -245,6 +311,10 @@ impl App {
         // Global keys (work in any view)
         match code {
             KeyCode::Char('q') => {
+                // Don't close BuildOutput view during active build
+                if self.view == View::BuildOutput && !self.build_complete {
+                    return Ok(());
+                }
                 if self.view != View::Main {
                     self.view = View::Main;
                 } else {
@@ -253,6 +323,10 @@ impl App {
                 return Ok(());
             }
             KeyCode::Esc => {
+                // Don't close BuildOutput view during active build
+                if self.view == View::BuildOutput && !self.build_complete {
+                    return Ok(());
+                }
                 if self.view != View::Main {
                     self.view = View::Main;
                 }
@@ -364,6 +438,25 @@ impl App {
             KeyCode::Char('r') | KeyCode::F(5) => {
                 self.refresh_containers().await?;
                 self.status_message = Some("Refreshed".to_string());
+            }
+            KeyCode::Char('R') => {
+                if !self.containers.is_empty() {
+                    let container = &self.containers[self.selected];
+                    let old_provider = container.provider;
+                    let new_provider = self.active_provider;
+                    let provider_change = if old_provider != new_provider {
+                        Some((old_provider, new_provider))
+                    } else {
+                        None
+                    };
+
+                    self.rebuild_no_cache = false;
+                    self.confirm_action = Some(ConfirmAction::Rebuild {
+                        id: container.id.clone(),
+                        provider_change,
+                    });
+                    self.view = View::Confirm;
+                }
             }
 
             _ => {}
@@ -639,6 +732,25 @@ impl App {
             KeyCode::Char('l') => {
                 self.fetch_logs().await?;
             }
+            KeyCode::Char('R') => {
+                if !self.containers.is_empty() {
+                    let container = &self.containers[self.selected];
+                    let old_provider = container.provider;
+                    let new_provider = self.active_provider;
+                    let provider_change = if old_provider != new_provider {
+                        Some((old_provider, new_provider))
+                    } else {
+                        None
+                    };
+
+                    self.rebuild_no_cache = false;
+                    self.confirm_action = Some(ConfirmAction::Rebuild {
+                        id: container.id.clone(),
+                        provider_change,
+                    });
+                    self.view = View::Confirm;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -652,10 +764,34 @@ impl App {
     ) -> AppResult<()> {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                // Scroll down (TODO)
+                if self.build_output_scroll < self.build_output.len().saturating_sub(1) {
+                    self.build_output_scroll += 1;
+                    self.build_auto_scroll = false; // User took control
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                // Scroll up (TODO)
+                if self.build_output_scroll > 0 {
+                    self.build_output_scroll -= 1;
+                    self.build_auto_scroll = false;
+                }
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.build_output_scroll = self.build_output.len().saturating_sub(1);
+                self.build_auto_scroll = true; // Re-enable auto-scroll
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.build_output_scroll = 0;
+                self.build_auto_scroll = false;
+            }
+            KeyCode::Char('q') | KeyCode::Esc => {
+                // Only allow closing after build completes
+                if self.build_complete {
+                    self.view = View::Main;
+                    self.build_output.clear();
+                    self.build_output_scroll = 0;
+                    self.build_complete = false;
+                    self.build_auto_scroll = true;
+                }
             }
             _ => {}
         }
@@ -887,6 +1023,36 @@ impl App {
                 }
                 self.loading = false;
                 self.refresh_containers().await?;
+            }
+            ConfirmAction::Rebuild { id, .. } => {
+                self.loading = true;
+                self.view = View::BuildOutput;
+                self.build_output.clear();
+                self.build_output_scroll = 0;
+                self.build_auto_scroll = true;
+                self.build_complete = false;
+
+                // Create channel for progress updates
+                let (tx, rx) = mpsc::unbounded_channel();
+                self.build_progress_rx = Some(rx);
+
+                // Clone values for the background task
+                let manager = Arc::clone(&self.manager);
+                let no_cache = self.rebuild_no_cache;
+                self.rebuild_no_cache = false;
+
+                // Spawn background task for rebuild
+                tokio::spawn(async move {
+                    let _ = tx.send("Starting rebuild...".to_string());
+                    match manager.rebuild_with_progress(&id, no_cache, tx.clone()).await {
+                        Ok(()) => {
+                            // Success message is sent by rebuild_with_progress
+                        }
+                        Err(e) => {
+                            let _ = tx.send(format!("Error: Rebuild failed: {}", e));
+                        }
+                    }
+                });
             }
         }
         Ok(())

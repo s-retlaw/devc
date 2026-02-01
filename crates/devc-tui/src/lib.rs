@@ -20,9 +20,16 @@ use crossterm::{
 use devc_core::ContainerManager;
 use ratatui::prelude::*;
 use std::io;
+use tracing_subscriber::layer::SubscriberExt;
 
 /// Run the TUI application
 pub async fn run(manager: ContainerManager) -> AppResult<()> {
+    // Suppress tracing output during TUI (use a no-op subscriber to prevent logs from corrupting display)
+    // The guard restores the previous subscriber when dropped
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(tracing_subscriber::layer::Identity::new()),
+    );
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();

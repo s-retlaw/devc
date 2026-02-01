@@ -21,6 +21,7 @@ use std::io::Write;
 use std::path::Path;
 use std::pin::Pin;
 use tokio::io::AsyncRead;
+use tokio::sync::mpsc;
 
 /// Docker provider using bollard crate
 pub struct DockerProvider {
@@ -104,6 +105,61 @@ impl ContainerProvider for DockerProvider {
                     }
                 }
                 Err(e) => return Err(ProviderError::BuildError(e.to_string())),
+            }
+        }
+
+        image_id
+            .map(ImageId::new)
+            .ok_or_else(|| ProviderError::BuildError("No image ID returned".to_string()))
+    }
+
+    async fn build_with_progress(
+        &self,
+        config: &BuildConfig,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<ImageId> {
+        // Create a tarball of the build context
+        let tar_data = create_build_context(&config.context, &config.dockerfile)?;
+
+        let options = BuildImageOptions {
+            dockerfile: config.dockerfile.clone(),
+            t: config.tag.clone(),
+            buildargs: config.build_args.clone(),
+            nocache: config.no_cache,
+            pull: config.pull,
+            labels: config.labels.clone(),
+            ..Default::default()
+        };
+
+        let mut stream = self.client.build_image(options, None, Some(tar_data.into()));
+
+        let mut image_id = None;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(output) => {
+                    if let Some(error) = output.error {
+                        let _ = progress.send(format!("Error: {}", error));
+                        return Err(ProviderError::BuildError(error));
+                    }
+                    if let Some(aux) = output.aux {
+                        if let Some(id) = aux.id {
+                            image_id = Some(id);
+                        }
+                    }
+                    if let Some(stream_line) = output.stream {
+                        let line = stream_line.trim();
+                        if !line.is_empty() {
+                            let _ = progress.send(line.to_string());
+                        }
+                    }
+                    if let Some(status) = output.status {
+                        let _ = progress.send(status);
+                    }
+                }
+                Err(e) => {
+                    let _ = progress.send(format!("Error: {}", e));
+                    return Err(ProviderError::BuildError(e.to_string()));
+                }
             }
         }
 
