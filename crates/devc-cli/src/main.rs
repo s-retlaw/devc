@@ -152,17 +152,24 @@ async fn main() {
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
-    let filter = if cli.verbose {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::new("info")
-    };
+    // Check if we're launching the TUI (no command specified, or demo mode)
+    let is_tui_mode = cli.command.is_none() || cli.demo;
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false))
-        .init();
+    // Initialize logging only for CLI commands, not for TUI
+    // The TUI handles its own tracing suppression, but the global subscriber
+    // would still print on tokio worker threads
+    if !is_tui_mode {
+        let filter = if cli.verbose {
+            EnvFilter::new("debug")
+        } else {
+            EnvFilter::new("info")
+        };
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_target(false))
+            .init();
+    }
 
     // Load global config
     let mut config = GlobalConfig::load().unwrap_or_default();
