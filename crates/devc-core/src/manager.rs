@@ -644,12 +644,9 @@ fi
         let _ = progress.send("Building image...".to_string());
         self.build_with_progress(id, no_cache, progress.clone()).await?;
 
-        // 4. Create and start container
-        let _ = progress.send("Creating container...".to_string());
-        self.create(id).await?;
-
+        // 4. Create and start container (using up() to run lifecycle commands, dotfiles, SSH setup)
         let _ = progress.send("Starting container...".to_string());
-        self.start(id).await?;
+        self.up(id).await?;
 
         let _ = progress.send("Rebuild complete!".to_string());
         Ok(())
