@@ -84,6 +84,18 @@ pub enum ConfirmAction {
     },
 }
 
+/// Dialog focus state for keyboard navigation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DialogFocus {
+    /// Checkbox (for dialogs that have one)
+    Checkbox,
+    /// Confirm/Yes button
+    #[default]
+    Confirm,
+    /// Cancel/No button
+    Cancel,
+}
+
 /// Provider status information
 #[derive(Debug, Clone)]
 pub struct ProviderStatus {
@@ -138,6 +150,8 @@ pub struct App {
     pub loading: bool,
     /// Rebuild no-cache toggle state (for rebuild confirmation dialog)
     pub rebuild_no_cache: bool,
+    /// Dialog focus state for keyboard navigation
+    pub dialog_focus: DialogFocus,
     /// Settings state (for global settings)
     pub settings_state: SettingsState,
     /// Provider detail state (for provider-specific settings)
@@ -192,6 +206,7 @@ impl App {
             confirm_action: None,
             loading: false,
             rebuild_no_cache: false,
+            dialog_focus: DialogFocus::default(),
             settings_state,
             provider_detail_state: ProviderDetailState::new(),
         })
@@ -274,13 +289,93 @@ impl App {
     async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> AppResult<()> {
         // Handle confirmation dialog first
         if self.view == View::Confirm {
+            let has_checkbox = matches!(self.confirm_action, Some(ConfirmAction::Rebuild { .. }));
+
             match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                // Tab moves to next focusable element
+                KeyCode::Tab => {
+                    self.dialog_focus = match self.dialog_focus {
+                        DialogFocus::Checkbox => DialogFocus::Confirm,
+                        DialogFocus::Confirm => DialogFocus::Cancel,
+                        DialogFocus::Cancel => {
+                            if has_checkbox {
+                                DialogFocus::Checkbox
+                            } else {
+                                DialogFocus::Confirm
+                            }
+                        }
+                    };
+                }
+                // Shift+Tab moves to previous focusable element
+                KeyCode::BackTab => {
+                    self.dialog_focus = match self.dialog_focus {
+                        DialogFocus::Checkbox => DialogFocus::Cancel,
+                        DialogFocus::Confirm => {
+                            if has_checkbox {
+                                DialogFocus::Checkbox
+                            } else {
+                                DialogFocus::Cancel
+                            }
+                        }
+                        DialogFocus::Cancel => DialogFocus::Confirm,
+                    };
+                }
+                // Enter activates the focused element
+                KeyCode::Enter => {
+                    match self.dialog_focus {
+                        DialogFocus::Checkbox => {
+                            // Toggle checkbox
+                            self.rebuild_no_cache = !self.rebuild_no_cache;
+                        }
+                        DialogFocus::Confirm => {
+                            // Execute the action
+                            if let Some(action) = self.confirm_action.take() {
+                                self.execute_confirm_action(action).await?;
+                            }
+                            // Only return to Main if the action didn't change the view
+                            if self.view == View::Confirm {
+                                self.view = View::Main;
+                            }
+                        }
+                        DialogFocus::Cancel => {
+                            // Cancel
+                            self.confirm_action = None;
+                            self.rebuild_no_cache = false;
+                            self.dialog_focus = DialogFocus::default();
+                            self.view = View::Main;
+                        }
+                    }
+                }
+                // Space toggles checkbox if focused, otherwise acts like Enter
+                KeyCode::Char(' ') => {
+                    if self.dialog_focus == DialogFocus::Checkbox {
+                        self.rebuild_no_cache = !self.rebuild_no_cache;
+                    } else {
+                        // Treat space like Enter for buttons
+                        match self.dialog_focus {
+                            DialogFocus::Confirm => {
+                                if let Some(action) = self.confirm_action.take() {
+                                    self.execute_confirm_action(action).await?;
+                                }
+                                if self.view == View::Confirm {
+                                    self.view = View::Main;
+                                }
+                            }
+                            DialogFocus::Cancel => {
+                                self.confirm_action = None;
+                                self.rebuild_no_cache = false;
+                                self.dialog_focus = DialogFocus::default();
+                                self.view = View::Main;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Shortcut keys still work
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
                     if let Some(action) = self.confirm_action.take() {
                         self.execute_confirm_action(action).await?;
                     }
-                    // Only return to Main if the action didn't change the view
-                    // (Rebuild changes to BuildOutput)
                     if self.view == View::Confirm {
                         self.view = View::Main;
                     }
@@ -288,13 +383,8 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.confirm_action = None;
                     self.rebuild_no_cache = false;
+                    self.dialog_focus = DialogFocus::default();
                     self.view = View::Main;
-                }
-                KeyCode::Char(' ') => {
-                    // Toggle no_cache option if this is a rebuild action
-                    if matches!(self.confirm_action, Some(ConfirmAction::Rebuild { .. })) {
-                        self.rebuild_no_cache = !self.rebuild_no_cache;
-                    }
                 }
                 _ => {}
             }
@@ -432,6 +522,7 @@ impl App {
                 if !self.containers.is_empty() {
                     let container = &self.containers[self.selected];
                     self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
+                    self.dialog_focus = DialogFocus::Confirm;
                     self.view = View::Confirm;
                 }
             }
@@ -451,6 +542,7 @@ impl App {
                     };
 
                     self.rebuild_no_cache = false;
+                    self.dialog_focus = DialogFocus::Confirm;
                     self.confirm_action = Some(ConfirmAction::Rebuild {
                         id: container.id.clone(),
                         provider_change,
@@ -744,6 +836,7 @@ impl App {
                     };
 
                     self.rebuild_no_cache = false;
+                    self.dialog_focus = DialogFocus::Confirm;
                     self.confirm_action = Some(ConfirmAction::Rebuild {
                         id: container.id.clone(),
                         provider_change,

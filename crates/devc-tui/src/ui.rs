@@ -1,7 +1,7 @@
 //! UI rendering for the TUI application
 
 use ansi_to_tui::IntoText;
-use crate::app::{App, ConfirmAction, Tab, View};
+use crate::app::{App, ConfirmAction, DialogFocus, Tab, View};
 use crate::settings::{SettingsField, SettingsSection};
 use devc_core::DevcContainerStatus;
 use ratatui::{
@@ -814,7 +814,7 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 .find(|c| &c.id == id)
                 .map(|c| c.name.as_str())
                 .unwrap_or(id);
-            draw_simple_confirm_dialog(frame, area, &format!("Delete container '{}'?", name));
+            draw_simple_confirm_dialog(frame, app, area, &format!("Delete container '{}'?", name));
         }
         Some(ConfirmAction::Stop(id)) => {
             let name = app
@@ -823,7 +823,7 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 .find(|c| &c.id == id)
                 .map(|c| c.name.as_str())
                 .unwrap_or(id);
-            draw_simple_confirm_dialog(frame, area, &format!("Stop container '{}'?", name));
+            draw_simple_confirm_dialog(frame, app, area, &format!("Stop container '{}'?", name));
         }
         Some(ConfirmAction::Rebuild { id, provider_change }) => {
             let name = app
@@ -839,9 +839,9 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Draw a simple yes/no confirmation dialog
-fn draw_simple_confirm_dialog(frame: &mut Frame, area: Rect, message: &str) {
+fn draw_simple_confirm_dialog(frame: &mut Frame, app: &App, area: Rect, message: &str) {
     let dialog_width = 50;
-    let dialog_height = 7;
+    let dialog_height = 8;
     let dialog_area = Rect {
         x: (area.width.saturating_sub(dialog_width)) / 2,
         y: (area.height.saturating_sub(dialog_height)) / 2,
@@ -851,16 +851,33 @@ fn draw_simple_confirm_dialog(frame: &mut Frame, area: Rect, message: &str) {
 
     frame.render_widget(Clear, dialog_area);
 
+    // Button styles based on focus
+    let confirm_style = if app.dialog_focus == DialogFocus::Confirm {
+        Style::default().bg(Color::Green).fg(Color::Black).bold()
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let cancel_style = if app.dialog_focus == DialogFocus::Cancel {
+        Style::default().bg(Color::Red).fg(Color::White).bold()
+    } else {
+        Style::default().fg(Color::Red)
+    };
+
     let dialog = Paragraph::new(vec![
         Line::from(""),
         Line::from(message.to_string()),
         Line::from(""),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  [y] Yes  ", Style::default().fg(Color::Green)),
-            Span::raw("  "),
-            Span::styled("  [n] No  ", Style::default().fg(Color::Red)),
+            Span::styled("  Confirm  ", confirm_style),
+            Span::raw("    "),
+            Span::styled("  Cancel  ", cancel_style),
         ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Tab: Switch  Enter: Select  Esc: Cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
     ])
     .alignment(Alignment::Center)
     .block(
@@ -882,7 +899,7 @@ fn draw_rebuild_confirm_dialog(
     provider_change: Option<&(devc_provider::ProviderType, devc_provider::ProviderType)>,
 ) {
     let dialog_width = 50;
-    let dialog_height = if provider_change.is_some() { 11 } else { 9 };
+    let dialog_height = if provider_change.is_some() { 13 } else { 11 };
     let dialog_area = Rect {
         x: (area.width.saturating_sub(dialog_width)) / 2,
         y: (area.height.saturating_sub(dialog_height)) / 2,
@@ -891,6 +908,23 @@ fn draw_rebuild_confirm_dialog(
     };
 
     frame.render_widget(Clear, dialog_area);
+
+    // Styles based on focus state
+    let checkbox_style = if app.dialog_focus == DialogFocus::Checkbox {
+        Style::default().bg(Color::Cyan).fg(Color::Black).bold()
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let confirm_style = if app.dialog_focus == DialogFocus::Confirm {
+        Style::default().bg(Color::Green).fg(Color::Black).bold()
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let cancel_style = if app.dialog_focus == DialogFocus::Cancel {
+        Style::default().bg(Color::Red).fg(Color::White).bold()
+    } else {
+        Style::default().fg(Color::Red)
+    };
 
     let mut lines = vec![
         Line::from(""),
@@ -907,23 +941,33 @@ fn draw_rebuild_confirm_dialog(
         lines.push(Line::from(""));
     }
 
-    // Add no-cache checkbox
+    // Add no-cache checkbox with focus indicator
     let checkbox = if app.rebuild_no_cache { "[X]" } else { "[ ]" };
+    let focus_indicator = if app.dialog_focus == DialogFocus::Checkbox { "▶ " } else { "  " };
     lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(checkbox, Style::default().fg(Color::Cyan)),
-        Span::raw(" Force rebuild (no cache)"),
+        Span::raw(focus_indicator),
+        Span::styled(checkbox, checkbox_style),
+        Span::styled(" Force rebuild (no cache)", if app.dialog_focus == DialogFocus::Checkbox {
+            Style::default().bold()
+        } else {
+            Style::default()
+        }),
     ]));
     lines.push(Line::from(""));
 
-    // Add button row
+    // Add button row with focus indicators
     lines.push(Line::from(vec![
-        Span::styled(" [y] Confirm ", Style::default().fg(Color::Green)),
-        Span::raw(" "),
-        Span::styled(" [n] Cancel ", Style::default().fg(Color::Red)),
-        Span::raw(" "),
-        Span::styled(" [Space] Toggle ", Style::default().fg(Color::Cyan)),
+        Span::styled("  Confirm  ", confirm_style),
+        Span::raw("    "),
+        Span::styled("  Cancel  ", cancel_style),
     ]));
+    lines.push(Line::from(""));
+
+    // Help text
+    lines.push(Line::from(Span::styled(
+        "Tab: Switch  Enter/Space: Select  Esc: Cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
 
     let dialog = Paragraph::new(lines)
         .alignment(Alignment::Center)
