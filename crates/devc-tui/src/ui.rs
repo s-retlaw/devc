@@ -240,7 +240,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         Cell::from("Name"),
         Cell::from("Status"),
         Cell::from("Provider"),
-        Cell::from("Last Used"),
+        Cell::from("Workspace"),
     ])
     .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
     .bottom_margin(1);
@@ -270,13 +270,20 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                 DevcContainerStatus::Configured => Color::DarkGray,
             };
 
+            // Format workspace path - show last component or truncate if too long
+            let workspace = container.workspace_path.display().to_string();
+            let workspace_display = if workspace.len() > 35 {
+                format!("...{}", &workspace[workspace.len()-32..])
+            } else {
+                workspace
+            };
+
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
                 Cell::from(container.name.clone()).style(Style::default().bold()),
                 Cell::from(format!("{}", container.status)).style(Style::default().fg(status_color)),
                 Cell::from(format!("{}", container.provider)),
-                Cell::from(format_time_ago(container.last_used.timestamp()))
-                    .style(Style::default().fg(Color::DarkGray)),
+                Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();
@@ -287,7 +294,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(22),  // Name
         Constraint::Length(12),  // Status
         Constraint::Length(10),  // Provider
-        Constraint::Min(10),     // Last Used (takes remaining)
+        Constraint::Min(20),     // Workspace (takes remaining)
     ];
 
     let table = Table::new(rows, widths)
@@ -1235,20 +1242,3 @@ fn draw_rebuild_confirm_dialog(
     frame.render_widget(dialog, dialog_area);
 }
 
-/// Format a timestamp as "X ago"
-fn format_time_ago(timestamp: i64) -> String {
-    let now = chrono::Utc::now().timestamp();
-    let diff = now - timestamp;
-
-    if diff < 60 {
-        "just now".to_string()
-    } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
-    } else if diff < 86400 {
-        format!("{}h ago", diff / 3600)
-    } else if diff < 604800 {
-        format!("{}d ago", diff / 86400)
-    } else {
-        format!("{}w ago", diff / 604800)
-    }
-}
