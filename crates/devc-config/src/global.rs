@@ -81,10 +81,20 @@ pub struct DockerConfig {
 impl Default for DockerConfig {
     fn default() -> Self {
         Self {
-            socket: "/var/run/docker.sock".to_string(),
+            socket: default_docker_socket(),
             extra: HashMap::new(),
         }
     }
+}
+
+#[cfg(windows)]
+fn default_docker_socket() -> String {
+    "//./pipe/docker_engine".to_string()
+}
+
+#[cfg(not(windows))]
+fn default_docker_socket() -> String {
+    "/var/run/docker.sock".to_string()
 }
 
 /// Podman-specific configuration
@@ -100,16 +110,35 @@ pub struct PodmanConfig {
 
 impl Default for PodmanConfig {
     fn default() -> Self {
-        // Try to use XDG_RUNTIME_DIR for rootless podman
-        let socket = std::env::var("XDG_RUNTIME_DIR")
-            .map(|dir| format!("{}/podman/podman.sock", dir))
-            .unwrap_or_else(|_| "/run/user/1000/podman/podman.sock".to_string());
-
         Self {
-            socket,
+            socket: default_podman_socket(),
             extra: HashMap::new(),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn default_podman_socket() -> String {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(|dir| format!("{}/podman/podman.sock", dir))
+        .unwrap_or_else(|_| "/run/user/1000/podman/podman.sock".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn default_podman_socket() -> String {
+    dirs::home_dir()
+        .map(|h| {
+            format!(
+                "{}/.local/share/containers/podman/machine/podman-machine-default/podman.sock",
+                h.display()
+            )
+        })
+        .unwrap_or_else(|| "/var/run/podman.sock".to_string())
+}
+
+#[cfg(windows)]
+fn default_podman_socket() -> String {
+    "//./pipe/podman-machine-default".to_string()
 }
 
 impl GlobalConfig {

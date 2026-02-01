@@ -12,3 +12,4 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 directories = { workspace = true }
 tracing = { workspace = true }
+dirs = "5"

@@ -5,11 +5,13 @@
 
 mod docker;
 mod error;
+#[cfg(target_os = "linux")]
 mod host_podman;
 mod types;
 
 pub use docker::DockerProvider;
 pub use error::*;
+#[cfg(target_os = "linux")]
 pub use host_podman::HostPodmanProvider;
 pub use types::*;
 
@@ -121,6 +123,7 @@ pub async fn create_provider(
 }
 
 /// Check if we're running inside a Fedora Toolbox or similar container
+#[cfg(target_os = "linux")]
 fn is_in_toolbox() -> bool {
     std::path::Path::new("/run/.containerenv").exists()
 }
@@ -130,7 +133,8 @@ fn is_in_toolbox() -> bool {
 pub async fn create_default_provider(
     config: &devc_config::GlobalConfig,
 ) -> Result<Box<dyn ContainerProvider>> {
-    // If in toolbox, try host podman first
+    // Only check for toolbox on Linux
+    #[cfg(target_os = "linux")]
     if is_in_toolbox() {
         tracing::info!("Detected toolbox environment, using host podman");
         match HostPodmanProvider::new().await {
@@ -155,21 +159,22 @@ pub async fn create_default_provider(
     match create_provider(provider_type, config).await {
         Ok(provider) => Ok(provider),
         Err(e) => {
-            // If in toolbox and socket failed, give a helpful error
+            // If in toolbox and socket failed, give a helpful error (Linux only)
+            #[cfg(target_os = "linux")]
             if is_in_toolbox() {
-                Err(ProviderError::ConnectionError(format!(
+                return Err(ProviderError::ConnectionError(format!(
                     "Cannot connect to container runtime. In toolbox, ensure 'flatpak-spawn --host podman' works. Error: {}",
                     e
-                )))
-            } else {
-                let socket_exists = std::path::Path::new(socket_path).exists();
-                Err(ProviderError::ConnectionError(format_connection_error(
-                    provider_type,
-                    socket_path,
-                    socket_exists,
-                    &e,
-                )))
+                )));
             }
+
+            let socket_exists = std::path::Path::new(socket_path).exists();
+            Err(ProviderError::ConnectionError(format_connection_error(
+                provider_type,
+                socket_path,
+                socket_exists,
+                &e,
+            )))
         }
     }
 }
