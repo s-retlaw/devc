@@ -28,9 +28,6 @@ pub enum ProviderError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
-    #[error("Docker API error: {0}")]
-    DockerError(#[from] bollard::errors::Error),
-
     #[error("Timeout waiting for operation")]
     Timeout,
 
