@@ -80,6 +80,17 @@ impl DotfilesManager {
         container_id: &ContainerId,
         user: Option<&str>,
     ) -> Result<()> {
+        self.inject_with_progress(provider, container_id, user, None).await
+    }
+
+    /// Inject dotfiles into a container with progress updates
+    pub async fn inject_with_progress(
+        &self,
+        provider: &dyn ContainerProvider,
+        container_id: &ContainerId,
+        user: Option<&str>,
+        progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
         if !self.is_configured() {
             tracing::debug!("No dotfiles configured, skipping injection");
             return Ok(());
@@ -87,10 +98,12 @@ impl DotfilesManager {
 
         match &self.config {
             DotfilesSource::Repository(url) => {
+                send_progress(progress, "Cloning dotfiles repository...");
                 self.inject_from_repo(provider, container_id, url, user)
                     .await?;
             }
             DotfilesSource::Local(path) => {
+                send_progress(progress, "Copying dotfiles...");
                 self.inject_from_local(provider, container_id, path, user)
                     .await?;
             }
@@ -99,10 +112,12 @@ impl DotfilesManager {
 
         // Run install command if configured
         if let Some(ref cmd) = self.install_command {
+            send_progress(progress, "Running dotfiles install command...");
             self.run_install_command(provider, container_id, cmd, user)
                 .await?;
         } else {
             // Try to run default install scripts
+            send_progress(progress, "Running dotfiles install script...");
             self.run_default_install(provider, container_id, user)
                 .await?;
         }
@@ -344,6 +359,13 @@ impl DotfilesManager {
         }
 
         Ok(())
+    }
+}
+
+/// Helper to send progress messages
+fn send_progress(progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
+    if let Some(tx) = progress {
+        let _ = tx.send(msg.to_string());
     }
 }
 

@@ -3,11 +3,14 @@
 //! Built with Ratatui for a modern terminal UI experience.
 
 pub mod app;
+mod clipboard;
 mod demo;
 mod event;
 pub mod settings;
 pub mod ui;
 pub mod widgets;
+
+pub use clipboard::copy_to_clipboard;
 
 pub use app::{App, AppResult, ConfirmAction, DialogFocus, Tab, View};
 pub use demo::DemoApp;

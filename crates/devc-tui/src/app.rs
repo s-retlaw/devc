@@ -1,5 +1,6 @@
 //! Main TUI application state and logic
 
+use crate::clipboard::copy_to_clipboard;
 use crate::event::{Event, EventHandler};
 use crate::settings::{ProviderDetailState, SettingsState};
 use crate::ui;
@@ -1089,6 +1090,15 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => {
                 self.build_output_scroll = 0;
                 self.build_auto_scroll = false;
+            }
+            KeyCode::Char('c') => {
+                // Copy all log lines to clipboard
+                let content = self.build_output.join("\n");
+                if let Err(e) = copy_to_clipboard(&content) {
+                    self.status_message = Some(format!("Failed to copy: {}", e));
+                } else {
+                    self.status_message = Some(format!("Copied {} lines to clipboard", self.build_output.len()));
+                }
             }
             KeyCode::Char('q') | KeyCode::Esc => {
                 // Only allow closing after build completes

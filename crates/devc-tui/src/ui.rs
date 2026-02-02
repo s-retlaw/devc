@@ -187,9 +187,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         View::BuildOutput => {
             if app.build_complete {
-                "j/k: Scroll  g/G: Top/Bottom  q/Esc: Close"
+                "j/k: Scroll  g/G: Top/Bottom  c: Copy  q/Esc: Close"
             } else {
-                "j/k: Scroll  g/G: Top/Bottom  (building...)"
+                "j/k: Scroll  g/G: Top/Bottom  c: Copy  (building...)"
             }
         }
         View::Logs => "j/k: Scroll  g/G: Top/Bottom  PgUp/PgDn: Page  r: Refresh  Esc/q: Back",
