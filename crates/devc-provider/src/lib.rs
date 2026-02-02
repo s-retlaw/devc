@@ -4,6 +4,7 @@
 //! with a consistent API for container operations.
 
 mod docker;
+mod docker_auth;
 mod error;
 #[cfg(target_os = "linux")]
 mod host_podman;

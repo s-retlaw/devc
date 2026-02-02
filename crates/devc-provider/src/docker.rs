@@ -1,10 +1,10 @@
 //! Docker provider implementation using bollard
 
 use crate::{
-    BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider, ContainerStatus,
-    CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig, ExecResult,
-    ExecStream, ImageId, LogConfig, LogStream, MountInfo, MountType, NetworkInfo, NetworkSettings,
-    PortInfo, ProviderError, ProviderInfo, ProviderType, Result,
+    docker_auth, BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider,
+    ContainerStatus, CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig,
+    ExecResult, ExecStream, ImageId, LogConfig, LogStream, MountInfo, MountType, NetworkInfo,
+    NetworkSettings, PortInfo, ProviderError, ProviderInfo, ProviderType, Result,
 };
 use async_trait::async_trait;
 use bollard::container::{
@@ -86,7 +86,10 @@ impl ContainerProvider for DockerProvider {
             ..Default::default()
         };
 
-        let mut stream = self.client.build_image(options, None, Some(tar_data.into()));
+        // Get registry credentials for pulling base images during build
+        let credentials = docker_auth::get_registry_auth();
+
+        let mut stream = self.client.build_image(options, credentials, Some(tar_data.into()));
 
         let mut image_id = None;
         while let Some(result) = stream.next().await {
@@ -131,7 +134,12 @@ impl ContainerProvider for DockerProvider {
             ..Default::default()
         };
 
-        let mut stream = self.client.build_image(options, None, Some(tar_data.into()));
+        // Get registry credentials for pulling base images during build
+        let credentials = docker_auth::get_registry_auth();
+
+        let mut stream = self
+            .client
+            .build_image(options, credentials, Some(tar_data.into()));
 
         let mut image_id = None;
         while let Some(result) = stream.next().await {
@@ -176,7 +184,10 @@ impl ContainerProvider for DockerProvider {
             ..Default::default()
         };
 
-        let mut stream = self.client.create_image(Some(options), None, None);
+        // Get registry credential for this specific image
+        let credentials = docker_auth::get_credential_for_image(image);
+
+        let mut stream = self.client.create_image(Some(options), None, credentials);
 
         while let Some(result) = stream.next().await {
             match result {
