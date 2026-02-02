@@ -183,7 +183,7 @@ impl ContainerManager {
         }
 
         // Check if SSH injection is enabled
-        let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(true);
+        let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(false);
 
         // Check if we need to build or pull
         let image_id = match container.devcontainer.image_source() {
@@ -685,7 +685,14 @@ fi
         }
 
         // Check if SSH injection is enabled
-        let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(true);
+        let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(false);
+
+        // Log SSH injection status (visible without -v flag)
+        if inject_ssh {
+            let _ = progress.send("SSH support: Injecting dropbear into image...".to_string());
+        } else {
+            let _ = progress.send("SSH support: Disabled (not injecting dropbear)".to_string());
+        }
 
         // Check if we need to build or pull
         let image_id = match container.devcontainer.image_source() {
@@ -894,7 +901,7 @@ fi
             }
 
             // Setup SSH if enabled (for proper TTY/resize support)
-            if self.global_config.defaults.ssh_enabled.unwrap_or(true) {
+            if self.global_config.defaults.ssh_enabled.unwrap_or(false) {
                 send_progress(progress, "Setting up SSH...");
                 // Ensure container is running for SSH setup
                 let details = provider.inspect(&container_id).await?;

@@ -39,7 +39,9 @@ pub struct DefaultsConfig {
     pub shell: String,
     /// Default user in containers
     pub user: Option<String>,
-    /// Enable SSH over stdio for proper TTY/resize support (default: true)
+    /// Enable SSH (dropbear) injection for proper terminal resize support (default: false)
+    /// Only needed when terminal resize support is required (e.g., with Podman).
+    /// When disabled, `devc ssh` falls back to `docker/podman exec -it`.
     pub ssh_enabled: Option<bool>,
     /// Path to SSH private key for container authentication
     pub ssh_key_path: Option<String>,
@@ -53,7 +55,9 @@ impl Default for DefaultsConfig {
             dotfiles_local: None,
             shell: "/bin/bash".to_string(),
             user: None,
-            ssh_enabled: Some(true),
+            // Default to false - SSH injection is only needed for terminal resize support
+            // and adds complexity to the build. Users who need terminal resize can enable it.
+            ssh_enabled: Some(false),
             ssh_key_path: None,
         }
     }
@@ -152,7 +156,12 @@ impl GlobalConfig {
     pub fn load_from(path: &PathBuf) -> Result<Self> {
         if !path.exists() {
             tracing::debug!("Config file not found at {:?}, using defaults", path);
-            return Ok(Self::default());
+            let default_config = Self::default();
+            tracing::debug!(
+                "Using default config: ssh_enabled={:?}",
+                default_config.defaults.ssh_enabled
+            );
+            return Ok(default_config);
         }
 
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::ReadError {
@@ -160,10 +169,18 @@ impl GlobalConfig {
             source: e,
         })?;
 
-        toml::from_str(&content).map_err(|e| ConfigError::TomlParseError {
+        let config: Self = toml::from_str(&content).map_err(|e| ConfigError::TomlParseError {
             path: path.clone(),
             source: e,
-        })
+        })?;
+
+        tracing::debug!(
+            "Loaded config from {:?}: ssh_enabled={:?}",
+            path,
+            config.defaults.ssh_enabled
+        );
+
+        Ok(config)
     }
 
     /// Save configuration to the default path
