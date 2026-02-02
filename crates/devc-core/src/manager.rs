@@ -325,6 +325,11 @@ impl ContainerManager {
         let container = Container::from_config(&container_state.config_path)?;
         let create_config = container.create_config(image_id);
 
+        // Clean up any orphaned container with the same name before creating
+        // This handles cases where state has container_id=null but a container exists
+        let container_name = container.container_name();
+        provider.remove_by_name(&container_name).await?;
+
         let container_id = provider.create(&create_config).await?;
 
         // Update state with container ID
@@ -641,12 +646,10 @@ fi
         }
 
         // 3. Rebuild image with progress
-        let _ = progress.send("Building image...".to_string());
         self.build_with_progress(id, no_cache, progress.clone()).await?;
 
-        // 4. Create and start container (using up() to run lifecycle commands, dotfiles, SSH setup)
-        let _ = progress.send("Starting container...".to_string());
-        self.up(id).await?;
+        // 4. Create and start container with progress (runs lifecycle commands, dotfiles, SSH setup)
+        self.up_with_progress(id, Some(&progress)).await?;
 
         let _ = progress.send("Rebuild complete!".to_string());
         Ok(())
@@ -808,6 +811,15 @@ fi
 
     /// Build, create, and start a container (full lifecycle)
     pub async fn up(&self, id: &str) -> Result<()> {
+        self.up_with_progress(id, None).await
+    }
+
+    /// Build, create, and start a container with progress updates
+    pub async fn up_with_progress(
+        &self,
+        id: &str,
+        progress: Option<&mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
         let provider = self.require_provider()?;
 
         let container_state = {
@@ -820,6 +832,7 @@ fi
 
         // Build if needed
         if container_state.image_id.is_none() {
+            send_progress(progress, "Building image...");
             self.build(id).await?;
         }
 
@@ -830,6 +843,7 @@ fi
         };
 
         if container_state.container_id.is_none() {
+            send_progress(progress, "Creating container...");
             self.create(id).await?;
         }
 
@@ -846,6 +860,7 @@ fi
         // Run onCreate command if this is first create
         if container_state.status == DevcContainerStatus::Created {
             if let Some(ref cmd) = container.devcontainer.on_create_command {
+                send_progress(progress, "Running onCreate command...");
                 // Start the container first for onCreate
                 provider.start(&container_id).await?;
 
@@ -861,6 +876,7 @@ fi
 
             // Run postCreateCommand
             if let Some(ref cmd) = container.devcontainer.post_create_command {
+                send_progress(progress, "Running postCreateCommand...");
                 // Ensure container is started
                 let details = provider.inspect(&container_id).await?;
                 if details.status != ContainerStatus::Running {
@@ -879,6 +895,7 @@ fi
 
             // Setup SSH if enabled (for proper TTY/resize support)
             if self.global_config.defaults.ssh_enabled.unwrap_or(true) {
+                send_progress(progress, "Setting up SSH...");
                 // Ensure container is running for SSH setup
                 let details = provider.inspect(&container_id).await?;
                 if details.status != ContainerStatus::Running {
@@ -927,11 +944,13 @@ fi
             };
 
             if dotfiles_manager.is_configured() {
+                send_progress(progress, "Installing dotfiles...");
                 dotfiles_manager
-                    .inject(
+                    .inject_with_progress(
                         provider.as_ref(),
                         &container_id,
                         container.devcontainer.effective_user(),
+                        progress,
                     )
                     .await?;
             }
@@ -940,6 +959,7 @@ fi
         // Start if not running
         let details = provider.inspect(&container_id).await?;
         if details.status != ContainerStatus::Running {
+            send_progress(progress, "Starting container...");
             self.start(id).await?;
         } else {
             self.set_status(id, DevcContainerStatus::Running).await?;
@@ -1274,4 +1294,11 @@ fn find_devcontainer_config(workspace: &std::path::Path) -> Result<std::path::Pa
 
     // If not found, return a default path (will be created later if needed)
     Ok(devcontainer_dir)
+}
+
+/// Helper to send progress messages
+fn send_progress(progress: Option<&mpsc::UnboundedSender<String>>, msg: &str) {
+    if let Some(tx) = progress {
+        let _ = tx.send(msg.to_string());
+    }
 }

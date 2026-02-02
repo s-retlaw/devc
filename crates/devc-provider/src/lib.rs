@@ -2,18 +2,19 @@
 //!
 //! This crate provides an abstraction over container runtimes (Docker, Podman)
 //! with a consistent API for container operations.
+//!
+//! Uses CLI-based implementation for:
+//! - Simpler implementation
+//! - Automatic credential handling (via ~/.docker/config.json)
+//! - Proper user context handling (no permissions issues)
+//! - Works with Docker alternatives (Colima, Rancher, Lima, OrbStack)
 
-mod docker;
-mod docker_auth;
+mod cli_provider;
 mod error;
-#[cfg(target_os = "linux")]
-mod host_podman;
 mod types;
 
-pub use docker::DockerProvider;
+pub use cli_provider::CliProvider;
 pub use error::*;
-#[cfg(target_os = "linux")]
-pub use host_podman::HostPodmanProvider;
 pub use types::*;
 
 use async_trait::async_trait;
@@ -49,6 +50,12 @@ pub trait ContainerProvider: Send + Sync {
 
     /// Remove a container
     async fn remove(&self, id: &ContainerId, force: bool) -> Result<()>;
+
+    /// Remove a container by name (best effort, for cleanup)
+    ///
+    /// This is used to clean up orphaned containers before creating a new one
+    /// with the same name. Errors are ignored since the container may not exist.
+    async fn remove_by_name(&self, name: &str) -> Result<()>;
 
     /// Execute a command in a running container
     async fn exec(&self, id: &ContainerId, config: &ExecConfig) -> Result<ExecResult>;
@@ -106,18 +113,15 @@ pub struct ExecStream {
 /// Factory function to create a provider based on type
 pub async fn create_provider(
     provider_type: ProviderType,
-    config: &devc_config::GlobalConfig,
+    _config: &devc_config::GlobalConfig,
 ) -> Result<Box<dyn ContainerProvider>> {
     match provider_type {
         ProviderType::Docker => {
-            let socket = &config.providers.docker.socket;
-            let provider = DockerProvider::new(socket).await?;
+            let provider = CliProvider::new_docker().await?;
             Ok(Box::new(provider))
         }
         ProviderType::Podman => {
-            // For now, Podman uses Docker-compatible API
-            let socket = &config.providers.podman.socket;
-            let provider = DockerProvider::new_podman(socket).await?;
+            let provider = CliProvider::new_podman().await?;
             Ok(Box::new(provider))
         }
     }
@@ -130,12 +134,10 @@ pub async fn test_provider_connectivity(
     config: &devc_config::GlobalConfig,
 ) -> Result<bool> {
     match create_provider(provider_type, config).await {
-        Ok(provider) => {
-            match provider.ping().await {
-                Ok(()) => Ok(true),
-                Err(_) => Ok(false),
-            }
-        }
+        Ok(provider) => match provider.ping().await {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        },
         Err(_) => Ok(false),
     }
 }
@@ -174,10 +176,10 @@ pub async fn create_default_provider(
     #[cfg(target_os = "linux")]
     if is_in_toolbox() {
         tracing::info!("Detected toolbox environment, using host podman");
-        match HostPodmanProvider::new().await {
+        match CliProvider::new_toolbox().await {
             Ok(provider) => return Ok(Box::new(provider)),
             Err(e) => {
-                tracing::warn!("Failed to connect to host podman: {}, trying socket", e);
+                tracing::warn!("Failed to connect to host podman: {}, trying direct", e);
             }
         }
     }
@@ -209,15 +211,10 @@ pub async fn create_default_provider(
         _ => ProviderType::Docker, // Unknown provider, default to Docker
     };
 
-    let socket_path = match provider_type {
-        ProviderType::Podman => &config.providers.podman.socket,
-        ProviderType::Docker => &config.providers.docker.socket,
-    };
-
     match create_provider(provider_type, config).await {
         Ok(provider) => Ok(provider),
         Err(e) => {
-            // If in toolbox and socket failed, give a helpful error (Linux only)
+            // If in toolbox and direct connection failed, give a helpful error (Linux only)
             #[cfg(target_os = "linux")]
             if is_in_toolbox() {
                 return Err(ProviderError::ConnectionError(format!(
@@ -226,11 +223,8 @@ pub async fn create_default_provider(
                 )));
             }
 
-            let socket_exists = std::path::Path::new(socket_path).exists();
             Err(ProviderError::ConnectionError(format_connection_error(
                 provider_type,
-                socket_path,
-                socket_exists,
                 &e,
             )))
         }
@@ -238,45 +232,33 @@ pub async fn create_default_provider(
 }
 
 /// Format a helpful connection error message with actionable instructions
-fn format_connection_error(
-    provider: ProviderType,
-    socket_path: &str,
-    socket_exists: bool,
-    underlying: &ProviderError,
-) -> String {
+fn format_connection_error(provider: ProviderType, underlying: &ProviderError) -> String {
     let provider_name = match provider {
         ProviderType::Podman => "Podman",
         ProviderType::Docker => "Docker",
     };
 
     let mut msg = format!("Cannot connect to {}\n\n", provider_name);
+    msg.push_str(&format!("Underlying error: {}\n\n", underlying));
 
-    if !socket_exists {
-        msg.push_str(&format!(
-            "The {} API socket was not found at:\n  {}\n\n",
-            provider_name, socket_path
-        ));
-
-        match provider {
-            ProviderType::Podman => {
-                msg.push_str("To enable the Podman socket, run:\n");
-                msg.push_str("  systemctl --user enable --now podman.socket\n\n");
-                msg.push_str("To verify it's working:\n");
-                msg.push_str(
-                    "  curl --unix-socket $XDG_RUNTIME_DIR/podman/podman.sock http://localhost/_ping\n",
-                );
-            }
-            ProviderType::Docker => {
-                msg.push_str("To start Docker, run:\n");
-                msg.push_str("  sudo systemctl enable --now docker\n");
-            }
+    match provider {
+        ProviderType::Podman => {
+            msg.push_str("To install Podman:\n");
+            msg.push_str("  # On Fedora/RHEL:\n");
+            msg.push_str("  sudo dnf install podman\n\n");
+            msg.push_str("  # On Ubuntu/Debian:\n");
+            msg.push_str("  sudo apt install podman\n\n");
+            msg.push_str("To verify it's working:\n");
+            msg.push_str("  podman --version\n");
         }
-    } else {
-        msg.push_str(&format!(
-            "The socket exists at {} but the daemon is not responding.\n\n",
-            socket_path
-        ));
-        msg.push_str(&format!("Underlying error: {}\n", underlying));
+        ProviderType::Docker => {
+            msg.push_str("To install Docker:\n");
+            msg.push_str("  Visit https://docs.docker.com/get-docker/\n\n");
+            msg.push_str("To start Docker:\n");
+            msg.push_str("  sudo systemctl enable --now docker\n\n");
+            msg.push_str("To verify it's working:\n");
+            msg.push_str("  docker --version\n");
+        }
     }
 
     msg
