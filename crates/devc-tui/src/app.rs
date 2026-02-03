@@ -100,9 +100,9 @@ pub enum DialogFocus {
     /// Checkbox (for dialogs that have one)
     Checkbox,
     /// Confirm/Yes button
-    #[default]
     Confirm,
     /// Cancel/No button
+    #[default]
     Cancel,
 }
 
@@ -677,7 +677,7 @@ impl App {
                     if !self.discovered_containers.is_empty() {
                         let container = &self.discovered_containers[self.selected_discovered];
                         if !container.managed {
-                            self.dialog_focus = DialogFocus::Confirm;
+                            self.dialog_focus = DialogFocus::Cancel;
                             self.confirm_action = Some(ConfirmAction::Adopt {
                                 container_id: container.id.0.clone(),
                                 container_name: container.name.clone(),
@@ -742,7 +742,7 @@ impl App {
                     if !self.containers.is_empty() {
                         let container = &self.containers[self.selected];
                         self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
-                        self.dialog_focus = DialogFocus::Confirm;
+                        self.dialog_focus = DialogFocus::Cancel;
                         self.view = View::Confirm;
                     }
                 }
@@ -762,7 +762,7 @@ impl App {
                         };
 
                         self.rebuild_no_cache = false;
-                        self.dialog_focus = DialogFocus::Confirm;
+                        self.dialog_focus = DialogFocus::Cancel;
                         self.confirm_action = Some(ConfirmAction::Rebuild {
                             id: container.id.clone(),
                             provider_change,
@@ -817,7 +817,7 @@ impl App {
                     let new_provider = self.providers[self.selected_provider].provider_type;
                     // Only show confirmation if it's a different provider
                     if self.active_provider != Some(new_provider) {
-                        self.dialog_focus = DialogFocus::Confirm;
+                        self.dialog_focus = DialogFocus::Cancel;
                         self.confirm_action = Some(ConfirmAction::SetDefaultProvider(new_provider));
                         self.view = View::Confirm;
                     }
@@ -934,7 +934,7 @@ impl App {
                     let new_provider = self.providers[self.selected_provider].provider_type;
                     // Only show confirmation if it's a different provider
                     if self.active_provider != Some(new_provider) {
-                        self.dialog_focus = DialogFocus::Confirm;
+                        self.dialog_focus = DialogFocus::Cancel;
                         self.confirm_action = Some(ConfirmAction::SetDefaultProvider(new_provider));
                         self.view = View::Confirm;
                     }
@@ -1049,7 +1049,7 @@ impl App {
                     };
 
                     self.rebuild_no_cache = false;
-                    self.dialog_focus = DialogFocus::Confirm;
+                    self.dialog_focus = DialogFocus::Cancel;
                     self.confirm_action = Some(ConfirmAction::Rebuild {
                         id: container.id.clone(),
                         provider_change,
