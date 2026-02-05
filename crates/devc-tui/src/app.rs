@@ -207,6 +207,10 @@ pub struct App {
     pub socat_installed: Option<bool>,
     /// Whether socat installation is in progress
     pub socat_installing: bool,
+    /// Spinner frame for install animation
+    pub spinner_frame: usize,
+    /// Channel receiver for install result
+    pub install_result_rx: Option<mpsc::UnboundedReceiver<InstallResult>>,
 
     // Port forwarder management (persists across views)
     /// Active port forwarders: (container_id, port) -> PortForwarder
@@ -280,6 +284,8 @@ impl App {
             port_detect_rx: None,
             socat_installed: None,
             socat_installing: false,
+            spinner_frame: 0,
+            install_result_rx: None,
             active_forwarders: HashMap::new(),
         }
     }
@@ -391,6 +397,8 @@ impl App {
             port_detect_rx: None,
             socat_installed: None,
             socat_installing: false,
+            spinner_frame: 0,
+            install_result_rx: None,
             active_forwarders: HashMap::new(),
         })
     }
@@ -426,6 +434,12 @@ impl App {
                 ports = Self::recv_port_update(&mut self.port_detect_rx) => {
                     if let Some(update) = ports {
                         self.handle_port_update(update);
+                    }
+                }
+                // Install result
+                result = Self::recv_install_result(&mut self.install_result_rx) => {
+                    if let Some(result) = result {
+                        self.handle_install_result(result);
                     }
                 }
             }
@@ -510,6 +524,10 @@ impl App {
                 self.handle_key(key.code, key.modifiers).await?;
             }
             Event::Tick => {
+                // Advance spinner frame when installing
+                if self.socat_installing {
+                    self.spinner_frame = (self.spinner_frame + 1) % 10;
+                }
                 // Refresh container list periodically (only on Containers tab main view)
                 if self.tab == Tab::Containers && self.view == View::Main && !self.loading {
                     self.refresh_containers().await?;
@@ -527,6 +545,18 @@ impl App {
 
     /// Handle key press
     async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> AppResult<()> {
+        // Cancel install if in progress (before global Ctrl+C handler)
+        if self.socat_installing
+            && ((code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+                || code == KeyCode::Esc)
+        {
+            // Cancel install - drop the receiver, reset state
+            self.install_result_rx = None;
+            self.socat_installing = false;
+            self.status_message = Some("Install cancelled".to_string());
+            return Ok(());
+        }
+
         // Ctrl+C shows quit confirmation dialog
         if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
             self.confirm_action = Some(ConfirmAction::QuitApp);
@@ -1369,7 +1399,7 @@ impl App {
             // Install socat
             KeyCode::Char('i') => {
                 if self.socat_installed == Some(false) && !self.socat_installing {
-                    self.install_socat_in_container().await;
+                    self.install_socat_in_container();
                 }
             }
 
@@ -1531,8 +1561,8 @@ impl App {
         self.status_message = Some("Stopped all port forwards".to_string());
     }
 
-    /// Install socat in the current container
-    async fn install_socat_in_container(&mut self) {
+    /// Install socat in the current container (spawns background task)
+    fn install_socat_in_container(&mut self) {
         let container_id = match &self.ports_provider_container_id {
             Some(id) => id.clone(),
             None => return,
@@ -1540,10 +1570,26 @@ impl App {
 
         let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
 
+        // Create channel for result
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.install_result_rx = Some(rx);
         self.socat_installing = true;
+        self.spinner_frame = 0;
         self.status_message = Some("Installing socat...".to_string());
 
-        match install_socat(provider_type, &container_id).await {
+        // Spawn background task
+        tokio::spawn(async move {
+            let result = install_socat(provider_type, &container_id).await;
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Handle install result from background task
+    fn handle_install_result(&mut self, result: InstallResult) {
+        self.socat_installing = false;
+        self.install_result_rx = None;
+
+        match result {
             InstallResult::Success => {
                 self.socat_installed = Some(true);
                 self.status_message = Some("socat installed successfully".to_string());
@@ -1555,7 +1601,16 @@ impl App {
                 self.status_message = Some("No supported package manager found in container".to_string());
             }
         }
-        self.socat_installing = false;
+    }
+
+    /// Helper to receive install result
+    async fn recv_install_result(
+        rx: &mut Option<mpsc::UnboundedReceiver<InstallResult>>,
+    ) -> Option<InstallResult> {
+        match rx {
+            Some(ref mut receiver) => receiver.recv().await,
+            None => std::future::pending().await,
+        }
     }
 
     /// Refresh container list

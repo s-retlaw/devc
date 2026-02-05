@@ -73,7 +73,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::ProviderDetail => draw_provider_detail(frame, app, content_area),
         View::BuildOutput => draw_build_output(frame, app, content_area),
         View::Logs => draw_logs(frame, app, content_area),
-        View::Ports => draw_ports(frame, app, content_area),
+        View::Ports => {
+            draw_ports(frame, app, content_area);
+            // Overlay install modal if installing
+            if app.socat_installing {
+                draw_install_progress(frame, app, area);
+            }
+        }
         View::Help => draw_help(frame, app, content_area),
         View::Confirm => {
             // Draw the main content behind the dialog
@@ -1097,6 +1103,24 @@ fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol("▶ ");
 
     frame.render_stateful_widget(table, area, &mut app.ports_table_state);
+}
+
+/// Draw install progress modal with spinner
+fn draw_install_progress(frame: &mut Frame, app: &App, area: Rect) {
+    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
+
+    DialogBuilder::new("Installing")
+        .width(40)
+        .border_color(Color::Yellow)
+        .empty_line()
+        .styled_message(Line::from(vec![
+            Span::styled(spinner, Style::default().fg(Color::Cyan)),
+            Span::raw(" Installing socat..."),
+        ]))
+        .empty_line()
+        .help("Ctrl+C or Esc to cancel")
+        .render(frame, area);
 }
 
 /// Draw help view - context-sensitive based on current tab
