@@ -2,14 +2,17 @@
 
 use crate::clipboard::copy_to_clipboard;
 use crate::event::{Event, EventHandler};
+use crate::ports::{spawn_port_detector, DetectedPort, PortDetectionUpdate};
 use crate::settings::{ProviderDetailState, SettingsState};
+use crate::tunnel::{open_in_browser, spawn_forwarder, PortForwarder};
 use crate::ui;
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
 use devc_core::{ContainerManager, ContainerState, DevcContainerStatus};
-use devc_provider::{create_provider, detect_available_providers, DiscoveredContainer, ProviderType};
+use devc_provider::{create_provider, detect_available_providers, ContainerProvider, DiscoveredContainer, ProviderType};
 use ratatui::prelude::*;
 use ratatui::widgets::TableState;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -73,6 +76,8 @@ pub enum View {
     Help,
     /// Confirmation dialog
     Confirm,
+    /// Port forwarding view
+    Ports,
 }
 
 /// Confirmation action
@@ -180,6 +185,24 @@ pub struct App {
     pub discovered_table_state: TableState,
     /// Table state for providers view
     pub providers_table_state: TableState,
+
+    // Port forwarding state
+    /// Container currently being viewed for port forwarding (container_id from provider)
+    pub ports_container_id: Option<String>,
+    /// Provider container ID for the ports view
+    pub ports_provider_container_id: Option<String>,
+    /// Detected ports in current container
+    pub detected_ports: Vec<DetectedPort>,
+    /// Selected port index
+    pub selected_port: usize,
+    /// Table state for port list
+    pub ports_table_state: TableState,
+    /// Receiver for port detection updates
+    pub port_detect_rx: Option<mpsc::UnboundedReceiver<PortDetectionUpdate>>,
+
+    // Port forwarder management (persists across views)
+    /// Active port forwarders: (container_id, port) -> PortForwarder
+    pub active_forwarders: HashMap<(String, u16), PortForwarder>,
 }
 
 impl App {
@@ -240,6 +263,14 @@ impl App {
             containers_table_state: TableState::default().with_selected(0),
             discovered_table_state: TableState::default().with_selected(0),
             providers_table_state: TableState::default().with_selected(0),
+            // Port forwarding
+            ports_container_id: None,
+            ports_provider_container_id: None,
+            detected_ports: Vec::new(),
+            selected_port: 0,
+            ports_table_state: TableState::default().with_selected(0),
+            port_detect_rx: None,
+            active_forwarders: HashMap::new(),
         }
     }
 
@@ -341,6 +372,14 @@ impl App {
             containers_table_state: TableState::default().with_selected(0),
             discovered_table_state: TableState::default().with_selected(0),
             providers_table_state: TableState::default().with_selected(0),
+            // Port forwarding
+            ports_container_id: None,
+            ports_provider_container_id: None,
+            detected_ports: Vec::new(),
+            selected_port: 0,
+            ports_table_state: TableState::default().with_selected(0),
+            port_detect_rx: None,
+            active_forwarders: HashMap::new(),
         })
     }
 
@@ -371,7 +410,18 @@ impl App {
                         self.handle_build_progress(line).await?;
                     }
                 }
+                // Port detection updates
+                ports = Self::recv_port_update(&mut self.port_detect_rx) => {
+                    if let Some(update) = ports {
+                        self.handle_port_update(update);
+                    }
+                }
             }
+        }
+
+        // Cleanup: stop all forwarders on exit
+        for (_, forwarder) in self.active_forwarders.drain() {
+            forwarder.stop().await;
         }
 
         Ok(())
@@ -382,6 +432,47 @@ impl App {
         match rx {
             Some(ref mut receiver) => receiver.recv().await,
             None => std::future::pending().await,
+        }
+    }
+
+    /// Helper to receive port detection updates
+    async fn recv_port_update(
+        rx: &mut Option<mpsc::UnboundedReceiver<PortDetectionUpdate>>,
+    ) -> Option<PortDetectionUpdate> {
+        match rx {
+            Some(ref mut receiver) => receiver.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Handle port detection update
+    fn handle_port_update(&mut self, update: PortDetectionUpdate) {
+        // Update is_forwarded based on active tunnels
+        let forwarded_ports: HashSet<u16> = if let Some(ref container_id) = self.ports_provider_container_id {
+            self.active_forwarders
+                .keys()
+                .filter(|(cid, _)| cid == container_id)
+                .map(|(_, port)| *port)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+
+        self.detected_ports = update
+            .ports
+            .into_iter()
+            .map(|mut p| {
+                p.is_forwarded = forwarded_ports.contains(&p.port);
+                p
+            })
+            .collect();
+
+        // Update table state if needed
+        if !self.detected_ports.is_empty() && self.selected_port >= self.detected_ports.len() {
+            self.selected_port = self.detected_ports.len() - 1;
+        }
+        if !self.detected_ports.is_empty() {
+            self.ports_table_state.select(Some(self.selected_port));
         }
     }
 
@@ -616,6 +707,7 @@ impl App {
             View::ProviderDetail => self.handle_provider_detail_key(code, modifiers).await?,
             View::BuildOutput => self.handle_build_key(code, modifiers).await?,
             View::Logs => self.handle_logs_key(code, modifiers).await?,
+            View::Ports => self.handle_ports_key(code, modifiers).await?,
             View::Help | View::Confirm => {} // Handled above
         }
 
@@ -770,6 +862,13 @@ impl App {
                         self.view = View::Confirm;
                     } else if !self.is_connected() {
                         self.status_message = Some("Not connected to provider".to_string());
+                    }
+                }
+                KeyCode::Char('p') => {
+                    // Enter port forwarding view for selected container
+                    if !self.containers.is_empty() {
+                        let container = self.containers[self.selected].clone();
+                        self.enter_ports_view(&container).await?;
                     }
                 }
 
@@ -1158,6 +1257,236 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Handle Port Forwarding view keys
+    async fn handle_ports_key(
+        &mut self,
+        code: KeyCode,
+        _modifiers: KeyModifiers,
+    ) -> AppResult<()> {
+        match code {
+            // Navigation
+            KeyCode::Char('j') | KeyCode::Down => {
+                if !self.detected_ports.is_empty() {
+                    self.selected_port = (self.selected_port + 1) % self.detected_ports.len();
+                    self.ports_table_state.select(Some(self.selected_port));
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if !self.detected_ports.is_empty() {
+                    self.selected_port = self.selected_port
+                        .checked_sub(1)
+                        .unwrap_or(self.detected_ports.len() - 1);
+                    self.ports_table_state.select(Some(self.selected_port));
+                }
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                if !self.detected_ports.is_empty() {
+                    self.selected_port = 0;
+                    self.ports_table_state.select(Some(0));
+                }
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                if !self.detected_ports.is_empty() {
+                    self.selected_port = self.detected_ports.len() - 1;
+                    self.ports_table_state.select(Some(self.selected_port));
+                }
+            }
+
+            // Forward selected port
+            KeyCode::Char('f') => {
+                if let Some(port) = self.detected_ports.get(self.selected_port) {
+                    if !port.is_forwarded {
+                        self.forward_port(port.port).await?;
+                    }
+                }
+            }
+
+            // Stop forwarding
+            KeyCode::Char('s') => {
+                if let Some(port) = self.detected_ports.get(self.selected_port) {
+                    if port.is_forwarded {
+                        self.stop_forward(port.port).await;
+                    }
+                }
+            }
+
+            // Open in browser
+            KeyCode::Char('o') => {
+                if let Some(port) = self.detected_ports.get(self.selected_port) {
+                    if port.is_forwarded {
+                        if let Err(e) = open_in_browser(port.port) {
+                            self.status_message = Some(format!("Failed to open browser: {}", e));
+                        }
+                    } else {
+                        self.status_message = Some("Port must be forwarded first".to_string());
+                    }
+                }
+            }
+
+            // Forward all
+            KeyCode::Char('a') => {
+                let ports_to_forward: Vec<u16> = self
+                    .detected_ports
+                    .iter()
+                    .filter(|p| !p.is_forwarded)
+                    .map(|p| p.port)
+                    .collect();
+                for port in ports_to_forward {
+                    self.forward_port(port).await?;
+                }
+            }
+
+            // Stop all (none)
+            KeyCode::Char('n') => {
+                self.stop_all_forwards_for_container().await;
+            }
+
+            // Back to containers (q and Esc handled globally, but we handle here too for safety)
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.exit_ports_view();
+            }
+
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Enter port forwarding view for a container
+    async fn enter_ports_view(&mut self, container: &ContainerState) -> AppResult<()> {
+        // Check container is running
+        if container.status != DevcContainerStatus::Running {
+            self.status_message = Some("Container must be running to forward ports".to_string());
+            return Ok(());
+        }
+
+        // Get provider container ID
+        let provider_container_id = match &container.container_id {
+            Some(id) => id.clone(),
+            None => {
+                self.status_message = Some("Container has not been created yet".to_string());
+                return Ok(());
+            }
+        };
+
+        self.view = View::Ports;
+        self.ports_container_id = Some(container.id.clone());
+        self.ports_provider_container_id = Some(provider_container_id.clone());
+        self.detected_ports.clear();
+        self.selected_port = 0;
+        self.ports_table_state.select(Some(0));
+
+        // Get forwarded ports for this container
+        let forwarded_ports: HashSet<u16> = self
+            .active_forwarders
+            .keys()
+            .filter(|(cid, _)| cid == &provider_container_id)
+            .map(|(_, port)| *port)
+            .collect();
+
+        // Start port detection polling - create a new provider instance for the background task
+        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+        let provider_result = match provider_type {
+            ProviderType::Docker => devc_provider::CliProvider::new_docker().await,
+            ProviderType::Podman => devc_provider::CliProvider::new_podman().await,
+        };
+
+        match provider_result {
+            Ok(provider) => {
+                let provider_arc: Arc<dyn ContainerProvider + Send + Sync> = Arc::new(provider);
+                let container_id = devc_provider::ContainerId::new(&provider_container_id);
+                let rx = spawn_port_detector(provider_arc, container_id, provider_type, forwarded_ports);
+                self.port_detect_rx = Some(rx);
+                self.status_message = Some("Detecting ports...".to_string());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to start port detection: {}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Exit port forwarding view
+    fn exit_ports_view(&mut self) {
+        self.view = View::Main;
+        self.ports_container_id = None;
+        self.ports_provider_container_id = None;
+        self.port_detect_rx = None; // Stops the polling task
+        self.detected_ports.clear();
+        // Note: tunnels are NOT killed here - they persist
+    }
+
+    /// Forward a port from the current container
+    async fn forward_port(&mut self, port: u16) -> AppResult<()> {
+        let container_id = match &self.ports_provider_container_id {
+            Some(id) => id.clone(),
+            None => return Ok(()),
+        };
+
+        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+
+        // Spawn forwarder (uses socat via exec, no SSH needed)
+        match spawn_forwarder(provider_type, &container_id, port, port).await {
+            Ok(forwarder) => {
+                self.active_forwarders.insert((container_id.clone(), port), forwarder);
+                // Update detected_ports to reflect forwarded state
+                if let Some(p) = self.detected_ports.iter_mut().find(|p| p.port == port) {
+                    p.is_forwarded = true;
+                }
+                self.status_message = Some(format!("Forwarding port {} -> localhost:{}", port, port));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to forward port {}: {}", port, e));
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop forwarding a port
+    async fn stop_forward(&mut self, port: u16) {
+        let container_id = match &self.ports_provider_container_id {
+            Some(id) => id.clone(),
+            None => return,
+        };
+
+        let key = (container_id, port);
+        if let Some(forwarder) = self.active_forwarders.remove(&key) {
+            forwarder.stop().await;
+            // Update detected_ports to reflect not forwarded state
+            if let Some(p) = self.detected_ports.iter_mut().find(|p| p.port == port) {
+                p.is_forwarded = false;
+            }
+            self.status_message = Some(format!("Stopped forwarding port {}", port));
+        }
+    }
+
+    /// Stop all port forwards for the current container
+    async fn stop_all_forwards_for_container(&mut self) {
+        let container_id = match &self.ports_provider_container_id {
+            Some(id) => id.clone(),
+            None => return,
+        };
+
+        let keys_to_remove: Vec<(String, u16)> = self
+            .active_forwarders
+            .keys()
+            .filter(|(cid, _)| cid == &container_id)
+            .cloned()
+            .collect();
+
+        for key in keys_to_remove {
+            if let Some(forwarder) = self.active_forwarders.remove(&key) {
+                forwarder.stop().await;
+            }
+        }
+
+        // Update all detected_ports to not forwarded
+        for p in &mut self.detected_ports {
+            p.is_forwarded = false;
+        }
+        self.status_message = Some("Stopped all port forwards".to_string());
     }
 
     /// Refresh container list

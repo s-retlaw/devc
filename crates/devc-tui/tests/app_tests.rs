@@ -86,8 +86,8 @@ fn test_selection_with_empty_list() {
 fn test_dialog_focus_cycle_simple() {
     let mut app = App::new_for_testing();
 
-    // Start at default (Confirm)
-    assert_eq!(app.dialog_focus, DialogFocus::Confirm);
+    // Start at default (Cancel - safer UX)
+    assert_eq!(app.dialog_focus, DialogFocus::Cancel);
 
     // Tab cycles: Confirm -> Cancel -> Confirm (no checkbox)
     app.dialog_focus = DialogFocus::Cancel;
@@ -165,7 +165,7 @@ fn test_escape_cancels_dialog() {
 
     assert!(app.confirm_action.is_none());
     assert_eq!(app.view, View::Main);
-    assert_eq!(app.dialog_focus, DialogFocus::Confirm); // Default
+    assert_eq!(app.dialog_focus, DialogFocus::Cancel); // Default (safer UX)
 }
 
 /// Test enter in container list shows detail view

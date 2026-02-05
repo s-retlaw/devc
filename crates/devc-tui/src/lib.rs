@@ -6,7 +6,9 @@ pub mod app;
 mod clipboard;
 mod demo;
 mod event;
+pub mod ports;
 pub mod settings;
+pub mod tunnel;
 pub mod ui;
 pub mod widgets;
 

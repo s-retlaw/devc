@@ -73,6 +73,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::ProviderDetail => draw_provider_detail(frame, app, content_area),
         View::BuildOutput => draw_build_output(frame, app, content_area),
         View::Logs => draw_logs(frame, app, content_area),
+        View::Ports => draw_ports(frame, app, content_area),
         View::Help => draw_help(frame, app, content_area),
         View::Confirm => {
             // Draw the main content behind the dialog
@@ -163,7 +164,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 if app.discover_mode {
                     "Esc/q: Exit  j/k: Navigate  a: Adopt  r: Refresh  ?: Help"
                 } else {
-                    "D: Discover  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R: Rebuild  d: Delete  ?: Help  q: Quit"
+                    "D: Discover  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R: Rebuild  p: Ports  d: Delete  ?: Help  q: Quit"
                 }
             }
             Tab::Providers => {
@@ -193,6 +194,18 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Logs => "j/k: Scroll  g/G: Top/Bottom  PgUp/PgDn: Page  r: Refresh  Esc/q: Back",
+        View::Ports => {
+            let is_forwarded = app
+                .detected_ports
+                .get(app.selected_port)
+                .map(|p| p.is_forwarded)
+                .unwrap_or(false);
+            if is_forwarded {
+                "[s]top  [o]pen browser  [n]one  j/k: Navigate  q/Esc: Back"
+            } else {
+                "[f]orward  [a]ll  j/k: Navigate  q/Esc: Back"
+            }
+        }
         View::Help => "Press any key to close",
         View::Confirm => {
             if matches!(app.confirm_action, Some(ConfirmAction::Rebuild { .. })) {
@@ -974,6 +987,98 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Draw port forwarding view
+fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
+    let container_name = app
+        .containers
+        .iter()
+        .find(|c| Some(&c.id) == app.ports_container_id.as_ref())
+        .map(|c| c.name.as_str())
+        .unwrap_or("Unknown");
+
+    if app.detected_ports.is_empty() {
+        let empty = Paragraph::new("No ports detected.\n\nWaiting for port detection...")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .title(format!(" Port Forwarding: {} ", container_name))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    // Build table rows
+    let rows: Vec<Row> = app
+        .detected_ports
+        .iter()
+        .map(|port| {
+            let status = if port.is_forwarded {
+                "● Forwarded"
+            } else {
+                "○ Detected"
+            };
+            let local = if port.is_forwarded {
+                format!("localhost:{}", port.port)
+            } else {
+                "-".to_string()
+            };
+            let new_marker = if port.is_new { " [NEW]" } else { "" };
+            let process = port.process.as_deref().unwrap_or("-");
+
+            let style = if port.is_forwarded {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![
+                Cell::from(format!("{}", port.port)),
+                Cell::from(status),
+                Cell::from(local),
+                Cell::from(format!("{}{}", process, new_marker)),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let header = Row::new(vec![
+        Cell::from("PORT"),
+        Cell::from("STATUS"),
+        Cell::from("LOCAL"),
+        Cell::from("PROCESS"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
+
+    let widths = [
+        Constraint::Length(8),
+        Constraint::Length(14),
+        Constraint::Length(18),
+        Constraint::Min(10),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .title(format!(" Port Forwarding: {} ", container_name))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+        .highlight_symbol("▶ ");
+
+    frame.render_stateful_widget(table, area, &mut app.ports_table_state);
+}
+
 /// Draw help view - context-sensitive based on current tab
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let general_help = vec![
@@ -1003,6 +1108,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             Line::from("  s           Start or Stop container"),
             Line::from("  u           Up - build, create, and start"),
             Line::from("  R           Rebuild - destroy and rebuild container"),
+            Line::from("  p           Port forwarding"),
             Line::from("  d/Delete    Delete container"),
             Line::from("  r/F5        Refresh list"),
         ],

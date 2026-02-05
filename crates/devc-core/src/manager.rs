@@ -102,6 +102,11 @@ impl ContainerManager {
         self.provider.as_ref().map(|p| p.info().provider_type)
     }
 
+    /// Get a reference to the container provider (for advanced operations like port detection)
+    pub fn provider(&self) -> Option<&dyn ContainerProvider> {
+        self.provider.as_ref().map(|p| p.as_ref())
+    }
+
     /// Get the global config
     pub fn global_config(&self) -> &GlobalConfig {
         &self.global_config

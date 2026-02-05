@@ -17,7 +17,7 @@ expression: output
 │   Local Path      (not set)                                                  │
 │                                                                              │
 │ SSH / CONNECTION                                                             │
-│   SSH Enabled     [●] Enabled  [ ] Disabled                                  │
+│   SSH Enabled     [ ] Enabled  [●] Disabled                                  │
 │   SSH Key Path    (not set)                                                  │
 │                                                                              │
 │                                                                              │
