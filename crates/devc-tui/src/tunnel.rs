@@ -10,6 +10,131 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
+/// Check if socat is installed in a container
+pub async fn check_socat_installed(
+    provider_type: ProviderType,
+    container_id: &str,
+) -> bool {
+    let (cmd, args) = build_check_command(provider_type, container_id, "socat");
+
+    let output = Command::new(&cmd)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+
+    matches!(output, Ok(status) if status.success())
+}
+
+/// Result of socat installation attempt
+#[derive(Debug)]
+pub enum InstallResult {
+    Success,
+    Failed(String),
+    NoPackageManager,
+}
+
+/// Package manager definitions for socat installation
+pub const PACKAGE_MANAGERS: &[(&str, &str)] = &[
+    // Debian/Ubuntu
+    ("apt-get", "apt-get update && apt-get install -y socat"),
+    // Alpine
+    ("apk", "apk add --no-cache socat"),
+    // Fedora/RHEL 8+
+    ("dnf", "dnf install -y socat"),
+    // RHEL 7/CentOS
+    ("yum", "yum install -y socat"),
+    // Arch
+    ("pacman", "pacman -Sy --noconfirm socat"),
+];
+
+/// Build the command to check if a program exists in a container
+pub fn build_check_command(
+    provider_type: ProviderType,
+    container_id: &str,
+    program: &str,
+) -> (String, Vec<String>) {
+    let runtime = match provider_type {
+        ProviderType::Docker => "docker",
+        ProviderType::Podman => "podman",
+    };
+    let check_cmd = format!("command -v {}", program);
+
+    (
+        runtime.to_string(),
+        vec![
+            "exec".to_string(),
+            container_id.to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            check_cmd,
+        ],
+    )
+}
+
+/// Build the command to install a package as root in a container
+pub fn build_install_command(
+    provider_type: ProviderType,
+    container_id: &str,
+    install_cmd: &str,
+) -> (String, Vec<String>) {
+    let runtime = match provider_type {
+        ProviderType::Docker => "docker",
+        ProviderType::Podman => "podman",
+    };
+
+    (
+        runtime.to_string(),
+        vec![
+            "exec".to_string(),
+            "-u".to_string(),
+            "root".to_string(),
+            container_id.to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            install_cmd.to_string(),
+        ],
+    )
+}
+
+/// Install socat in a container, detecting the appropriate package manager
+pub async fn install_socat(
+    provider_type: ProviderType,
+    container_id: &str,
+) -> InstallResult {
+    for (pkg_mgr, install_cmd) in PACKAGE_MANAGERS {
+        // Check if this package manager exists
+        let (cmd, args) = build_check_command(provider_type, container_id, pkg_mgr);
+        let check = Command::new(&cmd)
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+
+        if matches!(check, Ok(status) if status.success()) {
+            // Found package manager, try to install as root
+            let (cmd, args) = build_install_command(provider_type, container_id, install_cmd);
+            let output = Command::new(&cmd)
+                .args(&args)
+                .output()
+                .await;
+
+            return match output {
+                Ok(out) if out.status.success() => InstallResult::Success,
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    InstallResult::Failed(format!("Install failed: {}", stderr.trim()))
+                }
+                Err(e) => InstallResult::Failed(format!("Exec failed: {}", e)),
+            };
+        }
+    }
+
+    InstallResult::NoPackageManager
+}
+
 /// Handle to a running port forwarder
 pub struct PortForwarder {
     /// Local port on host
@@ -458,5 +583,93 @@ mod tests {
         assert!(connect_result.is_ok(), "Should accept connection");
 
         forwarder.stop().await;
+    }
+
+    #[test]
+    fn test_build_check_command_docker() {
+        let (cmd, args) = build_check_command(ProviderType::Docker, "abc123", "socat");
+        assert_eq!(cmd, "docker");
+        assert_eq!(
+            args,
+            vec!["exec", "abc123", "sh", "-c", "command -v socat"]
+        );
+    }
+
+    #[test]
+    fn test_build_check_command_podman() {
+        let (cmd, args) = build_check_command(ProviderType::Podman, "def456", "apt-get");
+        assert_eq!(cmd, "podman");
+        assert_eq!(
+            args,
+            vec!["exec", "def456", "sh", "-c", "command -v apt-get"]
+        );
+    }
+
+    #[test]
+    fn test_build_install_command_docker() {
+        let (cmd, args) = build_install_command(
+            ProviderType::Docker,
+            "abc123",
+            "apt-get update && apt-get install -y socat",
+        );
+        assert_eq!(cmd, "docker");
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "-u",
+                "root",
+                "abc123",
+                "sh",
+                "-c",
+                "apt-get update && apt-get install -y socat"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_install_command_podman() {
+        let (cmd, args) = build_install_command(
+            ProviderType::Podman,
+            "def456",
+            "apk add --no-cache socat",
+        );
+        assert_eq!(cmd, "podman");
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "-u",
+                "root",
+                "def456",
+                "sh",
+                "-c",
+                "apk add --no-cache socat"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_package_managers_defined() {
+        // Verify all expected package managers are defined
+        let pkg_mgrs: Vec<&str> = PACKAGE_MANAGERS.iter().map(|(p, _)| *p).collect();
+        assert!(pkg_mgrs.contains(&"apt-get"), "Should support apt-get");
+        assert!(pkg_mgrs.contains(&"apk"), "Should support apk");
+        assert!(pkg_mgrs.contains(&"dnf"), "Should support dnf");
+        assert!(pkg_mgrs.contains(&"yum"), "Should support yum");
+        assert!(pkg_mgrs.contains(&"pacman"), "Should support pacman");
+    }
+
+    #[test]
+    fn test_install_commands_contain_socat() {
+        // Verify all install commands actually install socat
+        for (pkg_mgr, install_cmd) in PACKAGE_MANAGERS {
+            assert!(
+                install_cmd.contains("socat"),
+                "Install command for {} should contain 'socat': {}",
+                pkg_mgr,
+                install_cmd
+            );
+        }
     }
 }

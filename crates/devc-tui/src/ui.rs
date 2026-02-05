@@ -195,15 +195,22 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         }
         View::Logs => "j/k: Scroll  g/G: Top/Bottom  PgUp/PgDn: Page  r: Refresh  Esc/q: Back",
         View::Ports => {
-            let is_forwarded = app
-                .detected_ports
-                .get(app.selected_port)
-                .map(|p| p.is_forwarded)
-                .unwrap_or(false);
-            if is_forwarded {
-                "[s]top  [o]pen browser  [n]one  j/k: Navigate  q/Esc: Back"
+            // Show install option if socat not installed
+            if app.socat_installed == Some(false) && !app.socat_installing {
+                "[i]nstall socat  j/k: Navigate  q/Esc: Back"
+            } else if app.socat_installing {
+                "Installing socat...  q/Esc: Back"
             } else {
-                "[f]orward  [a]ll  j/k: Navigate  q/Esc: Back"
+                let is_forwarded = app
+                    .detected_ports
+                    .get(app.selected_port)
+                    .map(|p| p.is_forwarded)
+                    .unwrap_or(false);
+                if is_forwarded {
+                    "[s]top  [o]pen browser  [n]one  j/k: Navigate  q/Esc: Back"
+                } else {
+                    "[f]orward  [a]ll  j/k: Navigate  q/Esc: Back"
+                }
             }
         }
         View::Help => "Press any key to close",
@@ -996,8 +1003,21 @@ fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|c| c.name.as_str())
         .unwrap_or("Unknown");
 
+    // Show socat warning if not installed
+    let socat_warning = match (app.socat_installed, app.socat_installing) {
+        (_, true) => Some(("Installing socat...", Color::Yellow)),
+        (Some(false), _) => Some(("⚠ socat not installed - press 'i' to install", Color::Yellow)),
+        _ => None,
+    };
+
     if app.detected_ports.is_empty() {
-        let empty = Paragraph::new("No ports detected.\n\nWaiting for port detection...")
+        let message = if let Some((warning, _)) = socat_warning {
+            format!("{}\n\nNo ports detected.\n\nWaiting for port detection...", warning)
+        } else {
+            "No ports detected.\n\nWaiting for port detection...".to_string()
+        };
+
+        let empty = Paragraph::new(message)
             .style(Style::default().fg(Color::DarkGray))
             .block(
                 Block::default()
@@ -1193,6 +1213,22 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 app,
                 area,
                 &format!("Adopt '{}' into devc management?", container_name),
+            );
+        }
+        Some(ConfirmAction::CancelBuild) => {
+            draw_simple_confirm_dialog(
+                frame,
+                app,
+                area,
+                "Cancel build in progress?",
+            );
+        }
+        Some(ConfirmAction::QuitApp) => {
+            draw_simple_confirm_dialog(
+                frame,
+                app,
+                area,
+                "Quit devc?",
             );
         }
         None => {}

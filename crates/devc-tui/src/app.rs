@@ -4,7 +4,7 @@ use crate::clipboard::copy_to_clipboard;
 use crate::event::{Event, EventHandler};
 use crate::ports::{spawn_port_detector, DetectedPort, PortDetectionUpdate};
 use crate::settings::{ProviderDetailState, SettingsState};
-use crate::tunnel::{open_in_browser, spawn_forwarder, PortForwarder};
+use crate::tunnel::{check_socat_installed, install_socat, open_in_browser, spawn_forwarder, InstallResult, PortForwarder};
 use crate::ui;
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
@@ -97,6 +97,10 @@ pub enum ConfirmAction {
         container_name: String,
         workspace_path: Option<String>,
     },
+    /// Cancel an in-progress build/operation
+    CancelBuild,
+    /// Quit the application
+    QuitApp,
 }
 
 /// Dialog focus state for keyboard navigation
@@ -199,6 +203,10 @@ pub struct App {
     pub ports_table_state: TableState,
     /// Receiver for port detection updates
     pub port_detect_rx: Option<mpsc::UnboundedReceiver<PortDetectionUpdate>>,
+    /// Whether socat is installed in the container (None = not checked yet)
+    pub socat_installed: Option<bool>,
+    /// Whether socat installation is in progress
+    pub socat_installing: bool,
 
     // Port forwarder management (persists across views)
     /// Active port forwarders: (container_id, port) -> PortForwarder
@@ -270,6 +278,8 @@ impl App {
             selected_port: 0,
             ports_table_state: TableState::default().with_selected(0),
             port_detect_rx: None,
+            socat_installed: None,
+            socat_installing: false,
             active_forwarders: HashMap::new(),
         }
     }
@@ -379,6 +389,8 @@ impl App {
             selected_port: 0,
             ports_table_state: TableState::default().with_selected(0),
             port_detect_rx: None,
+            socat_installed: None,
+            socat_installing: false,
             active_forwarders: HashMap::new(),
         })
     }
@@ -478,7 +490,7 @@ impl App {
 
     /// Handle a single build progress message
     async fn handle_build_progress(&mut self, line: String) -> AppResult<()> {
-        let is_complete = line.contains("complete") || line.contains("Error:");
+        let is_complete = line.contains("complete") || line.contains("Error:") || line.contains("Failed:");
         self.build_output.push(line);
 
         if is_complete {
@@ -515,6 +527,13 @@ impl App {
 
     /// Handle key press
     async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> AppResult<()> {
+        // Ctrl+C shows quit confirmation dialog
+        if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+            self.confirm_action = Some(ConfirmAction::QuitApp);
+            self.view = View::Confirm;
+            return Ok(());
+        }
+
         // Handle confirmation dialog first
         if self.view == View::Confirm {
             let has_checkbox = matches!(self.confirm_action, Some(ConfirmAction::Rebuild { .. }));
@@ -1200,13 +1219,17 @@ impl App {
                 }
             }
             KeyCode::Char('q') | KeyCode::Esc => {
-                // Only allow closing after build completes
                 if self.build_complete {
+                    // Build finished - exit immediately
                     self.view = View::Main;
                     self.build_output.clear();
                     self.build_output_scroll = 0;
                     self.build_complete = false;
                     self.build_auto_scroll = true;
+                } else {
+                    // Build still in progress - confirm cancellation
+                    self.confirm_action = Some(ConfirmAction::CancelBuild);
+                    self.view = View::Confirm;
                 }
             }
             _ => {}
@@ -1343,6 +1366,13 @@ impl App {
                 self.stop_all_forwards_for_container().await;
             }
 
+            // Install socat
+            KeyCode::Char('i') => {
+                if self.socat_installed == Some(false) && !self.socat_installing {
+                    self.install_socat_in_container().await;
+                }
+            }
+
             // Back to containers (q and Esc handled globally, but we handle here too for safety)
             KeyCode::Char('q') | KeyCode::Esc => {
                 self.exit_ports_view();
@@ -1376,6 +1406,16 @@ impl App {
         self.detected_ports.clear();
         self.selected_port = 0;
         self.ports_table_state.select(Some(0));
+        self.socat_installed = None; // Will be checked below
+        self.socat_installing = false;
+
+        // Check if socat is installed
+        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+        let socat_check = check_socat_installed(provider_type, &provider_container_id).await;
+        self.socat_installed = Some(socat_check);
+        if !socat_check {
+            self.status_message = Some("socat not installed - press 'i' to install".to_string());
+        }
 
         // Get forwarded ports for this container
         let forwarded_ports: HashSet<u16> = self
@@ -1415,6 +1455,8 @@ impl App {
         self.ports_provider_container_id = None;
         self.port_detect_rx = None; // Stops the polling task
         self.detected_ports.clear();
+        self.socat_installed = None;
+        self.socat_installing = false;
         // Note: tunnels are NOT killed here - they persist
     }
 
@@ -1487,6 +1529,33 @@ impl App {
             p.is_forwarded = false;
         }
         self.status_message = Some("Stopped all port forwards".to_string());
+    }
+
+    /// Install socat in the current container
+    async fn install_socat_in_container(&mut self) {
+        let container_id = match &self.ports_provider_container_id {
+            Some(id) => id.clone(),
+            None => return,
+        };
+
+        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+
+        self.socat_installing = true;
+        self.status_message = Some("Installing socat...".to_string());
+
+        match install_socat(provider_type, &container_id).await {
+            InstallResult::Success => {
+                self.socat_installed = Some(true);
+                self.status_message = Some("socat installed successfully".to_string());
+            }
+            InstallResult::Failed(msg) => {
+                self.status_message = Some(format!("Failed to install socat: {}", msg));
+            }
+            InstallResult::NoPackageManager => {
+                self.status_message = Some("No supported package manager found in container".to_string());
+            }
+        }
+        self.socat_installing = false;
     }
 
     /// Refresh container list
@@ -1771,6 +1840,21 @@ impl App {
                     }
                 }
                 self.loading = false;
+            }
+            ConfirmAction::CancelBuild => {
+                // Cancel the in-progress build and return to main view
+                self.build_progress_rx = None; // Drop the receiver, which stops the build task
+                self.loading = false;
+                self.build_complete = false;
+                self.build_output.clear();
+                self.build_output_scroll = 0;
+                self.build_auto_scroll = true;
+                self.view = View::Main;
+                self.status_message = Some("Build cancelled".to_string());
+                self.refresh_containers().await?;
+            }
+            ConfirmAction::QuitApp => {
+                self.should_quit = true;
             }
         }
         Ok(())
