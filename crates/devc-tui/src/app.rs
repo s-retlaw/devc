@@ -4,8 +4,9 @@ use crate::clipboard::copy_to_clipboard;
 use crate::event::{Event, EventHandler};
 use crate::ports::{spawn_port_detector, DetectedPort, PortDetectionUpdate};
 use crate::settings::{ProviderDetailState, SettingsState};
+use crate::shell::{PtyShell, ShellConfig, ShellExitReason};
 use crate::tunnel::{check_socat_installed, install_socat, open_in_browser, spawn_forwarder, InstallResult, PortForwarder};
-use crate::ui;
+use crate::{resume_tui, suspend_tui, ui};
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
 use devc_core::{ContainerManager, ContainerState, DevcContainerStatus};
@@ -78,6 +79,8 @@ pub enum View {
     Confirm,
     /// Port forwarding view
     Ports,
+    /// Full terminal shell mode
+    Shell,
 }
 
 /// Confirmation action
@@ -123,6 +126,15 @@ pub struct ProviderStatus {
     pub socket: String,
     pub connected: bool,
     pub is_active: bool,
+}
+
+/// Active shell session state (persistent across attach/detach cycles)
+pub struct ShellSession {
+    pub container_id: String,
+    pub container_name: String,
+    pub provider_container_id: String,
+    pub provider_type: ProviderType,
+    pub pty: Option<PtyShell>,
 }
 
 /// Application state
@@ -215,6 +227,12 @@ pub struct App {
     // Port forwarder management (persists across views)
     /// Active port forwarders: (container_id, port) -> PortForwarder
     pub active_forwarders: HashMap<(String, u16), PortForwarder>,
+
+    // Shell session state
+    /// Persistent shell sessions keyed by container_id
+    pub shell_sessions: HashMap<String, ShellSession>,
+    /// Which container's shell is currently active (when View::Shell)
+    pub active_shell_container: Option<String>,
 }
 
 impl App {
@@ -287,6 +305,8 @@ impl App {
             spinner_frame: 0,
             install_result_rx: None,
             active_forwarders: HashMap::new(),
+            shell_sessions: HashMap::new(),
+            active_shell_container: None,
         }
     }
 
@@ -400,6 +420,8 @@ impl App {
             spinner_frame: 0,
             install_result_rx: None,
             active_forwarders: HashMap::new(),
+            shell_sessions: HashMap::new(),
+            active_shell_container: None,
         })
     }
 
@@ -409,17 +431,26 @@ impl App {
     }
 
     /// Run the application main loop
-    pub async fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> AppResult<()> {
-        let mut events = EventHandler::new(Duration::from_millis(250));
+    pub async fn run<B: Backend + std::io::Write>(&mut self, terminal: &mut Terminal<B>) -> AppResult<()> {
+        let mut events = Some(EventHandler::new(Duration::from_millis(250)));
 
         while !self.should_quit {
+            // Handle shell mode specially - run shell session and return to TUI
+            if self.view == View::Shell {
+                self.run_shell_session(terminal, &mut events).await?;
+                continue; // Re-enter loop, will now draw TUI
+            }
+
             // Draw UI
             terminal.draw(|frame| ui::draw(frame, self))?;
+
+            // Get event handler (should always be Some when not in shell mode)
+            let handler = events.as_mut().expect("EventHandler missing outside shell mode");
 
             // Use select to handle multiple event sources for immediate updates
             tokio::select! {
                 // Terminal/keyboard events
-                event = events.next() => {
+                event = handler.next() => {
                     if let Some(e) = event {
                         self.handle_event(e).await?;
                     }
@@ -445,10 +476,11 @@ impl App {
             }
         }
 
-        // Cleanup: stop all forwarders on exit
+        // Cleanup: stop all forwarders and shell sessions on exit
         for (_, forwarder) in self.active_forwarders.drain() {
             forwarder.stop().await;
         }
+        self.shell_sessions.clear();
 
         Ok(())
     }
@@ -757,6 +789,7 @@ impl App {
             View::BuildOutput => self.handle_build_key(code, modifiers).await?,
             View::Logs => self.handle_logs_key(code, modifiers).await?,
             View::Ports => self.handle_ports_key(code, modifiers).await?,
+            View::Shell => {} // Shell mode is handled in run() before event loop
             View::Help | View::Confirm => {} // Handled above
         }
 
@@ -918,6 +951,13 @@ impl App {
                     if !self.containers.is_empty() {
                         let container = self.containers[self.selected].clone();
                         self.enter_ports_view(&container).await?;
+                    }
+                }
+                KeyCode::Char('S') => {
+                    // Enter shell mode for selected container
+                    if !self.containers.is_empty() {
+                        let container = self.containers[self.selected].clone();
+                        self.enter_shell_mode(&container).await?;
                     }
                 }
 
@@ -1205,6 +1245,13 @@ impl App {
                     self.view = View::Confirm;
                 } else if !self.is_connected() {
                     self.status_message = Some("Not connected to provider".to_string());
+                }
+            }
+            KeyCode::Char('S') => {
+                // Enter shell mode for current container
+                if !self.containers.is_empty() {
+                    let container = self.containers[self.selected].clone();
+                    self.enter_shell_mode(&container).await?;
                 }
             }
             _ => {}
@@ -1613,6 +1660,235 @@ impl App {
         }
     }
 
+    /// Enter shell mode for a container
+    async fn enter_shell_mode(&mut self, container: &ContainerState) -> AppResult<()> {
+        if container.status != DevcContainerStatus::Running {
+            self.status_message = Some("Container must be running to open shell".to_string());
+            return Ok(());
+        }
+
+        let provider_container_id = match &container.container_id {
+            Some(id) => id.clone(),
+            None => {
+                self.status_message = Some("Container has not been created yet".to_string());
+                return Ok(());
+            }
+        };
+
+        let container_id = container.id.clone();
+
+        // Check if we already have a session for this container
+        if let Some(session) = self.shell_sessions.get_mut(&container_id) {
+            // Check if the PTY is still alive
+            if session.pty.as_mut().map_or(false, |p| p.is_alive()) {
+                // Reattach to existing session
+                self.active_shell_container = Some(container_id);
+                self.view = View::Shell;
+                return Ok(());
+            }
+            // PTY is dead, remove the stale session - will create a new one below
+            self.shell_sessions.remove(&container_id);
+        }
+
+        // Create a new session (PTY will be spawned in run_shell_session)
+        self.shell_sessions.insert(
+            container_id.clone(),
+            ShellSession {
+                container_id: container_id.clone(),
+                container_name: container.name.clone(),
+                provider_container_id,
+                provider_type: self.active_provider.unwrap_or(container.provider),
+                pty: None,
+            },
+        );
+
+        self.active_shell_container = Some(container_id);
+        self.view = View::Shell;
+        Ok(())
+    }
+
+    /// Run shell session - called from main loop when View::Shell
+    ///
+    /// Uses kill/recreate pattern for EventHandler instead of pause/resume.
+    /// This prevents any keystroke competition and ensures clean state.
+    async fn run_shell_session<B: Backend + std::io::Write>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        events: &mut Option<EventHandler>,
+    ) -> AppResult<()> {
+        let container_id = match &self.active_shell_container {
+            Some(id) => id.clone(),
+            None => {
+                self.view = View::Main;
+                return Ok(());
+            }
+        };
+
+        // Extract session info we need before taking the PTY
+        let (container_name, provider_container_id, provider_type, has_pty) = {
+            match self.shell_sessions.get(&container_id) {
+                Some(s) => (
+                    s.container_name.clone(),
+                    s.provider_container_id.clone(),
+                    s.provider_type,
+                    s.pty.is_some(),
+                ),
+                None => {
+                    self.view = View::Main;
+                    self.active_shell_container = None;
+                    return Ok(());
+                }
+            }
+        };
+
+        let is_reattach = has_pty;
+
+        // 1. STOP event handler entirely (drop it)
+        if let Some(mut handler) = events.take() {
+            handler.stop();
+        }
+
+        // 2. Suspend TUI using terminal's backend
+        suspend_tui(terminal.backend_mut())?;
+
+        // 3. Reset terminal to sane state for shell
+        crate::shell::reset_terminal();
+
+        // 4. Show entry message
+        if is_reattach {
+            println!("\nReattaching to shell for '{}'...\n", container_name);
+        } else {
+            println!(
+                "\nShell for '{}' (Ctrl+\\ to detach, session preserved)\n",
+                container_name
+            );
+        }
+
+        // 5. Get or spawn PtyShell
+        // Take the existing PTY out of the session (if any)
+        let existing_pty = self
+            .shell_sessions
+            .get_mut(&container_id)
+            .and_then(|s| s.pty.take());
+
+        let pty = match existing_pty {
+            Some(mut p) => {
+                if !p.is_alive() {
+                    // PTY died while we were away, spawn a new one below
+                    drop(p);
+                    let config = ShellConfig {
+                        provider_type,
+                        container_id: provider_container_id.clone(),
+                        shell: self.config.defaults.shell.clone(),
+                        user: self.config.defaults.user.clone(),
+                        working_dir: None,
+                    };
+                    match PtyShell::spawn(&config) {
+                        Ok(new_p) => new_p,
+                        Err(e) => {
+                            self.status_message = Some(format!("Shell spawn error: {}", e));
+                            self.shell_sessions.remove(&container_id);
+                            self.active_shell_container = None;
+                            self.view = View::Main;
+                            crate::shell::reset_terminal();
+                            resume_tui(terminal.backend_mut())?;
+                            *events = Some(EventHandler::new(Duration::from_millis(250)));
+                            terminal.clear()?;
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    // Reattach: update PTY size to current terminal dimensions
+                    if let Ok((cols, rows)) = crossterm::terminal::size() {
+                        p.set_size(cols, rows);
+                    }
+                    p
+                }
+            }
+            _ => {
+                // Spawn new PTY
+                let config = ShellConfig {
+                    provider_type,
+                    container_id: provider_container_id.clone(),
+                    shell: self.config.defaults.shell.clone(),
+                    user: self.config.defaults.user.clone(),
+                    working_dir: None,
+                };
+
+                match PtyShell::spawn(&config) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.status_message = Some(format!("Shell spawn error: {}", e));
+                        self.shell_sessions.remove(&container_id);
+                        self.active_shell_container = None;
+                        self.view = View::Main;
+                        crate::shell::reset_terminal();
+                        resume_tui(terminal.backend_mut())?;
+                        *events = Some(EventHandler::new(Duration::from_millis(250)));
+                        terminal.clear()?;
+                        return Ok(());
+                    }
+                }
+            }
+        };
+
+        // 6. Run relay in spawn_blocking (returns PtyShell + reason)
+        let (pty, reason) = tokio::task::spawn_blocking(move || {
+            let reason = pty.relay();
+            (pty, reason)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            // JoinError - create a dummy error reason
+            // We can't recover the PtyShell, so treat it as an error
+            // Need a PtyShell to return but we lost it. Create error config.
+            panic!("Shell relay task panicked: {}", e);
+        });
+
+        // 7. Process result
+        match reason {
+            ShellExitReason::Detached => {
+                // Put PTY back into session - session preserved
+                if let Some(session) = self.shell_sessions.get_mut(&container_id) {
+                    session.pty = Some(pty);
+                }
+                self.status_message = Some(format!(
+                    "Detached from '{}' (session preserved, press S to reattach)",
+                    container_name
+                ));
+            }
+            ShellExitReason::Exited => {
+                // Shell exited - clean up session
+                drop(pty);
+                self.shell_sessions.remove(&container_id);
+                self.status_message = Some("Shell exited".to_string());
+            }
+            ShellExitReason::Error(e) => {
+                drop(pty);
+                self.shell_sessions.remove(&container_id);
+                self.status_message = Some(format!("Shell error: {}", e));
+            }
+        }
+
+        // 8. Reset terminal before resuming TUI
+        crate::shell::reset_terminal();
+
+        // 9. Return to main view
+        self.active_shell_container = None;
+        self.view = View::Main;
+
+        // 10. Resume TUI using terminal's backend
+        resume_tui(terminal.backend_mut())?;
+
+        // 11. Create FRESH event handler
+        *events = Some(EventHandler::new(Duration::from_millis(250)));
+
+        // 12. Force terminal to redraw everything
+        terminal.clear()?;
+
+        Ok(())
+    }
+
     /// Refresh container list
     async fn refresh_containers(&mut self) -> AppResult<()> {
         self.containers = self.manager.read().await.list().await?;
@@ -1791,6 +2067,8 @@ impl App {
         match action {
             ConfirmAction::Delete(id) => {
                 self.loading = true;
+                // Clean up any shell session for this container
+                self.shell_sessions.remove(&id);
                 match self.manager.read().await.remove(&id, true).await {
                     Ok(()) => {
                         self.status_message = Some("Container deleted".to_string());
@@ -1804,6 +2082,8 @@ impl App {
             }
             ConfirmAction::Stop(id) => {
                 self.loading = true;
+                // Clean up any shell session for this container
+                self.shell_sessions.remove(&id);
                 match self.manager.read().await.stop(&id).await {
                     Ok(()) => {
                         self.status_message = Some("Container stopped".to_string());

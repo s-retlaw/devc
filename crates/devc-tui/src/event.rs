@@ -2,7 +2,7 @@
 
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Terminal events
 #[derive(Debug, Clone)]
@@ -21,46 +21,65 @@ pub enum Event {
 pub struct EventHandler {
     /// Event receiver
     rx: mpsc::UnboundedReceiver<Event>,
-    /// Sender for stopping the handler
-    _tx: mpsc::UnboundedSender<Event>,
+    /// Stop signal sender (Some if task is running, None after stop)
+    stop_tx: Option<oneshot::Sender<()>>,
 }
 
 impl EventHandler {
     /// Create a new event handler with the given tick rate
     pub fn new(tick_rate: Duration) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let tx_clone = tx.clone();
+        let (stop_tx, mut stop_rx) = oneshot::channel();
 
         tokio::spawn(async move {
             loop {
-                if event::poll(tick_rate).unwrap_or(false) {
-                    match event::read() {
-                        Ok(CrosstermEvent::Key(key)) => {
-                            if tx_clone.send(Event::Key(key)).is_err() {
-                                break;
+                tokio::select! {
+                    // Stop signal received - exit the loop
+                    _ = &mut stop_rx => break,
+
+                    // Poll for events with timeout
+                    _ = async {
+                        if event::poll(tick_rate).unwrap_or(false) {
+                            match event::read() {
+                                Ok(CrosstermEvent::Key(key)) => {
+                                    if tx.send(Event::Key(key)).is_err() {
+                                        return;
+                                    }
+                                }
+                                Ok(CrosstermEvent::Mouse(mouse)) => {
+                                    if tx.send(Event::Mouse(mouse)).is_err() {
+                                        return;
+                                    }
+                                }
+                                Ok(CrosstermEvent::Resize(w, h)) => {
+                                    if tx.send(Event::Resize(w, h)).is_err() {
+                                        return;
+                                    }
+                                }
+                                _ => {}
                             }
+                        } else if tx.send(Event::Tick).is_err() {
+                            return;
                         }
-                        Ok(CrosstermEvent::Mouse(mouse)) => {
-                            if tx_clone.send(Event::Mouse(mouse)).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(CrosstermEvent::Resize(w, h)) => {
-                            if tx_clone.send(Event::Resize(w, h)).is_err() {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                } else {
-                    if tx_clone.send(Event::Tick).is_err() {
-                        break;
-                    }
+                    } => {}
                 }
             }
         });
 
-        Self { rx, _tx: tx }
+        Self {
+            rx,
+            stop_tx: Some(stop_tx),
+        }
+    }
+
+    /// Stop the event handler task
+    ///
+    /// This signals the background task to exit. After calling stop(),
+    /// the EventHandler should be dropped and a new one created.
+    pub fn stop(&mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
     }
 
     /// Receive the next event

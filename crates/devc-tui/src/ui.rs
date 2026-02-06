@@ -96,6 +96,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             }
             draw_confirm_dialog(frame, app, area);
         }
+        View::Shell => {
+            // Shell mode is handled before drawing - this shouldn't be reached
+            // but we need to handle it for exhaustive matching
+        }
     }
 
     draw_footer(frame, app, footer_area);
@@ -170,7 +174,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 if app.discover_mode {
                     "Esc/q: Exit  j/k: Navigate  a: Adopt  r: Refresh  ?: Help"
                 } else {
-                    "D: Discover  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R: Rebuild  p: Ports  d: Delete  ?: Help  q: Quit"
+                    "D: Discover  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R: Rebuild  p: Ports  S: Shell  d: Delete  ?: Help  q: Quit"
                 }
             }
             Tab::Providers => {
@@ -184,7 +188,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         },
-        View::ContainerDetail => "b: Build  s: Start/Stop  u: Up  R: Rebuild  l: Logs  Esc/q: Back  ?: Help",
+        View::ContainerDetail => "b: Build  s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  Esc/q: Back  ?: Help",
         View::ProviderDetail => {
             if app.provider_detail_state.editing {
                 "Enter: Confirm  Esc: Cancel  Type to edit"
@@ -227,6 +231,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 "y/Enter: Yes  n/Esc: No"
             }
         }
+        View::Shell => "Ctrl+\\ to detach and return to TUI (session preserved)",
     };
 
     let status = app.status_message.as_deref().unwrap_or("");
@@ -308,9 +313,17 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                 workspace
             };
 
+            // Show [S] indicator if there's an active shell session for this container
+            let has_shell = app.shell_sessions.contains_key(&container.id);
+            let name_display = if has_shell {
+                format!("{} [S]", container.name)
+            } else {
+                container.name.clone()
+            };
+
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
-                Cell::from(container.name.clone()).style(Style::default().bold()),
+                Cell::from(name_display).style(Style::default().bold()),
                 Cell::from(format!("{}", container.status)).style(Style::default().fg(status_color)),
                 Cell::from(format!("{}", container.provider)),
                 Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
@@ -1151,6 +1164,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             Line::from("  b           Build container image"),
             Line::from("  s           Start or Stop container"),
             Line::from("  u           Up - build, create, and start"),
+            Line::from("  S           Shell (persistent session, Ctrl+\\ to detach)"),
             Line::from("  R           Rebuild - destroy and rebuild container"),
             Line::from("  p           Port forwarding"),
             Line::from("  d/Delete    Delete container"),

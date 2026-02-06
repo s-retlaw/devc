@@ -8,15 +8,17 @@ mod demo;
 mod event;
 pub mod ports;
 pub mod settings;
+pub mod shell;
 pub mod tunnel;
 pub mod ui;
 pub mod widgets;
 
 pub use clipboard::copy_to_clipboard;
 
-pub use app::{App, AppResult, ConfirmAction, DialogFocus, Tab, View};
+pub use app::{App, AppResult, ConfirmAction, DialogFocus, ShellSession, Tab, View};
 pub use demo::DemoApp;
 pub use event::{Event, EventHandler};
+pub use shell::{reset_terminal, PtyShell, ShellConfig, ShellExitReason};
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -25,7 +27,7 @@ use crossterm::{
 };
 use devc_core::ContainerManager;
 use ratatui::prelude::*;
-use std::io;
+use std::io::{self, Write};
 use tracing_subscriber::layer::SubscriberExt;
 
 /// Run the TUI application
@@ -82,4 +84,29 @@ pub async fn run_demo() -> AppResult<()> {
     terminal.show_cursor()?;
 
     res
+}
+
+/// Suspend TUI mode for shell access
+///
+/// Leaves alternate screen and disables raw mode so the shell process
+/// can have direct terminal control with proper PTY support.
+///
+/// IMPORTANT: Order matters! Leave alternate screen BEFORE disabling raw mode.
+/// This ensures the shell inherits a clean terminal state without corruption.
+pub fn suspend_tui(stdout: &mut impl Write) -> io::Result<()> {
+    execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)?;
+    disable_raw_mode()?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Resume TUI mode after shell exit
+///
+/// Re-enables raw mode and enters alternate screen to restore
+/// the TUI display.
+pub fn resume_tui(stdout: &mut impl Write) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    stdout.flush()?;
+    Ok(())
 }

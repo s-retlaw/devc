@@ -142,6 +142,7 @@ impl DemoApp {
             crate::app::View::BuildOutput => self.draw_build(frame, chunks[1]),
             crate::app::View::Logs => self.draw_logs(frame, chunks[1]),
             crate::app::View::Ports => self.draw_dashboard(frame, chunks[1]), // Not implemented in demo
+            crate::app::View::Shell => self.draw_dashboard(frame, chunks[1]), // Shell mode handled differently
             crate::app::View::Confirm => {
                 self.draw_dashboard(frame, chunks[1]);
                 self.draw_confirm(frame, area);
