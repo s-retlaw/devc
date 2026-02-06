@@ -1,7 +1,7 @@
 //! UI rendering for the TUI application
 
 use ansi_to_tui::IntoText;
-use crate::app::{App, ConfirmAction, DialogFocus, Tab, View};
+use crate::app::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
 use crate::settings::{SettingsField, SettingsSection};
 use crate::widgets::DialogBuilder;
 use devc_core::DevcContainerStatus;
@@ -65,11 +65,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 } else {
                     draw_containers(frame, app, content_area);
                 }
+                if app.container_op.is_some() {
+                    draw_operation_progress(frame, app, area);
+                }
             }
             Tab::Providers => draw_providers(frame, app, content_area),
             Tab::Settings => draw_settings(frame, app, content_area),
         },
-        View::ContainerDetail => draw_detail(frame, app, content_area),
+        View::ContainerDetail => {
+            draw_detail(frame, app, content_area);
+            if app.container_op.is_some() {
+                draw_operation_progress(frame, app, area);
+            }
+        }
         View::ProviderDetail => draw_provider_detail(frame, app, content_area),
         View::BuildOutput => draw_build_output(frame, app, content_area),
         View::Logs => draw_logs(frame, app, content_area),
@@ -1133,6 +1141,35 @@ fn draw_install_progress(frame: &mut Frame, app: &App, area: Rect) {
         ]))
         .empty_line()
         .help("Ctrl+C or Esc to cancel")
+        .render(frame, area);
+}
+
+/// Draw container operation progress modal with spinner
+fn draw_operation_progress(frame: &mut Frame, app: &App, area: Rect) {
+    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
+
+    let op = match &app.container_op {
+        Some(op) => op,
+        None => return,
+    };
+
+    let title = match op {
+        ContainerOperation::Starting { .. } => "Starting",
+        ContainerOperation::Stopping { .. } => "Stopping",
+        ContainerOperation::Deleting { .. } => "Deleting",
+    };
+
+    DialogBuilder::new(title)
+        .width(40)
+        .border_color(Color::Yellow)
+        .empty_line()
+        .styled_message(Line::from(vec![
+            Span::styled(spinner, Style::default().fg(Color::Cyan)),
+            Span::raw(format!(" {}", op.label())),
+        ]))
+        .empty_line()
+        .help("Esc to dismiss")
         .render(frame, area);
 }
 

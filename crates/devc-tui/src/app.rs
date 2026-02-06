@@ -118,6 +118,30 @@ pub enum DialogFocus {
     Cancel,
 }
 
+/// A container operation in progress (shown as spinner modal)
+#[derive(Debug, Clone)]
+pub enum ContainerOperation {
+    Starting { id: String, name: String },
+    Stopping { id: String, name: String },
+    Deleting { id: String, name: String },
+}
+
+impl ContainerOperation {
+    pub fn label(&self) -> String {
+        match self {
+            ContainerOperation::Starting { name, .. } => format!("Starting {}...", name),
+            ContainerOperation::Stopping { name, .. } => format!("Stopping {}...", name),
+            ContainerOperation::Deleting { name, .. } => format!("Deleting {}...", name),
+        }
+    }
+}
+
+/// Result of a background container operation
+pub enum ContainerOpResult {
+    Success(ContainerOperation),
+    Failed(ContainerOperation, String),
+}
+
 /// Provider status information
 #[derive(Debug, Clone)]
 pub struct ProviderStatus {
@@ -233,6 +257,12 @@ pub struct App {
     pub shell_sessions: HashMap<String, ShellSession>,
     /// Which container's shell is currently active (when View::Shell)
     pub active_shell_container: Option<String>,
+
+    // Container operation spinner state
+    /// Current container operation in progress (shown as spinner modal)
+    pub container_op: Option<ContainerOperation>,
+    /// Channel receiver for container operation results
+    pub container_op_rx: Option<mpsc::UnboundedReceiver<ContainerOpResult>>,
 }
 
 impl App {
@@ -307,6 +337,8 @@ impl App {
             active_forwarders: HashMap::new(),
             shell_sessions: HashMap::new(),
             active_shell_container: None,
+            container_op: None,
+            container_op_rx: None,
         }
     }
 
@@ -422,6 +454,8 @@ impl App {
             active_forwarders: HashMap::new(),
             shell_sessions: HashMap::new(),
             active_shell_container: None,
+            container_op: None,
+            container_op_rx: None,
         })
     }
 
@@ -471,6 +505,12 @@ impl App {
                 result = Self::recv_install_result(&mut self.install_result_rx) => {
                     if let Some(result) = result {
                         self.handle_install_result(result);
+                    }
+                }
+                // Container operation result
+                result = Self::recv_operation_result(&mut self.container_op_rx) => {
+                    if let Some(result) = result {
+                        self.handle_operation_result(result).await?;
                     }
                 }
             }
@@ -556,8 +596,8 @@ impl App {
                 self.handle_key(key.code, key.modifiers).await?;
             }
             Event::Tick => {
-                // Advance spinner frame when installing
-                if self.socat_installing {
+                // Advance spinner frame when installing or operating
+                if self.socat_installing || self.container_op.is_some() {
                     self.spinner_frame = (self.spinner_frame + 1) % 10;
                 }
                 // Refresh container list periodically (only on Containers tab main view)
@@ -577,6 +617,14 @@ impl App {
 
     /// Handle key press
     async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> AppResult<()> {
+        // Dismiss container operation spinner modal (Esc only)
+        if self.container_op.is_some() && code == KeyCode::Esc {
+            self.container_op = None;
+            // Keep container_op_rx alive so result is still received
+            self.status_message = Some("Operation continues in background...".to_string());
+            return Ok(());
+        }
+
         // Cancel install if in progress (before global Ctrl+C handler)
         if self.socat_installing
             && ((code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
@@ -1396,7 +1444,9 @@ impl App {
 
             // Forward selected port
             KeyCode::Char('f') => {
-                if let Some(port) = self.detected_ports.get(self.selected_port) {
+                if self.socat_installed != Some(true) {
+                    self.status_message = Some("socat required - press 'i' to install".to_string());
+                } else if let Some(port) = self.detected_ports.get(self.selected_port) {
                     if !port.is_forwarded {
                         self.forward_port(port.port).await?;
                     }
@@ -1414,7 +1464,9 @@ impl App {
 
             // Open in browser
             KeyCode::Char('o') => {
-                if let Some(port) = self.detected_ports.get(self.selected_port) {
+                if self.socat_installed != Some(true) {
+                    self.status_message = Some("socat required - press 'i' to install".to_string());
+                } else if let Some(port) = self.detected_ports.get(self.selected_port) {
                     if port.is_forwarded {
                         if let Err(e) = open_in_browser(port.port) {
                             self.status_message = Some(format!("Failed to open browser: {}", e));
@@ -1427,14 +1479,18 @@ impl App {
 
             // Forward all
             KeyCode::Char('a') => {
-                let ports_to_forward: Vec<u16> = self
-                    .detected_ports
-                    .iter()
-                    .filter(|p| !p.is_forwarded)
-                    .map(|p| p.port)
-                    .collect();
-                for port in ports_to_forward {
-                    self.forward_port(port).await?;
+                if self.socat_installed != Some(true) {
+                    self.status_message = Some("socat required - press 'i' to install".to_string());
+                } else {
+                    let ports_to_forward: Vec<u16> = self
+                        .detected_ports
+                        .iter()
+                        .filter(|p| !p.is_forwarded)
+                        .map(|p| p.port)
+                        .collect();
+                    for port in ports_to_forward {
+                        self.forward_port(port).await?;
+                    }
                 }
             }
 
@@ -1658,6 +1714,45 @@ impl App {
             Some(ref mut receiver) => receiver.recv().await,
             None => std::future::pending().await,
         }
+    }
+
+    /// Helper to receive container operation result
+    async fn recv_operation_result(
+        rx: &mut Option<mpsc::UnboundedReceiver<ContainerOpResult>>,
+    ) -> Option<ContainerOpResult> {
+        match rx {
+            Some(ref mut receiver) => receiver.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Handle container operation result from background task
+    async fn handle_operation_result(&mut self, result: ContainerOpResult) -> AppResult<()> {
+        self.container_op = None;
+        self.container_op_rx = None;
+
+        match result {
+            ContainerOpResult::Success(op) => {
+                let msg = match &op {
+                    ContainerOperation::Starting { name, .. } => format!("Started {}", name),
+                    ContainerOperation::Stopping { name, .. } => format!("Stopped {}", name),
+                    ContainerOperation::Deleting { name, .. } => format!("Deleted {}", name),
+                };
+                self.status_message = Some(msg);
+            }
+            ContainerOpResult::Failed(op, err) => {
+                let msg = match &op {
+                    ContainerOperation::Starting { name, .. } => format!("Start failed for {}: {}", name, err),
+                    ContainerOperation::Stopping { name, .. } => format!("Stop failed for {}: {}", name, err),
+                    ContainerOperation::Deleting { name, .. } => format!("Delete failed for {}: {}", name, err),
+                };
+                self.status_message = Some(msg);
+            }
+        }
+
+        self.loading = false;
+        self.refresh_containers().await?;
+        Ok(())
     }
 
     /// Enter shell mode for a container
@@ -1959,45 +2054,48 @@ impl App {
         Ok(())
     }
 
-    /// Toggle start/stop for selected container
+    /// Toggle start/stop for selected container (background task with spinner)
     async fn toggle_selected(&mut self) -> AppResult<()> {
-        if self.containers.is_empty() {
+        if self.containers.is_empty() || self.container_op.is_some() {
             return Ok(());
         }
 
         let container = &self.containers[self.selected];
-        self.loading = true;
+        let id = container.id.clone();
+        let name = container.name.clone();
 
-        match container.status {
-            DevcContainerStatus::Running => {
-                self.status_message = Some(format!("Stopping {}...", container.name));
-                match self.manager.read().await.stop(&container.id).await {
-                    Ok(()) => {
-                        self.status_message = Some(format!("Stopped {}", container.name));
-                    }
-                    Err(e) => {
-                        self.status_message = Some(format!("Stop failed: {}", e));
-                    }
-                }
-            }
-            DevcContainerStatus::Stopped | DevcContainerStatus::Created => {
-                self.status_message = Some(format!("Starting {}...", container.name));
-                match self.manager.read().await.start(&container.id).await {
-                    Ok(()) => {
-                        self.status_message = Some(format!("Started {}", container.name));
-                    }
-                    Err(e) => {
-                        self.status_message = Some(format!("Start failed: {}", e));
-                    }
-                }
-            }
+        let op = match container.status {
+            DevcContainerStatus::Running => ContainerOperation::Stopping { id: id.clone(), name: name.clone() },
+            DevcContainerStatus::Stopped | DevcContainerStatus::Created => ContainerOperation::Starting { id: id.clone(), name: name.clone() },
             _ => {
                 self.status_message = Some("Cannot start/stop in current state".to_string());
+                return Ok(());
             }
-        }
+        };
 
-        self.loading = false;
-        self.refresh_containers().await?;
+        let is_start = matches!(op, ContainerOperation::Starting { .. });
+        self.container_op = Some(op.clone());
+        self.loading = true;
+        self.spinner_frame = 0;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.container_op_rx = Some(rx);
+
+        let manager = Arc::clone(&self.manager);
+        tokio::spawn(async move {
+            if is_start {
+                match manager.read().await.start(&id).await {
+                    Ok(()) => { let _ = tx.send(ContainerOpResult::Success(op)); }
+                    Err(e) => { let _ = tx.send(ContainerOpResult::Failed(op, e.to_string())); }
+                }
+            } else {
+                match manager.read().await.stop(&id).await {
+                    Ok(()) => { let _ = tx.send(ContainerOpResult::Success(op)); }
+                    Err(e) => { let _ = tx.send(ContainerOpResult::Failed(op, e.to_string())); }
+                }
+            }
+        });
+
         Ok(())
     }
 
@@ -2066,34 +2164,60 @@ impl App {
     async fn execute_confirm_action(&mut self, action: ConfirmAction) -> AppResult<()> {
         match action {
             ConfirmAction::Delete(id) => {
-                self.loading = true;
+                if self.container_op.is_some() {
+                    return Ok(());
+                }
                 // Clean up any shell session for this container
                 self.shell_sessions.remove(&id);
-                match self.manager.read().await.remove(&id, true).await {
-                    Ok(()) => {
-                        self.status_message = Some("Container deleted".to_string());
+
+                let name = self.containers.iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| id.clone());
+
+                let op = ContainerOperation::Deleting { id: id.clone(), name };
+                self.container_op = Some(op.clone());
+                self.loading = true;
+                self.spinner_frame = 0;
+
+                let (tx, rx) = mpsc::unbounded_channel();
+                self.container_op_rx = Some(rx);
+
+                let manager = Arc::clone(&self.manager);
+                tokio::spawn(async move {
+                    match manager.read().await.remove(&id, true).await {
+                        Ok(()) => { let _ = tx.send(ContainerOpResult::Success(op)); }
+                        Err(e) => { let _ = tx.send(ContainerOpResult::Failed(op, e.to_string())); }
                     }
-                    Err(e) => {
-                        self.status_message = Some(format!("Delete failed: {}", e));
-                    }
-                }
-                self.loading = false;
-                self.refresh_containers().await?;
+                });
             }
             ConfirmAction::Stop(id) => {
-                self.loading = true;
+                if self.container_op.is_some() {
+                    return Ok(());
+                }
                 // Clean up any shell session for this container
                 self.shell_sessions.remove(&id);
-                match self.manager.read().await.stop(&id).await {
-                    Ok(()) => {
-                        self.status_message = Some("Container stopped".to_string());
+
+                let name = self.containers.iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| id.clone());
+
+                let op = ContainerOperation::Stopping { id: id.clone(), name };
+                self.container_op = Some(op.clone());
+                self.loading = true;
+                self.spinner_frame = 0;
+
+                let (tx, rx) = mpsc::unbounded_channel();
+                self.container_op_rx = Some(rx);
+
+                let manager = Arc::clone(&self.manager);
+                tokio::spawn(async move {
+                    match manager.read().await.stop(&id).await {
+                        Ok(()) => { let _ = tx.send(ContainerOpResult::Success(op)); }
+                        Err(e) => { let _ = tx.send(ContainerOpResult::Failed(op, e.to_string())); }
                     }
-                    Err(e) => {
-                        self.status_message = Some(format!("Stop failed: {}", e));
-                    }
-                }
-                self.loading = false;
-                self.refresh_containers().await?;
+                });
             }
             ConfirmAction::Rebuild { id, .. } => {
                 self.loading = true;

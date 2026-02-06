@@ -1,7 +1,7 @@
 //! Snapshot tests for UI rendering using insta
 
 use devc_core::DevcContainerStatus;
-use devc_tui::{App, ConfirmAction, DialogFocus, Tab, View};
+use devc_tui::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
 use ratatui::{backend::TestBackend, Terminal};
 
 /// Helper to render the app and capture output as a string
@@ -193,6 +193,32 @@ fn test_logs_view() {
         "2024-01-01 00:00:02 Server started on port 8080".to_string(),
     ];
     app.logs_scroll = 0;
+
+    let output = render_app(&mut app, 80, 24);
+    insta::assert_snapshot!(output);
+}
+
+/// Test container operation spinner modal
+#[test]
+fn test_container_operation_spinner() {
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+    app.view = View::Main;
+
+    // Add some containers
+    app.containers = vec![
+        App::create_test_container("my-rust-project", DevcContainerStatus::Running),
+        App::create_test_container("python-api", DevcContainerStatus::Stopped),
+    ];
+    app.selected = 0;
+    app.containers_table_state.select(Some(0));
+
+    // Set up a stopping operation
+    app.container_op = Some(ContainerOperation::Stopping {
+        id: "test-my-rust-project".to_string(),
+        name: "my-rust-project".to_string(),
+    });
+    app.spinner_frame = 2; // Fixed frame for deterministic snapshot
 
     let output = render_app(&mut app, 80, 24);
     insta::assert_snapshot!(output);
