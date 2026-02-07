@@ -261,7 +261,6 @@ impl DemoApp {
             Line::from("  Enter     View details"),
             Line::from(""),
             Line::from(Span::styled("Actions (disabled in demo)", Style::default().bold())),
-            Line::from("  b         Build container"),
             Line::from("  s         Start/Stop"),
             Line::from("  u         Up (full lifecycle)"),
             Line::from("  d         Delete"),
@@ -428,7 +427,7 @@ impl DemoApp {
                 self.logs_scroll = self.logs.len().saturating_sub(1);
                 self.view = crate::app::View::Logs;
             }
-            KeyCode::Char('b') | KeyCode::Char('s') | KeyCode::Char('u') | KeyCode::Char('d') => {
+            KeyCode::Char('s') | KeyCode::Char('u') | KeyCode::Char('d') => {
                 self.view = crate::app::View::Confirm;
             }
             _ => {}

@@ -977,9 +977,6 @@ impl App {
                         self.view = View::ContainerDetail;
                     }
                 }
-                KeyCode::Char('b') => {
-                    self.build_selected().await?;
-                }
                 KeyCode::Char('s') => {
                     self.toggle_selected().await?;
                 }
@@ -1287,9 +1284,6 @@ impl App {
         _modifiers: KeyModifiers,
     ) -> AppResult<()> {
         match code {
-            KeyCode::Char('b') => {
-                self.build_selected().await?;
-            }
             KeyCode::Char('s') => {
                 self.toggle_selected().await?;
             }
@@ -2049,35 +2043,6 @@ impl App {
             self.discovered_table_state.select(Some(self.selected_discovered));
         }
 
-        Ok(())
-    }
-
-    /// Build selected container
-    async fn build_selected(&mut self) -> AppResult<()> {
-        if self.containers.is_empty() {
-            return Ok(());
-        }
-
-        let container = &self.containers[self.selected];
-        self.status_message = Some(format!("Building {}...", container.name));
-        self.loading = true;
-        self.view = View::BuildOutput;
-        self.build_output.clear();
-        self.build_output.push(format!("Building container: {}", container.name));
-
-        match self.manager.read().await.build(&container.id).await {
-            Ok(image_id) => {
-                self.build_output.push(format!("Built image: {}", image_id));
-                self.status_message = Some(format!("Built {}", container.name));
-            }
-            Err(e) => {
-                self.build_output.push(format!("Build failed: {}", e));
-                self.status_message = Some(format!("Build failed: {}", e));
-            }
-        }
-
-        self.loading = false;
-        self.refresh_containers().await?;
         Ok(())
     }
 

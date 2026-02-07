@@ -199,7 +199,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 if app.discover_mode {
                     "Esc/q: Exit  j/k: Navigate  a: Adopt  r: Refresh  ?: Help"
                 } else {
-                    "D: Discover  j/k: Navigate  Enter: Details  b: Build  s: Start/Stop  u: Up  R: Rebuild  p: Ports  S: Shell  d: Delete  ?: Help  q: Quit"
+                    "D: Discover  j/k: Navigate  Enter: Details  s: Start/Stop  u: Up  R: Rebuild  p: Ports  S: Shell  d: Delete  ?: Help  q: Quit"
                 }
             }
             Tab::Providers => {
@@ -213,7 +213,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         },
-        View::ContainerDetail => "b: Build  s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  1-3: Switch tab  Esc/q: Back  ?: Help",
+        View::ContainerDetail => "s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  1-3: Switch tab  Esc/q: Back  ?: Help",
         View::ProviderDetail => {
             if app.provider_detail_state.editing {
                 "Enter: Confirm  Esc: Cancel  Type to edit"
@@ -1216,7 +1216,6 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             Line::from("  G/End       Go to last container"),
             Line::from("  Enter       View container details"),
             Line::from(""),
-            Line::from("  b           Build container image"),
             Line::from("  s           Start or Stop container"),
             Line::from("  u           Up - build, create, and start"),
             Line::from("  S           Shell (persistent session, Ctrl+\\ to detach)"),
