@@ -47,7 +47,7 @@ enum Commands {
     },
 
     /// Open an interactive shell in a container
-    Ssh {
+    Shell {
         /// Container name or ID (interactive selection if not specified)
         container: Option<String>,
     },
@@ -245,7 +245,7 @@ async fn run() -> anyhow::Result<()> {
                     };
                     commands::run(&manager, &name, cmd).await?;
                 }
-                Commands::Ssh { container } => {
+                Commands::Shell { container } => {
                     let name = match container {
                         Some(name) => name,
                         None => {
@@ -253,7 +253,7 @@ async fn run() -> anyhow::Result<()> {
                             select_container(&containers, SelectionContext::Running, "Select container to connect to:")?
                         }
                     };
-                    commands::ssh(&manager, &name).await?;
+                    commands::shell(&manager, &name).await?;
                 }
                 Commands::Build { container, no_cache } => {
                     commands::build(&manager, container, no_cache).await?;

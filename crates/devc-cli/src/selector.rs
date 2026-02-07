@@ -14,7 +14,7 @@ use std::io::{stdout, Write};
 /// Context for filtering containers in the selector
 #[derive(Debug, Clone, Copy)]
 pub enum SelectionContext {
-    /// Only running containers (for ssh, run, stop)
+    /// Only running containers (for shell, run, stop)
     Running,
     /// Startable containers: Stopped, Built, Created (for start)
     Startable,

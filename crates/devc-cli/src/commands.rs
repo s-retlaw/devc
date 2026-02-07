@@ -26,7 +26,7 @@ pub async fn run(manager: &ContainerManager, container: &str, cmd: Vec<String>) 
 }
 
 /// Open an interactive shell in a container
-pub async fn ssh(manager: &ContainerManager, container: &str) -> Result<()> {
+pub async fn shell(manager: &ContainerManager, container: &str) -> Result<()> {
     let state = find_container(manager, container).await?;
 
     if state.status != DevcContainerStatus::Running {
@@ -486,7 +486,7 @@ pub async fn init(manager: &ContainerManager) -> Result<()> {
     println!("\nNext steps:");
     println!("  devc build {}    # Build the container image", state.name);
     println!("  devc up {}       # Build, create, and start", state.name);
-    println!("  devc ssh {}      # Connect to the container", state.name);
+    println!("  devc shell {}      # Connect to the container", state.name);
 
     Ok(())
 }
@@ -512,7 +512,7 @@ pub async fn up(manager: &ContainerManager, container: Option<String>) -> Result
     manager.up(&state.id).await?;
 
     println!("Container '{}' is running", state.name);
-    println!("\nConnect with: devc ssh {}", state.name);
+    println!("\nConnect with: devc shell {}", state.name);
 
     Ok(())
 }
@@ -734,7 +734,7 @@ pub async fn adopt(manager: &ContainerManager, container: Option<String>) -> Res
 
     println!("Adopted container: {}", state.name);
     println!("\nYou can now use devc commands with this container:");
-    println!("  devc ssh {}       # Connect to the container", state.name);
+    println!("  devc shell {}       # Connect to the container", state.name);
     println!("  devc stop {}      # Stop the container", state.name);
     println!("  devc rm {}        # Remove the container", state.name);
 
