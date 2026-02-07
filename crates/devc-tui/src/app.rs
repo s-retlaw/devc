@@ -4,7 +4,9 @@ use crate::clipboard::copy_to_clipboard;
 use crate::event::{Event, EventHandler};
 use crate::ports::{spawn_port_detector, DetectedPort, PortDetectionUpdate};
 use crate::settings::{ProviderDetailState, SettingsState};
-use crate::shell::{PtyShell, ShellConfig, ShellExitReason};
+#[cfg(unix)]
+use crate::shell::PtyShell;
+use crate::shell::{ShellConfig, ShellExitReason};
 use crate::tunnel::{check_socat_installed, install_socat, open_in_browser, spawn_forwarder, InstallResult, PortForwarder};
 use crate::{resume_tui, suspend_tui, ui};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -158,6 +160,7 @@ pub struct ShellSession {
     pub container_name: String,
     pub provider_container_id: String,
     pub provider_type: ProviderType,
+    #[cfg(unix)]
     pub pty: Option<PtyShell>,
 }
 
@@ -471,8 +474,16 @@ impl App {
         while !self.should_quit {
             // Handle shell mode specially - run shell session and return to TUI
             if self.view == View::Shell {
-                self.run_shell_session(terminal, &mut events).await?;
-                continue; // Re-enter loop, will now draw TUI
+                #[cfg(unix)]
+                {
+                    self.run_shell_session(terminal, &mut events).await?;
+                    continue; // Re-enter loop, will now draw TUI
+                }
+                #[cfg(not(unix))]
+                {
+                    self.view = View::Main;
+                    continue;
+                }
             }
 
             // Draw UI
@@ -1025,10 +1036,17 @@ impl App {
                     }
                 }
                 KeyCode::Char('S') => {
-                    // Enter shell mode for selected container
-                    if !self.containers.is_empty() {
-                        let container = self.containers[self.selected].clone();
-                        self.enter_shell_mode(&container).await?;
+                    #[cfg(unix)]
+                    {
+                        // Enter shell mode for selected container
+                        if !self.containers.is_empty() {
+                            let container = self.containers[self.selected].clone();
+                            self.enter_shell_mode(&container).await?;
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        self.status_message = Some("Shell not supported on this platform".to_string());
                     }
                 }
 
@@ -1316,10 +1334,17 @@ impl App {
                 }
             }
             KeyCode::Char('S') => {
-                // Enter shell mode for current container
-                if !self.containers.is_empty() {
-                    let container = self.containers[self.selected].clone();
-                    self.enter_shell_mode(&container).await?;
+                #[cfg(unix)]
+                {
+                    // Enter shell mode for current container
+                    if !self.containers.is_empty() {
+                        let container = self.containers[self.selected].clone();
+                        self.enter_shell_mode(&container).await?;
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    self.status_message = Some("Shell not supported on this platform".to_string());
                 }
             }
             _ => {}
@@ -1765,6 +1790,7 @@ impl App {
     }
 
     /// Enter shell mode for a container
+    #[cfg(unix)]
     async fn enter_shell_mode(&mut self, container: &ContainerState) -> AppResult<()> {
         if container.status != DevcContainerStatus::Running {
             self.status_message = Some("Container must be running to open shell".to_string());
@@ -1820,6 +1846,7 @@ impl App {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn make_shell_config(&self, provider_type: ProviderType, container_id: String) -> ShellConfig {
         ShellConfig {
             provider_type,
@@ -1834,6 +1861,7 @@ impl App {
     ///
     /// Uses kill/recreate pattern for EventHandler instead of pause/resume.
     /// This prevents any keystroke competition and ensures clean state.
+    #[cfg(unix)]
     async fn run_shell_session<B: Backend + std::io::Write>(
         &mut self,
         terminal: &mut Terminal<B>,

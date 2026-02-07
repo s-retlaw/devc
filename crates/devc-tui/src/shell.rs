@@ -5,16 +5,9 @@
 //! allowing reattachment with full state preserved.
 
 use devc_provider::ProviderType;
-use std::io::{self, Read as _, Write};
-use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::io::{self, Write};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
-
-use nix::libc;
-use nix::poll::{PollFd, PollFlags, PollTimeout};
-use nix::pty::openpty;
-use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet};
-
-const CTRL_BACKSLASH: u8 = 0x1c;
 
 /// Reset terminal to sane state using stty
 #[cfg(unix)]
@@ -52,299 +45,318 @@ pub enum ShellExitReason {
     Error(io::Error),
 }
 
-/// A persistent shell session backed by a host-side PTY
-pub struct PtyShell {
-    master_fd: OwnedFd,
-    child: std::process::Child,
-    in_alternate_screen: bool,
-}
+// --- Unix-only: PTY shell implementation ---
 
-// SIGWINCH flag: set by signal handler, checked in poll loop
-static SIGWINCH_RECEIVED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+#[cfg(unix)]
+mod pty {
+    use super::*;
+    use std::io::Read as _;
+    use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 
-extern "C" fn sigwinch_handler(_: libc::c_int) {
-    SIGWINCH_RECEIVED.store(true, std::sync::atomic::Ordering::SeqCst);
-}
+    use nix::libc;
+    use nix::poll::{PollFd, PollFlags, PollTimeout};
+    use nix::pty::openpty;
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet};
 
-impl PtyShell {
-    /// Spawn a new shell session connected to a host-side PTY
-    pub fn spawn(config: &ShellConfig) -> io::Result<Self> {
-        // Get current terminal size
-        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let winsize = nix::pty::Winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
+    const CTRL_BACKSLASH: u8 = 0x1c;
 
-        // Open a PTY pair
-        let pty = openpty(Some(&winsize), None)
-            .map_err(io::Error::other)?;
-
-        let master_fd = pty.master;
-        let slave_fd = pty.slave;
-
-        // Build the docker/podman exec command
-        // No --detach-keys: we intercept Ctrl+\ in the relay loop ourselves
-        let runtime = match config.provider_type {
-            ProviderType::Docker => "docker",
-            ProviderType::Podman => "podman",
-        };
-
-        let mut cmd = Command::new(runtime);
-        cmd.args(["exec", "-it"]);
-
-        if let Some(ref user) = config.user {
-            cmd.args(["-u", user]);
-        }
-        if let Some(ref wd) = config.working_dir {
-            cmd.args(["-w", wd]);
-        }
-
-        cmd.arg(&config.container_id);
-        cmd.arg(&config.shell);
-
-        // Connect child stdin/stdout/stderr to the slave PTY fd.
-        // Each Stdio::from_raw_fd takes ownership and will close the fd, so we must
-        // dup() to create separate fds for stdin and stdout, giving the original to stderr.
-        let slave_raw = slave_fd.into_raw_fd(); // consume OwnedFd so it won't double-close
-        unsafe {
-            cmd.stdin(Stdio::from_raw_fd(libc::dup(slave_raw)));
-            cmd.stdout(Stdio::from_raw_fd(libc::dup(slave_raw)));
-            cmd.stderr(Stdio::from_raw_fd(slave_raw)); // last one takes the original
-        }
-
-        let child = cmd.spawn()?;
-
-        Ok(PtyShell {
-            master_fd,
-            child,
-            in_alternate_screen: false,
-        })
+    /// A persistent shell session backed by a host-side PTY
+    pub struct PtyShell {
+        master_fd: OwnedFd,
+        child: std::process::Child,
+        in_alternate_screen: bool,
     }
 
-    /// Whether the child app is currently using the alternate screen buffer
-    pub fn is_in_alternate_screen(&self) -> bool {
-        self.in_alternate_screen
+    // SIGWINCH flag: set by signal handler, checked in poll loop
+    static SIGWINCH_RECEIVED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    extern "C" fn sigwinch_handler(_: libc::c_int) {
+        SIGWINCH_RECEIVED.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Scan relay output for alternate screen enter/leave sequences.
-    /// Tracks the last occurrence to determine current state.
-    fn scan_alternate_screen(&mut self, data: &[u8]) {
-        const ENTER: &[u8] = b"\x1b[?1049h";
-        const LEAVE: &[u8] = b"\x1b[?1049l";
-        let mut last_enter = None;
-        let mut last_leave = None;
-        for i in 0..data.len() {
-            if data[i..].starts_with(ENTER) {
-                last_enter = Some(i);
-            } else if data[i..].starts_with(LEAVE) {
-                last_leave = Some(i);
+    impl PtyShell {
+        /// Spawn a new shell session connected to a host-side PTY
+        pub fn spawn(config: &ShellConfig) -> io::Result<Self> {
+            // Get current terminal size
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+            let winsize = nix::pty::Winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+
+            // Open a PTY pair
+            let pty = openpty(Some(&winsize), None)
+                .map_err(io::Error::other)?;
+
+            let master_fd = pty.master;
+            let slave_fd = pty.slave;
+
+            // Build the docker/podman exec command
+            // No --detach-keys: we intercept Ctrl+\ in the relay loop ourselves
+            let runtime = match config.provider_type {
+                ProviderType::Docker => "docker",
+                ProviderType::Podman => "podman",
+            };
+
+            let mut cmd = Command::new(runtime);
+            cmd.args(["exec", "-it"]);
+
+            if let Some(ref user) = config.user {
+                cmd.args(["-u", user]);
+            }
+            if let Some(ref wd) = config.working_dir {
+                cmd.args(["-w", wd]);
+            }
+
+            cmd.arg(&config.container_id);
+            cmd.arg(&config.shell);
+
+            // Connect child stdin/stdout/stderr to the slave PTY fd.
+            // Each Stdio::from_raw_fd takes ownership and will close the fd, so we must
+            // dup() to create separate fds for stdin and stdout, giving the original to stderr.
+            let slave_raw = slave_fd.into_raw_fd(); // consume OwnedFd so it won't double-close
+            unsafe {
+                cmd.stdin(Stdio::from_raw_fd(libc::dup(slave_raw)));
+                cmd.stdout(Stdio::from_raw_fd(libc::dup(slave_raw)));
+                cmd.stderr(Stdio::from_raw_fd(slave_raw)); // last one takes the original
+            }
+
+            let child = cmd.spawn()?;
+
+            Ok(PtyShell {
+                master_fd,
+                child,
+                in_alternate_screen: false,
+            })
+        }
+
+        /// Whether the child app is currently using the alternate screen buffer
+        pub fn is_in_alternate_screen(&self) -> bool {
+            self.in_alternate_screen
+        }
+
+        /// Scan relay output for alternate screen enter/leave sequences.
+        /// Tracks the last occurrence to determine current state.
+        fn scan_alternate_screen(&mut self, data: &[u8]) {
+            const ENTER: &[u8] = b"\x1b[?1049h";
+            const LEAVE: &[u8] = b"\x1b[?1049l";
+            let mut last_enter = None;
+            let mut last_leave = None;
+            for i in 0..data.len() {
+                if data[i..].starts_with(ENTER) {
+                    last_enter = Some(i);
+                } else if data[i..].starts_with(LEAVE) {
+                    last_leave = Some(i);
+                }
+            }
+            match (last_enter, last_leave) {
+                (Some(e), Some(l)) => self.in_alternate_screen = e > l,
+                (Some(_), None) => self.in_alternate_screen = true,
+                (None, Some(_)) => self.in_alternate_screen = false,
+                (None, None) => {}
             }
         }
-        match (last_enter, last_leave) {
-            (Some(e), Some(l)) => self.in_alternate_screen = e > l,
-            (Some(_), None) => self.in_alternate_screen = true,
-            (None, Some(_)) => self.in_alternate_screen = false,
-            (None, None) => {}
-        }
-    }
 
-    /// Run the relay loop between the real terminal and the PTY master.
-    /// Blocks until detach (Ctrl+\), shell exit, or error.
-    /// If `force_redraw` is true, injects Ctrl+L through the PTY data channel
-    /// so that TUI apps (e.g. nvim) redraw after a reattach.
-    pub fn relay(&mut self, force_redraw: bool) -> ShellExitReason {
-        // Install SIGWINCH handler.
-        SIGWINCH_RECEIVED.store(false, std::sync::atomic::Ordering::SeqCst);
-        let sa = SigAction::new(
-            SigHandler::Handler(sigwinch_handler),
-            SaFlags::SA_RESTART,
-            SigSet::empty(),
-        );
-        let old_sigwinch = unsafe { sigaction(nix::sys::signal::Signal::SIGWINCH, &sa) };
+        /// Run the relay loop between the real terminal and the PTY master.
+        /// Blocks until detach (Ctrl+\), shell exit, or error.
+        /// If `force_redraw` is true, injects Ctrl+L through the PTY data channel
+        /// so that TUI apps (e.g. nvim) redraw after a reattach.
+        pub fn relay(&mut self, force_redraw: bool) -> ShellExitReason {
+            // Install SIGWINCH handler.
+            SIGWINCH_RECEIVED.store(false, std::sync::atomic::Ordering::SeqCst);
+            let sa = SigAction::new(
+                SigHandler::Handler(sigwinch_handler),
+                SaFlags::SA_RESTART,
+                SigSet::empty(),
+            );
+            let old_sigwinch = unsafe { sigaction(nix::sys::signal::Signal::SIGWINCH, &sa) };
 
-        // Put terminal in raw mode
-        if let Err(e) = crossterm::terminal::enable_raw_mode() {
-            return ShellExitReason::Error(e);
-        }
+            // Put terminal in raw mode
+            if let Err(e) = crossterm::terminal::enable_raw_mode() {
+                return ShellExitReason::Error(e);
+            }
 
-        // On reattach, update PTY size and inject Ctrl+L to trigger redraw
-        if force_redraw {
-            self.propagate_winsize();
-            let _ = nix::unistd::write(&self.master_fd, b"\x0c");
-        }
-
-        let result = self.relay_loop();
-
-        // Restore terminal
-        let _ = crossterm::terminal::disable_raw_mode();
-
-        // Restore old SIGWINCH handler
-        if let Ok(old) = old_sigwinch {
-            let _ = unsafe { sigaction(nix::sys::signal::Signal::SIGWINCH, &old) };
-        }
-
-        result
-    }
-
-    fn relay_loop(&mut self) -> ShellExitReason {
-        let stdin_raw = io::stdin().as_raw_fd();
-        let master_raw = self.master_fd.as_raw_fd();
-        // SAFETY: these fds are valid for the duration of this function.
-        // We use borrow_raw for master_borrowed instead of as_fd() so that
-        // the borrow doesn't tie up &self, allowing &mut self in scan_alternate_screen.
-        let stdin_borrowed = unsafe { BorrowedFd::borrow_raw(stdin_raw) };
-        let master_borrowed = unsafe { BorrowedFd::borrow_raw(master_raw) };
-
-        let mut buf = [0u8; 4096];
-
-        loop {
-            // Check for SIGWINCH
-            if SIGWINCH_RECEIVED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            // On reattach, update PTY size and inject Ctrl+L to trigger redraw
+            if force_redraw {
                 self.propagate_winsize();
+                let _ = nix::unistd::write(&self.master_fd, b"\x0c");
             }
 
-            let stdin_pollfd = PollFd::new(stdin_borrowed, PollFlags::POLLIN);
-            let master_pollfd = PollFd::new(master_borrowed, PollFlags::POLLIN);
-            let mut fds = [stdin_pollfd, master_pollfd];
+            let result = self.relay_loop();
 
-            match nix::poll::poll(&mut fds, PollTimeout::from(200u16)) {
-                Ok(0) => continue, // timeout, loop to check SIGWINCH
-                Err(nix::errno::Errno::EINTR) => continue,
-                Err(e) => {
-                    return ShellExitReason::Error(io::Error::other(e));
+            // Restore terminal
+            let _ = crossterm::terminal::disable_raw_mode();
+
+            // Restore old SIGWINCH handler
+            if let Ok(old) = old_sigwinch {
+                let _ = unsafe { sigaction(nix::sys::signal::Signal::SIGWINCH, &old) };
+            }
+
+            result
+        }
+
+        fn relay_loop(&mut self) -> ShellExitReason {
+            let stdin_raw = io::stdin().as_raw_fd();
+            let master_raw = self.master_fd.as_raw_fd();
+            // SAFETY: these fds are valid for the duration of this function.
+            // We use borrow_raw for master_borrowed instead of as_fd() so that
+            // the borrow doesn't tie up &self, allowing &mut self in scan_alternate_screen.
+            let stdin_borrowed = unsafe { BorrowedFd::borrow_raw(stdin_raw) };
+            let master_borrowed = unsafe { BorrowedFd::borrow_raw(master_raw) };
+
+            let mut buf = [0u8; 4096];
+
+            loop {
+                // Check for SIGWINCH
+                if SIGWINCH_RECEIVED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    self.propagate_winsize();
                 }
-                Ok(_) => {}
-            }
 
-            // Check master fd first (output from shell)
-            if let Some(revents) = fds[1].revents() {
-                if revents.contains(PollFlags::POLLIN) {
-                    let n = nix::unistd::read(master_raw, &mut buf);
-                    match n {
-                        Ok(0) | Err(_) => return ShellExitReason::Exited,
-                        Ok(n) => {
-                            self.scan_alternate_screen(&buf[..n]);
-                            let mut stdout = io::stdout().lock();
-                            if stdout.write_all(&buf[..n]).is_err() {
-                                return ShellExitReason::Exited;
-                            }
-                            let _ = stdout.flush();
-                        }
+                let stdin_pollfd = PollFd::new(stdin_borrowed, PollFlags::POLLIN);
+                let master_pollfd = PollFd::new(master_borrowed, PollFlags::POLLIN);
+                let mut fds = [stdin_pollfd, master_pollfd];
+
+                match nix::poll::poll(&mut fds, PollTimeout::from(200u16)) {
+                    Ok(0) => continue, // timeout, loop to check SIGWINCH
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(e) => {
+                        return ShellExitReason::Error(io::Error::other(e));
                     }
+                    Ok(_) => {}
                 }
-                if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
-                    // Drain any remaining data
-                    loop {
-                        match nix::unistd::read(master_raw, &mut buf) {
-                            Ok(0) | Err(_) => break,
+
+                // Check master fd first (output from shell)
+                if let Some(revents) = fds[1].revents() {
+                    if revents.contains(PollFlags::POLLIN) {
+                        let n = nix::unistd::read(master_raw, &mut buf);
+                        match n {
+                            Ok(0) | Err(_) => return ShellExitReason::Exited,
                             Ok(n) => {
+                                self.scan_alternate_screen(&buf[..n]);
                                 let mut stdout = io::stdout().lock();
-                                let _ = stdout.write_all(&buf[..n]);
+                                if stdout.write_all(&buf[..n]).is_err() {
+                                    return ShellExitReason::Exited;
+                                }
                                 let _ = stdout.flush();
                             }
                         }
                     }
-                    return ShellExitReason::Exited;
-                }
-            }
-
-            // Check stdin (input from user)
-            if let Some(revents) = fds[0].revents() {
-                if revents.contains(PollFlags::POLLIN) {
-                    let mut stdin = io::stdin().lock();
-                    match stdin.read(&mut buf) {
-                        Ok(0) => return ShellExitReason::Exited,
-                        Err(e) => {
-                            return ShellExitReason::Error(e);
-                        }
-                        Ok(n) => {
-                            // Scan for Ctrl+\ (0x1c)
-                            if let Some(pos) = buf[..n].iter().position(|&b| b == CTRL_BACKSLASH)
-                            {
-                                // Write bytes before the detach key to master
-                                if pos > 0 {
-                                    let _ =
-                                        nix::unistd::write(&self.master_fd, &buf[..pos]);
+                    if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
+                        // Drain any remaining data
+                        loop {
+                            match nix::unistd::read(master_raw, &mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    let mut stdout = io::stdout().lock();
+                                    let _ = stdout.write_all(&buf[..n]);
+                                    let _ = stdout.flush();
                                 }
-                                return ShellExitReason::Detached;
                             }
+                        }
+                        return ShellExitReason::Exited;
+                    }
+                }
 
-                            // Forward all bytes to master
-                            if nix::unistd::write(&self.master_fd, &buf[..n]).is_err() {
-                                return ShellExitReason::Exited;
+                // Check stdin (input from user)
+                if let Some(revents) = fds[0].revents() {
+                    if revents.contains(PollFlags::POLLIN) {
+                        let mut stdin = io::stdin().lock();
+                        match stdin.read(&mut buf) {
+                            Ok(0) => return ShellExitReason::Exited,
+                            Err(e) => {
+                                return ShellExitReason::Error(e);
+                            }
+                            Ok(n) => {
+                                // Scan for Ctrl+\ (0x1c)
+                                if let Some(pos) = buf[..n].iter().position(|&b| b == CTRL_BACKSLASH)
+                                {
+                                    // Write bytes before the detach key to master
+                                    if pos > 0 {
+                                        let _ =
+                                            nix::unistd::write(&self.master_fd, &buf[..pos]);
+                                    }
+                                    return ShellExitReason::Detached;
+                                }
+
+                                // Forward all bytes to master
+                                if nix::unistd::write(&self.master_fd, &buf[..n]).is_err() {
+                                    return ShellExitReason::Exited;
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    /// Set the PTY to a specific size and send SIGWINCH to the child process.
-    ///
-    /// Used on detach to set a dummy 1x1 size so the next reattach's
-    /// `propagate_winsize()` is a genuine change that docker exec will propagate.
-    pub fn set_size_and_signal(&self, cols: u16, rows: u16) {
-        let ws = libc::winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        unsafe {
-            libc::ioctl(self.master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+        /// Set the PTY to a specific size and send SIGWINCH to the child process.
+        ///
+        /// Used on detach to set a dummy 1x1 size so the next reattach's
+        /// `propagate_winsize()` is a genuine change that docker exec will propagate.
+        pub fn set_size_and_signal(&self, cols: u16, rows: u16) {
+            let ws = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            unsafe {
+                libc::ioctl(self.master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+            }
+            // TIOCSWINSZ only sends SIGWINCH to the slave's foreground process group,
+            // but we never set one up (no setsid/TIOCSCTTY). Explicitly signal the
+            // child (docker/podman exec) so it queries the new size and propagates it
+            // to the container's PTY.
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(self.child.id() as i32),
+                nix::sys::signal::Signal::SIGWINCH,
+            );
         }
-        // TIOCSWINSZ only sends SIGWINCH to the slave's foreground process group,
-        // but we never set one up (no setsid/TIOCSCTTY). Explicitly signal the
-        // child (docker/podman exec) so it queries the new size and propagates it
-        // to the container's PTY.
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.child.id() as i32),
-            nix::sys::signal::Signal::SIGWINCH,
-        );
-    }
 
-    /// Propagate current terminal size to the PTY and child process
-    fn propagate_winsize(&self) {
-        if let Ok((cols, rows)) = crossterm::terminal::size() {
-            self.set_size_and_signal(cols, rows);
+        /// Propagate current terminal size to the PTY and child process
+        fn propagate_winsize(&self) {
+            if let Ok((cols, rows)) = crossterm::terminal::size() {
+                self.set_size_and_signal(cols, rows);
+            }
+        }
+
+        /// Check if the shell process is still alive
+        pub fn is_alive(&mut self) -> bool {
+            matches!(self.child.try_wait(), Ok(None))
+        }
+
+        /// Set the PTY size (call before relay when reattaching after a resize in the TUI)
+        pub fn set_size(&self, cols: u16, rows: u16) {
+            let ws = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            unsafe {
+                libc::ioctl(self.master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+            }
         }
     }
 
-    /// Check if the shell process is still alive
-    pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
-    }
-
-    /// Set the PTY size (call before relay when reattaching after a resize in the TUI)
-    pub fn set_size(&self, cols: u16, rows: u16) {
-        let ws = libc::winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        unsafe {
-            libc::ioctl(self.master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+    impl Drop for PtyShell {
+        fn drop(&mut self) {
+            // Kill the child process when the PtyShell is dropped
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
+
+    // PtyShell holds OwnedFd and Child which are Send
+    // The OwnedFd is only accessed from one thread at a time (relay runs in spawn_blocking)
+    unsafe impl Send for PtyShell {}
 }
 
-impl Drop for PtyShell {
-    fn drop(&mut self) {
-        // Kill the child process when the PtyShell is dropped
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-// PtyShell holds OwnedFd and Child which are Send
-// The OwnedFd is only accessed from one thread at a time (relay runs in spawn_blocking)
-unsafe impl Send for PtyShell {}
+#[cfg(unix)]
+pub use pty::PtyShell;
 
 #[cfg(test)]
 mod tests {

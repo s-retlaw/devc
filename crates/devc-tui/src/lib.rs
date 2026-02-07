@@ -18,7 +18,9 @@ pub use clipboard::copy_to_clipboard;
 pub use app::{App, AppResult, ConfirmAction, ContainerOperation, DialogFocus, ShellSession, Tab, View};
 pub use demo::DemoApp;
 pub use event::{Event, EventHandler};
-pub use shell::{reset_terminal, PtyShell, ShellConfig, ShellExitReason};
+pub use shell::{reset_terminal, ShellConfig, ShellExitReason};
+#[cfg(unix)]
+pub use shell::PtyShell;
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},

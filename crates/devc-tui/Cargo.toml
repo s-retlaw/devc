@@ -17,6 +17,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 ansi-to-tui = "4"
+[target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
 [dev-dependencies]
