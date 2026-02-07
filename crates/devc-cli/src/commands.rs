@@ -93,10 +93,12 @@ async fn ssh_via_dropbear(state: &ContainerState) -> Result<std::process::ExitSt
 
     // Build the proxy command based on environment
     // Dropbear runs as daemon on 127.0.0.1:2222, we use socat to connect
+    // Shell-quote container_id for safe interpolation into ProxyCommand
+    let quoted_id = format!("'{}'", container_id.replace('\'', "'\\''"));
     let proxy_cmd = if is_in_toolbox() {
         format!(
             "flatpak-spawn --host podman exec -i {} socat - TCP:127.0.0.1:2222",
-            container_id
+            quoted_id
         )
     } else {
         let runtime = match state.provider {
@@ -105,7 +107,7 @@ async fn ssh_via_dropbear(state: &ContainerState) -> Result<std::process::ExitSt
         };
         format!(
             "{} exec -i {} socat - TCP:127.0.0.1:2222",
-            runtime, container_id
+            runtime, quoted_id
         )
     };
 
@@ -353,8 +355,8 @@ pub async fn list(manager: &ContainerManager, discover: bool, sync: bool) -> Res
 
     // Header
     println!(
-        "  {:<NAME_WIDTH$} {:<STATUS_WIDTH$} {:<PROVIDER_WIDTH$} {}",
-        "NAME", "STATUS", "PROVIDER", "WORKSPACE"
+        "  {:<NAME_WIDTH$} {:<STATUS_WIDTH$} {:<PROVIDER_WIDTH$} WORKSPACE",
+        "NAME", "STATUS", "PROVIDER"
     );
     println!("{}", "-".repeat(75));
 
@@ -415,8 +417,8 @@ async fn list_discovered(manager: &ContainerManager) -> Result<()> {
 
     // Header
     println!(
-        "  {:<NAME_WIDTH$} {:<STATUS_WIDTH$} {:<SOURCE_WIDTH$} {:<MANAGED_WIDTH$} {}",
-        "NAME", "STATUS", "SOURCE", "MANAGED", "WORKSPACE"
+        "  {:<NAME_WIDTH$} {:<STATUS_WIDTH$} {:<SOURCE_WIDTH$} {:<MANAGED_WIDTH$} WORKSPACE",
+        "NAME", "STATUS", "SOURCE", "MANAGED"
     );
     println!("{}", "-".repeat(85));
 

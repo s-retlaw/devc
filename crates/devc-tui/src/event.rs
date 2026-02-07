@@ -42,24 +42,18 @@ impl EventHandler {
                         if event::poll(tick_rate).unwrap_or(false) {
                             match event::read() {
                                 Ok(CrosstermEvent::Key(key)) => {
-                                    if tx.send(Event::Key(key)).is_err() {
-                                        return;
-                                    }
+                                    let _ = tx.send(Event::Key(key));
                                 }
                                 Ok(CrosstermEvent::Mouse(mouse)) => {
-                                    if tx.send(Event::Mouse(mouse)).is_err() {
-                                        return;
-                                    }
+                                    let _ = tx.send(Event::Mouse(mouse));
                                 }
                                 Ok(CrosstermEvent::Resize(w, h)) => {
-                                    if tx.send(Event::Resize(w, h)).is_err() {
-                                        return;
-                                    }
+                                    let _ = tx.send(Event::Resize(w, h));
                                 }
                                 _ => {}
                             }
-                        } else if tx.send(Event::Tick).is_err() {
-                            return;
+                        } else {
+                            let _ = tx.send(Event::Tick);
                         }
                     } => {}
                 }

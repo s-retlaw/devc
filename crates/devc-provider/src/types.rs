@@ -359,6 +359,8 @@ pub struct LogConfig {
 /// Log stream
 pub struct LogStream {
     pub stream: Pin<Box<dyn AsyncRead + Send>>,
+    /// Holds the child process so it is killed when the stream is dropped.
+    pub _child: Option<tokio::process::Child>,
 }
 
 /// Provider information

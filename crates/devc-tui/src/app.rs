@@ -756,12 +756,12 @@ impl App {
         }
 
         // Check discover mode FIRST - Esc/q should exit discover mode, not quit app
-        if self.view == View::Main && self.tab == Tab::Containers && self.discover_mode {
-            if code == KeyCode::Esc || code == KeyCode::Char('q') {
-                self.discover_mode = false;
-                self.status_message = Some("Showing managed containers".to_string());
-                return Ok(());
-            }
+        if self.view == View::Main && self.tab == Tab::Containers && self.discover_mode
+            && (code == KeyCode::Esc || code == KeyCode::Char('q'))
+        {
+            self.discover_mode = false;
+            self.status_message = Some("Showing managed containers".to_string());
+            return Ok(());
         }
 
         // View-specific exit handling (runs BEFORE global q/Esc)
@@ -1790,7 +1790,7 @@ impl App {
         // Check if we already have a session for this container
         if let Some(session) = self.shell_sessions.get_mut(&container_id) {
             // Check if the PTY is still alive
-            if session.pty.as_mut().map_or(false, |p| p.is_alive()) {
+            if session.pty.as_mut().is_some_and(|p| p.is_alive()) {
                 // Reattach to existing session
                 self.active_shell_container = Some(container_id);
                 self.view = View::Shell;
@@ -1815,6 +1815,16 @@ impl App {
         self.active_shell_container = Some(container_id);
         self.view = View::Shell;
         Ok(())
+    }
+
+    fn make_shell_config(&self, provider_type: ProviderType, container_id: String) -> ShellConfig {
+        ShellConfig {
+            provider_type,
+            container_id,
+            shell: self.config.defaults.shell.clone(),
+            user: self.config.defaults.user.clone(),
+            working_dir: None,
+        }
     }
 
     /// Run shell session - called from main loop when View::Shell
@@ -1886,13 +1896,7 @@ impl App {
                 if !p.is_alive() {
                     // PTY died while we were away, spawn a new one below
                     drop(p);
-                    let config = ShellConfig {
-                        provider_type,
-                        container_id: provider_container_id.clone(),
-                        shell: self.config.defaults.shell.clone(),
-                        user: self.config.defaults.user.clone(),
-                        working_dir: None,
-                    };
+                    let config = self.make_shell_config(provider_type, provider_container_id.clone());
                     match PtyShell::spawn(&config) {
                         Ok(new_p) => new_p,
                         Err(e) => {
@@ -1917,14 +1921,7 @@ impl App {
             }
             _ => {
                 // Spawn new PTY
-                let config = ShellConfig {
-                    provider_type,
-                    container_id: provider_container_id.clone(),
-                    shell: self.config.defaults.shell.clone(),
-                    user: self.config.defaults.user.clone(),
-                    working_dir: None,
-                };
-
+                let config = self.make_shell_config(provider_type, provider_container_id.clone());
                 match PtyShell::spawn(&config) {
                     Ok(p) => p,
                     Err(e) => {
@@ -1943,38 +1940,39 @@ impl App {
         };
 
         // 6. Run relay in spawn_blocking (returns PtyShell + reason)
-        let (pty, reason) = tokio::task::spawn_blocking(move || {
+        let relay_result = tokio::task::spawn_blocking(move || {
             let reason = pty.relay();
             (pty, reason)
         })
-        .await
-        .unwrap_or_else(|e| {
-            // JoinError - create a dummy error reason
-            // We can't recover the PtyShell, so treat it as an error
-            // Need a PtyShell to return but we lost it. Create error config.
-            panic!("Shell relay task panicked: {}", e);
-        });
+        .await;
 
         // 7. Process result
-        match reason {
-            ShellExitReason::Detached => {
-                // Put PTY back into session - session preserved
-                if let Some(session) = self.shell_sessions.get_mut(&container_id) {
-                    session.pty = Some(pty);
+        match relay_result {
+            Ok((pty, reason)) => match reason {
+                ShellExitReason::Detached => {
+                    // Put PTY back into session - session preserved
+                    if let Some(session) = self.shell_sessions.get_mut(&container_id) {
+                        session.pty = Some(pty);
+                    }
+                    self.status_message = Some(format!(
+                        "Detached from '{}' (session preserved, press S to reattach)",
+                        container_name
+                    ));
                 }
-                self.status_message = Some(format!(
-                    "Detached from '{}' (session preserved, press S to reattach)",
-                    container_name
-                ));
-            }
-            ShellExitReason::Exited => {
-                // Shell exited - clean up session
-                drop(pty);
-                self.shell_sessions.remove(&container_id);
-                self.status_message = Some("Shell exited".to_string());
-            }
-            ShellExitReason::Error(e) => {
-                drop(pty);
+                ShellExitReason::Exited => {
+                    // Shell exited - clean up session
+                    drop(pty);
+                    self.shell_sessions.remove(&container_id);
+                    self.status_message = Some("Shell exited".to_string());
+                }
+                ShellExitReason::Error(e) => {
+                    drop(pty);
+                    self.shell_sessions.remove(&container_id);
+                    self.status_message = Some(format!("Shell error: {}", e));
+                }
+            },
+            Err(e) => {
+                // Lost the PtyShell — clean up session and recover
                 self.shell_sessions.remove(&container_id);
                 self.status_message = Some(format!("Shell error: {}", e));
             }

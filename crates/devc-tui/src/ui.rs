@@ -343,14 +343,14 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             let name_display = if has_shell {
                 format!("{} [S]", container.name)
             } else {
-                container.name.clone()
+                container.name.to_string()
             };
 
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
                 Cell::from(name_display).style(Style::default().bold()),
-                Cell::from(format!("{}", container.status)).style(Style::default().fg(status_color)),
-                Cell::from(format!("{}", container.provider)),
+                Cell::from(container.status.to_string()).style(Style::default().fg(status_color)),
+                Cell::from(container.provider.to_string()),
                 Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
             ])
         })
@@ -535,10 +535,10 @@ fn draw_providers(frame: &mut Frame, app: &mut App, area: Rect) {
 
             Row::new(vec![
                 Cell::from(Span::styled(active_indicator, active_style)),
-                Cell::from(provider.name.clone()),
+                Cell::from(provider.name.as_str()),
                 Cell::from(Span::styled(status_text, status_style)),
                 Cell::from(Span::styled(
-                    provider.socket.clone(),
+                    provider.socket.as_str(),
                     Style::default().fg(Color::DarkGray),
                 )),
             ])
@@ -825,11 +825,11 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::raw("Workspace:   "),
-            Span::raw(container.workspace_path.to_string_lossy().to_string()),
+            Span::raw(container.workspace_path.to_string_lossy().into_owned()),
         ]),
         Line::from(vec![
             Span::raw("Config:      "),
-            Span::raw(container.config_path.to_string_lossy().to_string()),
+            Span::raw(container.config_path.to_string_lossy().into_owned()),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -1101,7 +1101,7 @@ fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             Row::new(vec![
-                Cell::from(format!("{}", port.port)),
+                Cell::from(port.port.to_string()),
                 Cell::from(status),
                 Cell::from(local),
                 Cell::from(format!("{}{}", process, new_marker)),

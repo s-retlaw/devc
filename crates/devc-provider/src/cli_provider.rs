@@ -466,7 +466,7 @@ impl ContainerProvider for CliProvider {
             .map_err(|e| ProviderError::ExecError(e.to_string()))?;
 
         let stdin = child.stdin.take();
-        let stdout = child.stdout.take().unwrap();
+        let stdout = child.stdout.take().expect("stdout must exist when piped");
 
         Ok(ExecStream {
             stdin: stdin.map(|s| Box::pin(s) as Pin<Box<dyn tokio::io::AsyncWrite + Send>>),
@@ -751,12 +751,15 @@ impl ContainerProvider for CliProvider {
         cmd.args(&args[..]);
         cmd.stdout(Stdio::piped());
 
-        let child = cmd
+        let mut child = cmd
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
 
+        let stdout = child.stdout.take().expect("stdout must exist when piped");
         Ok(LogStream {
-            stream: Box::pin(child.stdout.unwrap()),
+            stream: Box::pin(stdout),
+            _child: Some(child),
         })
     }
 

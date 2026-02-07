@@ -6,6 +6,24 @@ use devc_provider::{ContainerId, ContainerProvider, ExecConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// POSIX shell-quote a string: wraps in single quotes, escaping embedded single quotes.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Expand `~` prefix to a concrete home directory path.
+fn expand_home(path: &str, user: Option<&str>) -> String {
+    if let Some(rest) = path.strip_prefix('~') {
+        let home = match user {
+            Some("root") | None => "/root".to_string(),
+            Some(u) => format!("/home/{}", u),
+        };
+        format!("{}{}", home, rest)
+    } else {
+        path.to_string()
+    }
+}
+
 /// Dotfiles manager for injecting dotfiles into containers
 pub struct DotfilesManager {
     /// Source configuration
@@ -138,9 +156,11 @@ impl DotfilesManager {
     ) -> Result<()> {
         tracing::info!("Cloning dotfiles from {}", url);
 
-        let target = &self.target_path;
+        let target = expand_home(&self.target_path, user);
+        let qt = shell_quote(&target);
+        let qu = shell_quote(url);
         let cmd = format!(
-            "if [ -d {target} ]; then cd {target} && git pull; else git clone {url} {target}; fi"
+            "if [ -d {qt} ]; then cd {qt} && git pull; else git clone {qu} {qt}; fi"
         );
 
         let config = ExecConfig {
@@ -182,7 +202,8 @@ impl DotfilesManager {
         }
 
         // Create target directory first
-        let mkdir_cmd = format!("mkdir -p {}", self.target_path);
+        let container_target = expand_home(&self.target_path, user);
+        let mkdir_cmd = format!("mkdir -p {}", shell_quote(&container_target));
         let config = ExecConfig {
             cmd: vec!["/bin/sh".to_string(), "-c".to_string(), mkdir_cmd],
             env: HashMap::new(),
@@ -195,20 +216,6 @@ impl DotfilesManager {
         provider.exec(container_id, &config).await?;
 
         // Copy files into container
-        // Expand ~ in target path for the actual container path
-        let container_target = if self.target_path.starts_with("~") {
-            if let Some(u) = user {
-                if u == "root" {
-                    format!("/root{}", &self.target_path[1..])
-                } else {
-                    format!("/home/{}{}", u, &self.target_path[1..])
-                }
-            } else {
-                format!("/root{}", &self.target_path[1..])
-            }
-        } else {
-            self.target_path.clone()
-        };
 
         provider
             .copy_into(container_id, path, &container_target)
@@ -227,8 +234,9 @@ impl DotfilesManager {
     ) -> Result<()> {
         tracing::info!("Running dotfiles install command: {}", cmd);
 
-        // Use cd in the shell command to handle ~ expansion properly
-        let full_cmd = format!("cd {} && {}", self.target_path, cmd);
+        // Use cd in the shell command; target_path is quoted, cmd is intentionally unquoted
+        let target = expand_home(&self.target_path, user);
+        let full_cmd = format!("cd {} && {}", shell_quote(&target), cmd);
         let config = ExecConfig {
             cmd: vec!["/bin/sh".to_string(), "-c".to_string(), full_cmd],
             env: HashMap::new(),
@@ -259,9 +267,10 @@ impl DotfilesManager {
         user: Option<&str>,
     ) -> Result<()> {
         let install_scripts = ["install.sh", "install", "bootstrap.sh", "bootstrap", "setup.sh"];
+        let target = expand_home(&self.target_path, user);
 
         for script in &install_scripts {
-            let check_cmd = format!("test -x {}/{}", self.target_path, script);
+            let check_cmd = format!("test -x {}/{}", shell_quote(&target), script);
             let config = ExecConfig {
                 cmd: vec!["/bin/sh".to_string(), "-c".to_string(), check_cmd],
                 env: HashMap::new(),
@@ -276,9 +285,8 @@ impl DotfilesManager {
             if result.exit_code == 0 {
                 tracing::info!("Running dotfiles install script: {}", script);
 
-                // Use cd in the shell command to handle ~ expansion properly
-                // since podman's --workdir doesn't expand ~
-                let run_cmd = format!("cd {} && ./{}", self.target_path, script);
+                // Use cd in the shell command since podman's --workdir doesn't expand ~
+                let run_cmd = format!("cd {} && ./{}", shell_quote(&target), script);
                 let config = ExecConfig {
                     cmd: vec!["/bin/sh".to_string(), "-c".to_string(), run_cmd],
                     env: HashMap::new(),
@@ -325,19 +333,12 @@ impl DotfilesManager {
             ".inputrc",
         ];
 
-        let home = if let Some(u) = user {
-            if u == "root" {
-                "/root".to_string()
-            } else {
-                format!("/home/{}", u)
-            }
-        } else {
-            "/root".to_string()
-        };
+        let target = expand_home(&self.target_path, user);
+        let home = expand_home("~", user);
 
         for dotfile in &dotfiles {
-            let src = format!("{}/{}", self.target_path, dotfile);
-            let dest = format!("{}/{}", home, dotfile);
+            let src = shell_quote(&format!("{}/{}", target, dotfile));
+            let dest = shell_quote(&format!("{}/{}", home, dotfile));
 
             let cmd = format!(
                 "if [ -f {} ] && [ ! -L {} ]; then ln -sf {} {}; fi",

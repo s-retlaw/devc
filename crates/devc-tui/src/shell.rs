@@ -80,7 +80,7 @@ impl PtyShell {
 
         // Open a PTY pair
         let pty = openpty(Some(&winsize), None)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let master_fd = pty.master;
         let slave_fd = pty.slave;
@@ -173,7 +173,7 @@ impl PtyShell {
                 Ok(0) => continue, // timeout, loop to check SIGWINCH
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => {
-                    return ShellExitReason::Error(io::Error::new(io::ErrorKind::Other, e));
+                    return ShellExitReason::Error(io::Error::other(e));
                 }
                 Ok(_) => {}
             }

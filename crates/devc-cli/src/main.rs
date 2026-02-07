@@ -305,10 +305,7 @@ async fn run() -> anyhow::Result<()> {
                                 .collect();
                             if !uppable.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                                 // Offer selection but allow fallback to cwd behavior
-                                match select_container(&containers, SelectionContext::Uppable, "Select container to bring up (or Esc for current directory):") {
-                                    Ok(name) => Some(name),
-                                    Err(_) => None, // Fall back to cwd behavior
-                                }
+                                select_container(&containers, SelectionContext::Uppable, "Select container to bring up (or Esc for current directory):").ok()
                             } else {
                                 None
                             }

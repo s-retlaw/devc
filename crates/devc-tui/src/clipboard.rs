@@ -87,6 +87,7 @@ fn copy_to_clipboard_sync(content: &str) -> Result<(), String> {
                             Ok(None) => {
                                 if start.elapsed() > timeout {
                                     let _ = child.kill();
+                                    let _ = child.wait(); // reap zombie
                                     break;
                                 }
                                 thread::sleep(Duration::from_millis(50));

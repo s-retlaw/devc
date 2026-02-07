@@ -24,6 +24,12 @@ pub struct DemoApp {
     pub provider_type: ProviderType,
 }
 
+impl Default for DemoApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DemoApp {
     /// Create a demo app with sample data
     pub fn new() -> Self {

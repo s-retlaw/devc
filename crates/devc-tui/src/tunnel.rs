@@ -261,8 +261,8 @@ pub async fn spawn_forwarder(
                             });
                         }
                         Err(e) => {
-                            tracing::error!("Accept error: {}", e);
-                            break;
+                            tracing::warn!("Accept error (continuing): {}", e);
+                            continue;
                         }
                     }
                 }
@@ -296,31 +296,33 @@ async fn handle_connection(
         .kill_on_drop(true)
         .spawn()?;
 
-    let mut child_stdin = child.stdin.take().unwrap();
-    let mut child_stdout = child.stdout.take().unwrap();
+    let mut child_stdin = child.stdin.take().expect("stdin must exist when piped");
+    let mut child_stdout = child.stdout.take().expect("stdout must exist when piped");
 
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
     // Bidirectional copy using two tasks
-    let stdin_task = tokio::spawn(async move {
+    let mut stdin_task = tokio::spawn(async move {
         let result = tokio::io::copy(&mut tcp_read, &mut child_stdin).await;
         // Explicitly close stdin to signal EOF to socat
         let _ = child_stdin.shutdown().await;
         result
     });
 
-    let stdout_task = tokio::spawn(async move {
+    let mut stdout_task = tokio::spawn(async move {
         tokio::io::copy(&mut child_stdout, &mut tcp_write).await
     });
 
-    // Wait for either direction to complete (connection closed)
+    // Wait for either direction to complete, then abort the other
     tokio::select! {
-        r = stdin_task => {
+        r = &mut stdin_task => {
+            stdout_task.abort();
             if let Err(e) = r {
                 tracing::debug!("stdin task error: {}", e);
             }
         }
-        r = stdout_task => {
+        r = &mut stdout_task => {
+            stdin_task.abort();
             if let Err(e) = r {
                 tracing::debug!("stdout task error: {}", e);
             }

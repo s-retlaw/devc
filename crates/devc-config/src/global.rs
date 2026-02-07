@@ -9,20 +9,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Global devc configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GlobalConfig {
     pub defaults: DefaultsConfig,
     pub providers: ProvidersConfig,
-}
-
-impl Default for GlobalConfig {
-    fn default() -> Self {
-        Self {
-            defaults: DefaultsConfig::default(),
-            providers: ProvidersConfig::default(),
-        }
-    }
 }
 
 /// Default settings

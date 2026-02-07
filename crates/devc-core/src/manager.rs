@@ -87,8 +87,8 @@ impl ContainerManager {
     }
 
     /// Get the provider, returning an error if not connected
-    fn require_provider(&self) -> Result<&Box<dyn ContainerProvider>> {
-        self.provider.as_ref().ok_or_else(|| {
+    fn require_provider(&self) -> Result<&dyn ContainerProvider> {
+        self.provider.as_deref().ok_or_else(|| {
             CoreError::NotConnected(
                 self.connection_error
                     .clone()
@@ -104,7 +104,7 @@ impl ContainerManager {
 
     /// Get a reference to the container provider (for advanced operations like port detection)
     pub fn provider(&self) -> Option<&dyn ContainerProvider> {
-        self.provider.as_ref().map(|p| p.as_ref())
+        self.provider.as_deref()
     }
 
     /// Get the global config
@@ -387,7 +387,7 @@ impl ContainerManager {
         let container = Container::from_config(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.post_start_command {
             run_lifecycle_command(
-                provider.as_ref(),
+                provider,
                 &ContainerId::new(container_id),
                 cmd,
                 container.devcontainer.effective_user(),
@@ -483,9 +483,12 @@ fi
         // Remove the container if it exists (only if we have a provider)
         if let Some(ref container_id) = container_state.container_id {
             if let Some(ref provider) = self.provider {
-                let _ = provider
+                if let Err(e) = provider
                     .remove(&ContainerId::new(container_id), force)
-                    .await;
+                    .await
+                {
+                    tracing::warn!("Failed to remove container {}: {}", container_id, e);
+                }
             }
         }
 
@@ -514,17 +517,23 @@ fi
         // Stop if running
         if container_state.status == DevcContainerStatus::Running {
             if let Some(ref container_id) = container_state.container_id {
-                let _ = provider
+                if let Err(e) = provider
                     .stop(&ContainerId::new(container_id), Some(10))
-                    .await;
+                    .await
+                {
+                    tracing::warn!("Failed to stop container {}: {}", container_id, e);
+                }
             }
         }
 
         // Remove the runtime container if it exists
         if let Some(ref container_id) = container_state.container_id {
-            let _ = provider
+            if let Err(e) = provider
                 .remove(&ContainerId::new(container_id), true)
-                .await;
+                .await
+            {
+                tracing::warn!("Failed to remove container {}: {}", container_id, e);
+            }
         }
 
         // Update state: keep image but clear container_id, reset status to Built (or Configured if no image)
@@ -851,7 +860,10 @@ fi
         // Create if needed
         let container_state = {
             let state = self.state.read().await;
-            state.get(id).cloned().unwrap()
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
         if container_state.container_id.is_none() {
@@ -862,12 +874,25 @@ fi
         // Load container config for lifecycle commands
         let container = Container::from_config(&container_state.config_path)?;
 
-        // Get the container ID
+        // Get the container ID (re-read state after create may have modified it)
         let container_state = {
             let state = self.state.read().await;
-            state.get(id).cloned().unwrap()
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
-        let container_id = ContainerId::new(container_state.container_id.as_ref().unwrap());
+        let container_id = ContainerId::new(
+            container_state
+                .container_id
+                .as_ref()
+                .ok_or_else(|| {
+                    CoreError::InvalidState(format!(
+                        "Container '{}' has no runtime container ID after create",
+                        id
+                    ))
+                })?,
+        );
 
         // Run onCreate command if this is first create
         if container_state.status == DevcContainerStatus::Created {
@@ -877,7 +902,7 @@ fi
                 provider.start(&container_id).await?;
 
                 run_lifecycle_command(
-                    provider.as_ref(),
+                    provider,
                     &container_id,
                     cmd,
                     container.devcontainer.effective_user(),
@@ -896,7 +921,7 @@ fi
                 }
 
                 run_lifecycle_command(
-                    provider.as_ref(),
+                    provider,
                     &container_id,
                     cmd,
                     container.devcontainer.effective_user(),
@@ -919,7 +944,7 @@ fi
 
                 let user = container.devcontainer.effective_user();
                 match ssh_manager
-                    .setup_container(provider.as_ref(), &container_id, user)
+                    .setup_container(provider, &container_id, user)
                     .await
                 {
                     Ok(()) => {
@@ -959,7 +984,7 @@ fi
                 send_progress(progress, "Installing dotfiles...");
                 dotfiles_manager
                     .inject_with_progress(
-                        provider.as_ref(),
+                        provider,
                         &container_id,
                         container.devcontainer.effective_user(),
                         progress,
