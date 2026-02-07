@@ -1806,6 +1806,15 @@ impl App {
             },
         );
 
+        // Fire-and-forget postAttachCommand for new sessions
+        let manager = Arc::clone(&self.manager);
+        let state_id = container.id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = manager.read().await.run_post_attach_command(&state_id).await {
+                tracing::warn!("postAttachCommand failed: {}", e);
+            }
+        });
+
         self.active_shell_container = Some(container_id);
         self.view = View::Shell;
         Ok(())

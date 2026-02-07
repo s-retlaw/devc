@@ -1,7 +1,7 @@
 //! Container manager - coordinates all container operations
 
 use crate::{
-    run_lifecycle_command, Container, ContainerState, CoreError, DevcContainerStatus,
+    run_lifecycle_command_with_env, Container, ContainerState, CoreError, DevcContainerStatus,
     DotfilesManager, EnhancedBuildContext, Result, SshManager, StateStore,
 };
 use devc_config::{GlobalConfig, ImageSource};
@@ -386,12 +386,13 @@ impl ContainerManager {
         // Run post-start commands
         let container = Container::from_config(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.post_start_command {
-            run_lifecycle_command(
+            run_lifecycle_command_with_env(
                 provider,
                 &ContainerId::new(container_id),
                 cmd,
                 container.devcontainer.effective_user(),
                 container.devcontainer.workspace_folder.as_deref(),
+                container.devcontainer.remote_env.as_ref(),
             )
             .await?;
         }
@@ -851,6 +852,18 @@ fi
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
+        // Run initializeCommand on host before build
+        {
+            let container = Container::from_config(&container_state.config_path)?;
+            if let Some(ref cmd) = container.devcontainer.initialize_command {
+                send_progress(progress, "Running initializeCommand on host...");
+                crate::run_host_command(cmd, &container.workspace_path)?;
+            }
+            if let Some(ref wait_for) = container.devcontainer.wait_for {
+                tracing::info!("waitFor is set to '{}' (async lifecycle deferral not yet implemented)", wait_for);
+            }
+        }
+
         // Build if needed
         if container_state.image_id.is_none() {
             send_progress(progress, "Building image...");
@@ -901,12 +914,32 @@ fi
                 // Start the container first for onCreate
                 provider.start(&container_id).await?;
 
-                run_lifecycle_command(
+                run_lifecycle_command_with_env(
                     provider,
                     &container_id,
                     cmd,
                     container.devcontainer.effective_user(),
                     container.devcontainer.workspace_folder.as_deref(),
+                    container.devcontainer.remote_env.as_ref(),
+                )
+                .await?;
+            }
+
+            // Run updateContentCommand (between onCreate and postCreate per spec)
+            if let Some(ref cmd) = container.devcontainer.update_content_command {
+                send_progress(progress, "Running updateContentCommand...");
+                let details = provider.inspect(&container_id).await?;
+                if details.status != ContainerStatus::Running {
+                    provider.start(&container_id).await?;
+                }
+
+                run_lifecycle_command_with_env(
+                    provider,
+                    &container_id,
+                    cmd,
+                    container.devcontainer.effective_user(),
+                    container.devcontainer.workspace_folder.as_deref(),
+                    container.devcontainer.remote_env.as_ref(),
                 )
                 .await?;
             }
@@ -920,12 +953,13 @@ fi
                     provider.start(&container_id).await?;
                 }
 
-                run_lifecycle_command(
+                run_lifecycle_command_with_env(
                     provider,
                     &container_id,
                     cmd,
                     container.devcontainer.effective_user(),
                     container.devcontainer.workspace_folder.as_deref(),
+                    container.devcontainer.remote_env.as_ref(),
                 )
                 .await?;
             }
@@ -1009,6 +1043,37 @@ fi
             if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
                 self.ensure_ssh_daemon_running(&container_id).await?;
             }
+        }
+
+        Ok(())
+    }
+
+    /// Run postAttachCommand for a container (if configured)
+    pub async fn run_post_attach_command(&self, id: &str) -> Result<()> {
+        let provider = self.require_provider()?;
+
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        let container = Container::from_config(&container_state.config_path)?;
+        if let Some(ref cmd) = container.devcontainer.post_attach_command {
+            let container_id = container_state.container_id.as_ref().ok_or_else(|| {
+                CoreError::InvalidState("Container not created yet".to_string())
+            })?;
+            run_lifecycle_command_with_env(
+                provider,
+                &ContainerId::new(container_id),
+                cmd,
+                container.devcontainer.effective_user(),
+                container.devcontainer.workspace_folder.as_deref(),
+                container.devcontainer.remote_env.as_ref(),
+            )
+            .await?;
         }
 
         Ok(())

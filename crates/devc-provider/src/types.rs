@@ -187,6 +187,10 @@ pub struct CreateContainerConfig {
     pub cap_drop: Vec<String>,
     /// Security options
     pub security_opt: Vec<String>,
+    /// Run an init process inside the container
+    pub init: bool,
+    /// Extra arguments to pass to docker/podman create
+    pub extra_args: Vec<String>,
 }
 
 /// Mount configuration

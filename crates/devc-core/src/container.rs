@@ -1,7 +1,7 @@
 //! Container configuration and operations
 
 use crate::{CoreError, Result};
-use devc_config::{DevContainerConfig, GlobalConfig, ImageSource};
+use devc_config::{DevContainerConfig, GlobalConfig, ImageSource, SubstitutionContext};
 use devc_provider::{
     BuildConfig, ContainerId, ContainerProvider, CreateContainerConfig, ExecConfig,
     MountConfig, MountType, PortConfig,
@@ -71,8 +71,18 @@ pub struct Container {
 impl Container {
     /// Load a container configuration from a workspace directory
     pub fn from_workspace(workspace_path: &Path) -> Result<Self> {
-        let (devcontainer, config_path) = DevContainerConfig::load_from_dir(workspace_path)?;
+        let (mut devcontainer, config_path) = DevContainerConfig::load_from_dir(workspace_path)?;
         let global_config = GlobalConfig::load()?;
+
+        let container_workspace = devcontainer
+            .workspace_folder
+            .clone()
+            .unwrap_or_else(|| "/workspace".to_string());
+        let ctx = SubstitutionContext::new(
+            workspace_path.to_string_lossy().to_string(),
+            container_workspace,
+        );
+        devcontainer.substitute_variables(&ctx);
 
         let raw_name = devcontainer
             .name
@@ -95,7 +105,7 @@ impl Container {
 
     /// Load a container configuration from a specific devcontainer.json path
     pub fn from_config(config_path: &Path) -> Result<Self> {
-        let devcontainer = DevContainerConfig::load_from(config_path)?;
+        let mut devcontainer = DevContainerConfig::load_from(config_path)?;
         let global_config = GlobalConfig::load()?;
 
         // Workspace is parent of .devcontainer directory or config file
@@ -110,6 +120,16 @@ impl Container {
             })
             .unwrap_or(Path::new("."))
             .to_path_buf();
+
+        let container_workspace = devcontainer
+            .workspace_folder
+            .clone()
+            .unwrap_or_else(|| "/workspace".to_string());
+        let ctx = SubstitutionContext::new(
+            workspace_path.to_string_lossy().to_string(),
+            container_workspace,
+        );
+        devcontainer.substitute_variables(&ctx);
 
         let raw_name = devcontainer
             .name
@@ -297,14 +317,21 @@ impl Container {
             .clone()
             .or_else(|| Some("/workspace".to_string()));
 
-        CreateContainerConfig {
-            image: image.to_string(),
-            name: Some(self.container_name()),
-            cmd: Some(vec![
+        // Determine CMD: if overrideCommand is false, use image default (None)
+        let cmd = if self.devcontainer.override_command == Some(false) {
+            None
+        } else {
+            Some(vec![
                 self.global_config.defaults.shell.clone(),
                 "-c".to_string(),
                 "sleep infinity".to_string(),
-            ]),
+            ])
+        };
+
+        CreateContainerConfig {
+            image: image.to_string(),
+            name: Some(self.container_name()),
+            cmd,
             entrypoint: None,
             env,
             working_dir,
@@ -316,10 +343,12 @@ impl Container {
             tty: true,
             stdin_open: true,
             network_mode: None,
-            privileged: false,
-            cap_add: Vec::new(),
+            privileged: self.devcontainer.privileged.unwrap_or(false),
+            cap_add: self.devcontainer.cap_add.clone().unwrap_or_default(),
             cap_drop: Vec::new(),
-            security_opt: Vec::new(),
+            security_opt: self.devcontainer.security_opt.clone().unwrap_or_default(),
+            init: self.devcontainer.init.unwrap_or(false),
+            extra_args: self.devcontainer.run_args.clone().unwrap_or_default(),
         }
     }
 
@@ -328,6 +357,10 @@ impl Container {
         let mut env = HashMap::new();
         if let Some(ref container_env) = self.devcontainer.container_env {
             env.extend(container_env.clone());
+        }
+        // Per spec: remoteEnv applies to tool processes (exec/shell), not container creation
+        if let Some(ref remote_env) = self.devcontainer.remote_env {
+            env.extend(remote_env.clone());
         }
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         // Enable 24-bit true color support (needed by nvim, tmux, etc.)
@@ -394,6 +427,64 @@ fn parse_mount_string(s: &str) -> Option<MountConfig> {
     })
 }
 
+/// Run a lifecycle command on the host (for initializeCommand)
+pub fn run_host_command(command: &devc_config::Command, working_dir: &Path) -> Result<()> {
+    match command {
+        devc_config::Command::String(cmd) => {
+            let status = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(working_dir)
+                .status()
+                .map_err(|e| CoreError::ExecFailed(format!("Failed to run host command: {}", e)))?;
+            if !status.success() {
+                return Err(CoreError::ExecFailed(format!(
+                    "Host command '{}' exited with code {}",
+                    cmd,
+                    status.code().unwrap_or(-1)
+                )));
+            }
+        }
+        devc_config::Command::Array(args) => {
+            if args.is_empty() {
+                return Ok(());
+            }
+            let status = std::process::Command::new(&args[0])
+                .args(&args[1..])
+                .current_dir(working_dir)
+                .status()
+                .map_err(|e| CoreError::ExecFailed(format!("Failed to run host command: {}", e)))?;
+            if !status.success() {
+                return Err(CoreError::ExecFailed(format!(
+                    "Host command {:?} exited with code {}",
+                    args,
+                    status.code().unwrap_or(-1)
+                )));
+            }
+        }
+        devc_config::Command::Object(commands) => {
+            for (name, cmd) in commands {
+                tracing::info!("Running host command: {}", name);
+                match cmd {
+                    devc_config::StringOrArray::String(s) => {
+                        run_host_command(
+                            &devc_config::Command::String(s.clone()),
+                            working_dir,
+                        )?;
+                    }
+                    devc_config::StringOrArray::Array(args) => {
+                        run_host_command(
+                            &devc_config::Command::Array(args.clone()),
+                            working_dir,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Run lifecycle command(s) in a container
 pub async fn run_lifecycle_command(
     provider: &dyn ContainerProvider,
@@ -402,11 +493,25 @@ pub async fn run_lifecycle_command(
     user: Option<&str>,
     working_dir: Option<&str>,
 ) -> Result<()> {
+    run_lifecycle_command_with_env(provider, container_id, command, user, working_dir, None).await
+}
+
+/// Run lifecycle command(s) in a container with optional extra environment variables
+pub async fn run_lifecycle_command_with_env(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    command: &devc_config::Command,
+    user: Option<&str>,
+    working_dir: Option<&str>,
+    env: Option<&HashMap<String, String>>,
+) -> Result<()> {
+    let base_env = env.cloned().unwrap_or_default();
+
     match command {
         devc_config::Command::String(cmd) => {
             let config = ExecConfig {
                 cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
-                env: HashMap::new(),
+                env: base_env,
                 working_dir: working_dir.map(|s| s.to_string()),
                 user: user.map(|s| s.to_string()),
                 tty: false,
@@ -425,7 +530,7 @@ pub async fn run_lifecycle_command(
         devc_config::Command::Array(args) => {
             let config = ExecConfig {
                 cmd: args.clone(),
-                env: HashMap::new(),
+                env: base_env,
                 working_dir: working_dir.map(|s| s.to_string()),
                 user: user.map(|s| s.to_string()),
                 tty: false,
@@ -442,51 +547,51 @@ pub async fn run_lifecycle_command(
             }
         }
         devc_config::Command::Object(commands) => {
-            // Run commands in parallel (not truly parallel here, but sequentially for simplicity)
-            // TODO: Use tokio::join! for true parallelism
-            for (name, cmd) in commands {
-                tracing::info!("Running lifecycle command: {}", name);
-                match cmd {
-                    devc_config::StringOrArray::String(s) => {
-                        let config = ExecConfig {
-                            cmd: vec!["/bin/sh".to_string(), "-c".to_string(), s.clone()],
-                            env: HashMap::new(),
-                            working_dir: working_dir.map(|s| s.to_string()),
-                            user: user.map(|s| s.to_string()),
-                            tty: false,
-                            stdin: false,
-                            privileged: false,
-                        };
+            // Run named commands concurrently
+            use futures::future::try_join_all;
 
+            let futures: Vec<_> = commands
+                .iter()
+                .map(|(name, cmd)| {
+                    let name = name.clone();
+                    let base_env = base_env.clone();
+                    let working_dir = working_dir.map(|s| s.to_string());
+                    let user = user.map(|s| s.to_string());
+                    async move {
+                        tracing::info!("Running lifecycle command: {}", name);
+                        let config = match cmd {
+                            devc_config::StringOrArray::String(s) => ExecConfig {
+                                cmd: vec!["/bin/sh".to_string(), "-c".to_string(), s.clone()],
+                                env: base_env,
+                                working_dir,
+                                user,
+                                tty: false,
+                                stdin: false,
+                                privileged: false,
+                            },
+                            devc_config::StringOrArray::Array(args) => ExecConfig {
+                                cmd: args.clone(),
+                                env: base_env,
+                                working_dir,
+                                user,
+                                tty: false,
+                                stdin: false,
+                                privileged: false,
+                            },
+                        };
                         let result = provider.exec(container_id, &config).await?;
                         if result.exit_code != 0 {
                             return Err(CoreError::ExecFailed(format!(
-                                "Command '{}' ({}) exited with code {}",
-                                name, s, result.exit_code
+                                "Command '{}' exited with code {}",
+                                name, result.exit_code
                             )));
                         }
+                        Ok::<(), CoreError>(())
                     }
-                    devc_config::StringOrArray::Array(args) => {
-                        let config = ExecConfig {
-                            cmd: args.clone(),
-                            env: HashMap::new(),
-                            working_dir: working_dir.map(|s| s.to_string()),
-                            user: user.map(|s| s.to_string()),
-                            tty: false,
-                            stdin: false,
-                            privileged: false,
-                        };
+                })
+                .collect();
 
-                        let result = provider.exec(container_id, &config).await?;
-                        if result.exit_code != 0 {
-                            return Err(CoreError::ExecFailed(format!(
-                                "Command '{}' ({:?}) exited with code {}",
-                                name, args, result.exit_code
-                            )));
-                        }
-                    }
-                }
-            }
+            try_join_all(futures).await?;
         }
     }
 
@@ -528,5 +633,137 @@ mod tests {
         // Must be valid Docker name: lowercase alphanumeric, hyphen, underscore
         assert!(name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
         assert_eq!(name, "devc_my_project_____");
+    }
+
+    #[test]
+    fn test_create_config_runtime_flags() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            privileged: Some(true),
+            cap_add: Some(vec!["SYS_PTRACE".to_string()]),
+            security_opt: Some(vec!["seccomp=unconfined".to_string()]),
+            init: Some(true),
+            run_args: Some(vec!["--shm-size=1g".to_string()]),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let create = container.create_config("ubuntu:22.04");
+        assert!(create.privileged);
+        assert_eq!(create.cap_add, vec!["SYS_PTRACE"]);
+        assert_eq!(create.security_opt, vec!["seccomp=unconfined"]);
+        assert!(create.init);
+        assert_eq!(create.extra_args, vec!["--shm-size=1g"]);
+    }
+
+    #[test]
+    fn test_override_command_false() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            override_command: Some(false),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let create = container.create_config("ubuntu:22.04");
+        assert!(create.cmd.is_none(), "overrideCommand=false should yield cmd=None");
+    }
+
+    #[test]
+    fn test_exec_config_includes_remote_env() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            remote_env: Some({
+                let mut m = HashMap::new();
+                m.insert("EDITOR".to_string(), "vim".to_string());
+                m
+            }),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let exec = container.exec_config(vec!["echo".to_string()], false, false);
+        assert_eq!(exec.env.get("EDITOR").unwrap(), "vim");
+    }
+
+    #[test]
+    fn test_create_config_excludes_remote_env() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            remote_env: Some({
+                let mut m = HashMap::new();
+                m.insert("EDITOR".to_string(), "vim".to_string());
+                m
+            }),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let create = container.create_config("ubuntu:22.04");
+        // remoteEnv should NOT be in container creation env (per spec)
+        assert!(!create.env.contains_key("EDITOR"));
+    }
+
+    #[test]
+    fn test_run_host_command_string() {
+        let dir = std::env::temp_dir();
+        let cmd = devc_config::Command::String("echo hello".to_string());
+        let result = run_host_command(&cmd, &dir);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_host_command_array() {
+        let dir = std::env::temp_dir();
+        let cmd = devc_config::Command::Array(vec!["echo".to_string(), "hello".to_string()]);
+        let result = run_host_command(&cmd, &dir);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_host_command_failure() {
+        let dir = std::env::temp_dir();
+        let cmd = devc_config::Command::String("false".to_string());
+        let result = run_host_command(&cmd, &dir);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_run_host_command_object() {
+        let dir = std::env::temp_dir();
+        let mut commands = HashMap::new();
+        commands.insert("first".to_string(), devc_config::StringOrArray::String("echo one".to_string()));
+        commands.insert("second".to_string(), devc_config::StringOrArray::String("echo two".to_string()));
+        let cmd = devc_config::Command::Object(commands);
+        let result = run_host_command(&cmd, &dir);
+        assert!(result.is_ok());
     }
 }

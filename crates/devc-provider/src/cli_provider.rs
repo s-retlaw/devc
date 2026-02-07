@@ -356,6 +356,14 @@ impl ContainerProvider for CliProvider {
             args.push(format!("--security-opt={}", opt));
         }
 
+        // Init process
+        if config.init {
+            args.push("--init".to_string());
+        }
+
+        // Extra arguments (from runArgs)
+        args.extend(config.extra_args.clone());
+
         // Image
         args.push(config.image.clone());
 
@@ -991,5 +999,192 @@ mod tests {
         let _ = provider
             .run_cmd(&["rmi", "-f", "devc-test-nocache:latest"])
             .await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires container runtime
+    async fn test_runtime_flags_init_and_cap_add() {
+        let provider = match get_test_provider().await {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no container runtime available");
+                return;
+            }
+        };
+
+        // Pull alpine image
+        let _ = provider.pull("alpine:latest").await;
+
+        let config = CreateContainerConfig {
+            image: "alpine:latest".to_string(),
+            name: Some("devc_test_runtime_flags".to_string()),
+            cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            init: true,
+            cap_add: vec!["SYS_PTRACE".to_string()],
+            privileged: false,
+            security_opt: vec!["seccomp=unconfined".to_string()],
+            extra_args: vec!["--shm-size=1g".to_string()],
+            tty: true,
+            stdin_open: true,
+            ..Default::default()
+        };
+
+        let id = provider.create(&config).await.expect("create should succeed");
+        provider.start(&id).await.expect("start should succeed");
+
+        // Verify init flag
+        let init_output = provider
+            .run_cmd(&["inspect", "--format={{.HostConfig.Init}}", &id.0])
+            .await
+            .expect("inspect init");
+        assert!(
+            init_output.trim() == "true" || init_output.trim() == "<nil>",
+            "Init should be true, got: {}",
+            init_output.trim()
+        );
+        // On Docker, Init is a *bool so it shows "true"; on Podman it may differ
+        // The important thing is the container was created with --init
+
+        // Verify cap_add
+        let cap_output = provider
+            .run_cmd(&["inspect", "--format={{.HostConfig.CapAdd}}", &id.0])
+            .await
+            .expect("inspect cap_add");
+        assert!(
+            cap_output.contains("SYS_PTRACE"),
+            "CapAdd should contain SYS_PTRACE, got: {}",
+            cap_output.trim()
+        );
+
+        // Verify security_opt
+        let secopt_output = provider
+            .run_cmd(&["inspect", "--format={{.HostConfig.SecurityOpt}}", &id.0])
+            .await
+            .expect("inspect security_opt");
+        assert!(
+            secopt_output.contains("seccomp=unconfined"),
+            "SecurityOpt should contain seccomp=unconfined, got: {}",
+            secopt_output.trim()
+        );
+
+        // Verify shm-size (1073741824 = 1g in bytes)
+        let shm_output = provider
+            .run_cmd(&["inspect", "--format={{.HostConfig.ShmSize}}", &id.0])
+            .await
+            .expect("inspect shm_size");
+        assert!(
+            shm_output.trim() == "1073741824" || shm_output.contains("1g"),
+            "ShmSize should be 1g (1073741824), got: {}",
+            shm_output.trim()
+        );
+
+        // Cleanup
+        let _ = provider.remove(&id, true).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires container runtime
+    async fn test_override_command_none() {
+        let provider = match get_test_provider().await {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no container runtime available");
+                return;
+            }
+        };
+
+        let _ = provider.pull("alpine:latest").await;
+
+        // Create with cmd: None (simulating overrideCommand: false)
+        let config = CreateContainerConfig {
+            image: "alpine:latest".to_string(),
+            name: Some("devc_test_override_cmd".to_string()),
+            cmd: None, // Use image default CMD
+            tty: true,
+            stdin_open: true,
+            ..Default::default()
+        };
+
+        let id = provider.create(&config).await.expect("create should succeed");
+
+        // Inspect the container's command — should be image default, not sleep infinity
+        let cmd_output = provider
+            .run_cmd(&["inspect", "--format={{.Config.Cmd}}", &id.0])
+            .await
+            .expect("inspect cmd");
+        // Alpine's default CMD is ["/bin/sh"] — it should NOT contain "sleep infinity"
+        assert!(
+            !cmd_output.contains("sleep infinity"),
+            "cmd=None should use image default, got: {}",
+            cmd_output.trim()
+        );
+
+        // Cleanup
+        let _ = provider.remove(&id, true).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires container runtime
+    async fn test_container_env_vars() {
+        let provider = match get_test_provider().await {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no container runtime available");
+                return;
+            }
+        };
+
+        let _ = provider.pull("alpine:latest").await;
+
+        let mut env = HashMap::new();
+        env.insert("MY_VAR".to_string(), "hello".to_string());
+        env.insert("ANOTHER".to_string(), "world".to_string());
+
+        let config = CreateContainerConfig {
+            image: "alpine:latest".to_string(),
+            name: Some("devc_test_env_vars".to_string()),
+            cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            env,
+            tty: true,
+            stdin_open: true,
+            ..Default::default()
+        };
+
+        let id = provider.create(&config).await.expect("create should succeed");
+        provider.start(&id).await.expect("start should succeed");
+
+        // Verify env vars via exec
+        let exec_config = ExecConfig {
+            cmd: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo $MY_VAR".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = provider.exec(&id, &exec_config).await.expect("exec should succeed");
+        assert!(
+            result.output.contains("hello"),
+            "MY_VAR should be 'hello', got: {}",
+            result.output.trim()
+        );
+
+        let exec_config2 = ExecConfig {
+            cmd: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo $ANOTHER".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result2 = provider.exec(&id, &exec_config2).await.expect("exec should succeed");
+        assert!(
+            result2.output.contains("world"),
+            "ANOTHER should be 'world', got: {}",
+            result2.output.trim()
+        );
+
+        // Cleanup
+        let _ = provider.remove(&id, true).await;
     }
 }

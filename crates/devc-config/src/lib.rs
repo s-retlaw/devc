@@ -7,7 +7,9 @@
 mod devcontainer;
 mod error;
 mod global;
+mod substitute;
 
 pub use devcontainer::*;
 pub use error::*;
 pub use global::*;
+pub use substitute::*;

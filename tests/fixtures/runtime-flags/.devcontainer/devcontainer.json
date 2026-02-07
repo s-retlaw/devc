@@ -1,0 +1,12 @@
+{
+  "image": "ubuntu:22.04",
+  "init": true,
+  "privileged": false,
+  "capAdd": ["SYS_PTRACE"],
+  "securityOpt": ["seccomp=unconfined"],
+  "runArgs": ["--shm-size=1g"],
+  "containerEnv": { "MY_VAR": "hello" },
+  "remoteEnv": { "EDITOR": "vim" },
+  "postCreateCommand": "echo setup done",
+  "postStartCommand": "echo started"
+}

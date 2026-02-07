@@ -1,0 +1,11 @@
+{
+  "image": "ubuntu:22.04",
+  "containerEnv": {
+    "PROJECT_ROOT": "${containerWorkspaceFolder}",
+    "HOST_HOME": "${localEnv:HOME}"
+  },
+  "mounts": [
+    "type=bind,source=${localWorkspaceFolder}/.cache,target=${containerWorkspaceFolder}/.cache"
+  ],
+  "postCreateCommand": "echo workspace is ${containerWorkspaceFolder}"
+}

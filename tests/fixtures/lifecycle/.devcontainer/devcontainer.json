@@ -1,0 +1,9 @@
+{
+  "image": "ubuntu:22.04",
+  "initializeCommand": "echo host-init",
+  "onCreateCommand": "echo on-create",
+  "updateContentCommand": "echo update-content",
+  "postCreateCommand": { "deps": "echo install-deps", "build": "echo build" },
+  "postStartCommand": "echo started",
+  "postAttachCommand": "echo attached"
+}

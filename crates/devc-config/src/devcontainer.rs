@@ -67,8 +67,9 @@ pub struct DevContainerConfig {
     /// Command to run when attaching to container
     pub post_attach_command: Option<Command>,
 
-    /// Command to run before container is created
-    pub init_command: Option<Command>,
+    /// Command to run on the host before container is created
+    #[serde(alias = "initCommand")]
+    pub initialize_command: Option<Command>,
 
     /// Command to run when container is created (runs before postCreateCommand)
     pub on_create_command: Option<Command>,
@@ -78,6 +79,27 @@ pub struct DevContainerConfig {
 
     /// Wait for commands to complete
     pub wait_for: Option<String>,
+
+    /// Run an init process (PID 1) inside the container
+    pub init: Option<bool>,
+
+    /// Run container in privileged mode
+    pub privileged: Option<bool>,
+
+    /// Linux capabilities to add
+    pub cap_add: Option<Vec<String>>,
+
+    /// Security options
+    pub security_opt: Option<Vec<String>>,
+
+    /// Whether to override the default command
+    pub override_command: Option<bool>,
+
+    /// Environment variables for tools running in the container (not set at container creation)
+    pub remote_env: Option<HashMap<String, String>>,
+
+    /// Action to take when the tool is closed
+    pub shutdown_action: Option<String>,
 
     // Features
     /// devcontainer features to install
@@ -362,6 +384,81 @@ impl DevContainerConfig {
 
         ports
     }
+
+    /// Apply variable substitution to all string fields that support it
+    pub fn substitute_variables(&mut self, ctx: &crate::SubstitutionContext) {
+        use crate::substitute::{substitute, substitute_map, substitute_opt, substitute_vec};
+
+        self.workspace_folder = substitute_opt(&self.workspace_folder, ctx);
+
+        if let Some(ref env) = self.container_env {
+            self.container_env = Some(substitute_map(env, ctx));
+        }
+        if let Some(ref env) = self.remote_env {
+            self.remote_env = Some(substitute_map(env, ctx));
+        }
+
+        if let Some(ref args) = self.run_args {
+            self.run_args = Some(substitute_vec(args, ctx));
+        }
+
+        // Substitute in mounts
+        if let Some(ref mut mounts) = self.mounts {
+            for mount in mounts.iter_mut() {
+                match mount {
+                    Mount::String(s) => *s = substitute(s, ctx),
+                    Mount::Object(obj) => {
+                        obj.source = substitute_opt(&obj.source, ctx);
+                        obj.target = substitute(&obj.target, ctx);
+                    }
+                }
+            }
+        }
+
+        // Substitute in lifecycle commands
+        fn substitute_command(cmd: &mut Command, ctx: &crate::SubstitutionContext) {
+            use crate::substitute::substitute;
+            match cmd {
+                Command::String(s) => *s = substitute(s, ctx),
+                Command::Array(arr) => {
+                    for s in arr.iter_mut() {
+                        *s = substitute(s, ctx);
+                    }
+                }
+                Command::Object(map) => {
+                    for value in map.values_mut() {
+                        match value {
+                            StringOrArray::String(s) => *s = substitute(s, ctx),
+                            StringOrArray::Array(arr) => {
+                                for s in arr.iter_mut() {
+                                    *s = substitute(s, ctx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(ref mut cmd) = self.initialize_command {
+            substitute_command(cmd, ctx);
+        }
+        if let Some(ref mut cmd) = self.on_create_command {
+            substitute_command(cmd, ctx);
+        }
+        if let Some(ref mut cmd) = self.update_content_command {
+            substitute_command(cmd, ctx);
+        }
+        if let Some(ref mut cmd) = self.post_create_command {
+            substitute_command(cmd, ctx);
+        }
+        if let Some(ref mut cmd) = self.post_start_command {
+            substitute_command(cmd, ctx);
+        }
+        if let Some(ref mut cmd) = self.post_attach_command {
+            substitute_command(cmd, ctx);
+        }
+    }
 }
 
 /// Image source type
@@ -516,5 +613,67 @@ mod tests {
         let json = r#"{"postCreateCommand": ["npm", "install"]}"#;
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
         assert!(matches!(config.post_create_command, Some(Command::Array(_))));
+    }
+
+    #[test]
+    fn test_parse_runtime_flags() {
+        let json = r#"{
+            "image": "ubuntu:22.04",
+            "init": true,
+            "privileged": false,
+            "capAdd": ["SYS_PTRACE", "NET_ADMIN"],
+            "securityOpt": ["seccomp=unconfined"],
+            "overrideCommand": false,
+            "remoteEnv": {"EDITOR": "vim"},
+            "shutdownAction": "stopContainer"
+        }"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.init, Some(true));
+        assert_eq!(config.privileged, Some(false));
+        assert_eq!(config.cap_add.as_ref().unwrap().len(), 2);
+        assert_eq!(config.security_opt.as_ref().unwrap()[0], "seccomp=unconfined");
+        assert_eq!(config.override_command, Some(false));
+        assert_eq!(config.remote_env.as_ref().unwrap().get("EDITOR").unwrap(), "vim");
+        assert_eq!(config.shutdown_action, Some("stopContainer".to_string()));
+    }
+
+    #[test]
+    fn test_initialize_command_alias() {
+        // initializeCommand (spec name)
+        let json = r#"{"initializeCommand": "echo hello"}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(config.initialize_command, Some(Command::String(_))));
+
+        // initCommand (alias for backward compat)
+        let json = r#"{"initCommand": "echo hello"}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(config.initialize_command, Some(Command::String(_))));
+    }
+
+    #[test]
+    fn test_override_command_false() {
+        let json = r#"{"image": "ubuntu:22.04", "overrideCommand": false}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.override_command, Some(false));
+    }
+
+    #[test]
+    fn test_lifecycle_all_hooks() {
+        let json = r#"{
+            "image": "ubuntu:22.04",
+            "initializeCommand": "echo init",
+            "onCreateCommand": "echo create",
+            "updateContentCommand": "echo update",
+            "postCreateCommand": "echo post-create",
+            "postStartCommand": "echo post-start",
+            "postAttachCommand": "echo post-attach"
+        }"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        assert!(config.initialize_command.is_some());
+        assert!(config.on_create_command.is_some());
+        assert!(config.update_content_command.is_some());
+        assert!(config.post_create_command.is_some());
+        assert!(config.post_start_command.is_some());
+        assert!(config.post_attach_command.is_some());
     }
 }
