@@ -6,7 +6,7 @@
 
 use devc_provider::ProviderType;
 use std::io::{self, Read as _, Write};
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::process::{Command, Stdio};
 
 use nix::libc;
@@ -56,6 +56,7 @@ pub enum ShellExitReason {
 pub struct PtyShell {
     master_fd: OwnedFd,
     child: std::process::Child,
+    in_alternate_screen: bool,
 }
 
 // SIGWINCH flag: set by signal handler, checked in poll loop
@@ -117,13 +118,46 @@ impl PtyShell {
 
         let child = cmd.spawn()?;
 
-        Ok(PtyShell { master_fd, child })
+        Ok(PtyShell {
+            master_fd,
+            child,
+            in_alternate_screen: false,
+        })
+    }
+
+    /// Whether the child app is currently using the alternate screen buffer
+    pub fn is_in_alternate_screen(&self) -> bool {
+        self.in_alternate_screen
+    }
+
+    /// Scan relay output for alternate screen enter/leave sequences.
+    /// Tracks the last occurrence to determine current state.
+    fn scan_alternate_screen(&mut self, data: &[u8]) {
+        const ENTER: &[u8] = b"\x1b[?1049h";
+        const LEAVE: &[u8] = b"\x1b[?1049l";
+        let mut last_enter = None;
+        let mut last_leave = None;
+        for i in 0..data.len() {
+            if data[i..].starts_with(ENTER) {
+                last_enter = Some(i);
+            } else if data[i..].starts_with(LEAVE) {
+                last_leave = Some(i);
+            }
+        }
+        match (last_enter, last_leave) {
+            (Some(e), Some(l)) => self.in_alternate_screen = e > l,
+            (Some(_), None) => self.in_alternate_screen = true,
+            (None, Some(_)) => self.in_alternate_screen = false,
+            (None, None) => {}
+        }
     }
 
     /// Run the relay loop between the real terminal and the PTY master.
     /// Blocks until detach (Ctrl+\), shell exit, or error.
-    pub fn relay(&self) -> ShellExitReason {
-        // Install SIGWINCH handler
+    /// If `force_redraw` is true, injects Ctrl+L through the PTY data channel
+    /// so that TUI apps (e.g. nvim) redraw after a reattach.
+    pub fn relay(&mut self, force_redraw: bool) -> ShellExitReason {
+        // Install SIGWINCH handler.
         SIGWINCH_RECEIVED.store(false, std::sync::atomic::Ordering::SeqCst);
         let sa = SigAction::new(
             SigHandler::Handler(sigwinch_handler),
@@ -135,6 +169,12 @@ impl PtyShell {
         // Put terminal in raw mode
         if let Err(e) = crossterm::terminal::enable_raw_mode() {
             return ShellExitReason::Error(e);
+        }
+
+        // On reattach, update PTY size and inject Ctrl+L to trigger redraw
+        if force_redraw {
+            self.propagate_winsize();
+            let _ = nix::unistd::write(&self.master_fd, b"\x0c");
         }
 
         let result = self.relay_loop();
@@ -150,12 +190,14 @@ impl PtyShell {
         result
     }
 
-    fn relay_loop(&self) -> ShellExitReason {
+    fn relay_loop(&mut self) -> ShellExitReason {
         let stdin_raw = io::stdin().as_raw_fd();
         let master_raw = self.master_fd.as_raw_fd();
-        // SAFETY: stdin fd 0 is valid for the duration of this function
+        // SAFETY: these fds are valid for the duration of this function.
+        // We use borrow_raw for master_borrowed instead of as_fd() so that
+        // the borrow doesn't tie up &self, allowing &mut self in scan_alternate_screen.
         let stdin_borrowed = unsafe { BorrowedFd::borrow_raw(stdin_raw) };
-        let master_borrowed = self.master_fd.as_fd();
+        let master_borrowed = unsafe { BorrowedFd::borrow_raw(master_raw) };
 
         let mut buf = [0u8; 4096];
 
@@ -185,6 +227,7 @@ impl PtyShell {
                     match n {
                         Ok(0) | Err(_) => return ShellExitReason::Exited,
                         Ok(n) => {
+                            self.scan_alternate_screen(&buf[..n]);
                             let mut stdout = io::stdout().lock();
                             if stdout.write_all(&buf[..n]).is_err() {
                                 return ShellExitReason::Exited;
@@ -241,26 +284,34 @@ impl PtyShell {
         }
     }
 
+    /// Set the PTY to a specific size and send SIGWINCH to the child process.
+    ///
+    /// Used on detach to set a dummy 1x1 size so the next reattach's
+    /// `propagate_winsize()` is a genuine change that docker exec will propagate.
+    pub fn set_size_and_signal(&self, cols: u16, rows: u16) {
+        let ws = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            libc::ioctl(self.master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+        }
+        // TIOCSWINSZ only sends SIGWINCH to the slave's foreground process group,
+        // but we never set one up (no setsid/TIOCSCTTY). Explicitly signal the
+        // child (docker/podman exec) so it queries the new size and propagates it
+        // to the container's PTY.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.child.id() as i32),
+            nix::sys::signal::Signal::SIGWINCH,
+        );
+    }
+
     /// Propagate current terminal size to the PTY and child process
     fn propagate_winsize(&self) {
         if let Ok((cols, rows)) = crossterm::terminal::size() {
-            let ws = libc::winsize {
-                ws_row: rows,
-                ws_col: cols,
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            };
-            unsafe {
-                libc::ioctl(self.master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
-            }
-            // TIOCSWINSZ only sends SIGWINCH to the slave's foreground process group,
-            // but we never set one up (no setsid/TIOCSCTTY). Explicitly signal the
-            // child (docker/podman exec) so it queries the new size and propagates it
-            // to the container's PTY.
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(self.child.id() as i32),
-                nix::sys::signal::Signal::SIGWINCH,
-            );
+            self.set_size_and_signal(cols, rows);
         }
     }
 

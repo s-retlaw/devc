@@ -1874,10 +1874,8 @@ impl App {
         // 3. Reset terminal to sane state for shell
         crate::shell::reset_terminal();
 
-        // 4. Show entry message
-        if is_reattach {
-            println!("\nReattaching to shell for '{}'...\n", container_name);
-        } else {
+        // 4. Show entry message (first attach only)
+        if !is_reattach {
             println!(
                 "\nShell for '{}' (Ctrl+\\ to detach, session preserved)\n",
                 container_name
@@ -1891,7 +1889,7 @@ impl App {
             .get_mut(&container_id)
             .and_then(|s| s.pty.take());
 
-        let pty = match existing_pty {
+        let mut pty = match existing_pty {
             Some(mut p) => {
                 if !p.is_alive() {
                     // PTY died while we were away, spawn a new one below
@@ -1912,9 +1910,13 @@ impl App {
                         }
                     }
                 } else {
-                    // Reattach: update PTY size to current terminal dimensions
-                    if let Ok((cols, rows)) = crossterm::terminal::size() {
-                        p.set_size(cols, rows);
+                    // Reattach: restore alternate screen if child app was using it
+                    if p.is_in_alternate_screen() {
+                        let _ = std::io::Write::write_all(
+                            &mut std::io::stdout(),
+                            b"\x1b[?1049h",
+                        );
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
                     p
                 }
@@ -1941,7 +1943,7 @@ impl App {
 
         // 6. Run relay in spawn_blocking (returns PtyShell + reason)
         let relay_result = tokio::task::spawn_blocking(move || {
-            let reason = pty.relay();
+            let reason = pty.relay(is_reattach);
             (pty, reason)
         })
         .await;
@@ -1950,9 +1952,21 @@ impl App {
         match relay_result {
             Ok((pty, reason)) => match reason {
                 ShellExitReason::Detached => {
+                    let was_alt = pty.is_in_alternate_screen();
+                    // Set dummy size so next reattach guarantees a real size change
+                    // (docker exec only propagates SIGWINCH when size actually differs)
+                    pty.set_size_and_signal(1, 1);
                     // Put PTY back into session - session preserved
                     if let Some(session) = self.shell_sessions.get_mut(&container_id) {
                         session.pty = Some(pty);
+                    }
+                    // Leave child's alternate screen before entering TUI's
+                    if was_alt {
+                        let _ = std::io::Write::write_all(
+                            &mut std::io::stdout(),
+                            b"\x1b[?1049l",
+                        );
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
                     self.status_message = Some(format!(
                         "Detached from '{}' (session preserved, press S to reattach)",
