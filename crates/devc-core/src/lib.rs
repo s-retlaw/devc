@@ -23,3 +23,6 @@ pub use error::*;
 pub use manager::*;
 pub use ssh::*;
 pub use state::*;
+
+#[cfg(test)]
+pub mod test_support;

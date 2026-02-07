@@ -658,6 +658,14 @@ mod tests {
     }
 
     #[test]
+    fn test_load_nonexistent_devcontainer_fails() {
+        let result = DevContainerConfig::load_from(std::path::Path::new(
+            "/tmp/nonexistent_devc_devcontainer.json",
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_lifecycle_all_hooks() {
         let json = r#"{
             "image": "ubuntu:22.04",

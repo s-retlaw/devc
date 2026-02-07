@@ -150,6 +150,89 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    // ==================== copy_dir_recursive tests ====================
+
+    #[test]
+    fn test_copy_dir_recursive_basic() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        std::fs::write(src.path().join("file1.txt"), "hello").unwrap();
+        std::fs::write(src.path().join("file2.txt"), "world").unwrap();
+
+        copy_dir_recursive(src.path(), dst.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("file1.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("file2.txt")).unwrap(),
+            "world"
+        );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_nested() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        std::fs::create_dir_all(src.path().join("sub/deep")).unwrap();
+        std::fs::write(src.path().join("sub/deep/file.txt"), "nested").unwrap();
+
+        copy_dir_recursive(src.path(), dst.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("sub/deep/file.txt")).unwrap(),
+            "nested"
+        );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_empty_dir() {
+        let src = tempfile::tempdir().unwrap();
+        let dst_parent = tempfile::tempdir().unwrap();
+        let dst = dst_parent.path().join("output");
+
+        // Empty src directory
+        copy_dir_recursive(src.path(), &dst).unwrap();
+        assert!(dst.exists());
+    }
+
+    // ==================== from_dockerfile user restore tests ====================
+
+    #[test]
+    fn test_from_dockerfile_commented_user() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_content = "FROM fedora:latest\n# USER vscode\nRUN echo hello\n";
+        std::fs::write(temp_dir.path().join("Dockerfile"), dockerfile_content).unwrap();
+
+        let ctx = EnhancedBuildContext::from_dockerfile(temp_dir.path(), "Dockerfile").unwrap();
+        let enhanced = std::fs::read_to_string(ctx.context_path().join("Dockerfile")).unwrap();
+
+        // Commented USER should NOT trigger user restore
+        assert!(!enhanced.contains("Restore original user"));
+    }
+
+    #[test]
+    fn test_from_image_dockerfile_content() {
+        let ctx = EnhancedBuildContext::from_image("alpine:3.18").unwrap();
+        let dockerfile = std::fs::read_to_string(ctx.context_path().join("Dockerfile")).unwrap();
+
+        assert!(dockerfile.starts_with("FROM alpine:3.18"));
+        assert!(dockerfile.contains("dropbear"));
+        assert!(dockerfile.contains("socat"));
+    }
+
+    #[test]
+    fn test_context_path_and_dockerfile_name() {
+        let ctx = EnhancedBuildContext::from_image("ubuntu:22.04").unwrap();
+        assert!(ctx.context_path().exists());
+        assert_eq!(ctx.dockerfile_name(), "Dockerfile");
+    }
+
+    // ==================== Existing tests ====================
+
     #[test]
     fn test_from_image() {
         let ctx = EnhancedBuildContext::from_image("python:3.12").unwrap();

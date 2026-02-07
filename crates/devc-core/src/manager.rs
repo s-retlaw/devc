@@ -58,6 +58,36 @@ impl ContainerManager {
         })
     }
 
+    /// Create a manager for testing with injectable dependencies
+    #[cfg(test)]
+    pub fn new_for_testing(
+        provider: Box<dyn ContainerProvider>,
+        global_config: GlobalConfig,
+        state: StateStore,
+    ) -> Self {
+        Self {
+            provider: Some(provider),
+            state: Arc::new(RwLock::new(state)),
+            global_config,
+            connection_error: None,
+        }
+    }
+
+    /// Create a disconnected manager for testing
+    #[cfg(test)]
+    pub fn disconnected_for_testing(
+        global_config: GlobalConfig,
+        state: StateStore,
+        error: String,
+    ) -> Self {
+        Self {
+            provider: None,
+            state: Arc::new(RwLock::new(state)),
+            global_config,
+            connection_error: Some(error),
+        }
+    }
+
     /// Create a disconnected manager (no provider available)
     pub fn disconnected(global_config: GlobalConfig, error: String) -> Result<Self> {
         let state = StateStore::load()?;
@@ -1402,5 +1432,898 @@ fn find_devcontainer_config(workspace: &std::path::Path) -> Result<std::path::Pa
 fn send_progress(progress: Option<&mpsc::UnboundedSender<String>>, msg: &str) {
     if let Some(tx) = progress {
         let _ = tx.send(msg.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::*;
+    use devc_provider::{ContainerStatus, ProviderError, ProviderType};
+
+    /// Create a test workspace with a devcontainer.json that uses an image
+    fn create_test_workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04"}"#,
+        )
+        .unwrap();
+        tmp
+    }
+
+    /// Create a test manager with MockProvider, returning both manager and mock calls tracker
+    fn test_manager(mock: MockProvider) -> ContainerManager {
+        let state = StateStore::new();
+        ContainerManager::new_for_testing(
+            Box::new(mock),
+            GlobalConfig::default(),
+            state,
+        )
+    }
+
+    /// Create a test manager with a pre-existing container state
+    fn test_manager_with_state(mock: MockProvider, state: StateStore) -> ContainerManager {
+        ContainerManager::new_for_testing(
+            Box::new(mock),
+            GlobalConfig::default(),
+            state,
+        )
+    }
+
+    /// Helper: create a ContainerState for use in StateStore
+    fn make_container_state(
+        workspace: &std::path::Path,
+        status: DevcContainerStatus,
+        image_id: Option<&str>,
+        container_id: Option<&str>,
+    ) -> ContainerState {
+        let config_path = workspace
+            .join(".devcontainer/devcontainer.json");
+        let mut cs = ContainerState::new(
+            "test".to_string(),
+            ProviderType::Docker,
+            config_path,
+            workspace.to_path_buf(),
+        );
+        cs.status = status;
+        cs.image_id = image_id.map(|s| s.to_string());
+        cs.container_id = container_id.map(|s| s.to_string());
+        cs
+    }
+
+    // ==================== Constructor / Connectivity ====================
+
+    #[tokio::test]
+    async fn test_disconnected_constructor() {
+        let state = StateStore::new();
+        let mgr = ContainerManager::disconnected_for_testing(
+            GlobalConfig::default(),
+            state,
+            "docker not found".to_string(),
+        );
+        assert!(!mgr.is_connected());
+        assert_eq!(mgr.connection_error(), Some("docker not found"));
+    }
+
+    #[tokio::test]
+    async fn test_require_provider_when_disconnected() {
+        let state = StateStore::new();
+        let mgr = ContainerManager::disconnected_for_testing(
+            GlobalConfig::default(),
+            state,
+            "no runtime".to_string(),
+        );
+        // Any operation requiring a provider should fail
+        let result = mgr.stop("nonexistent").await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Not connected"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_reconnects() {
+        let state = StateStore::new();
+        let mut mgr = ContainerManager::disconnected_for_testing(
+            GlobalConfig::default(),
+            state,
+            "disconnected".to_string(),
+        );
+        assert!(!mgr.is_connected());
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mgr.connect(Box::new(mock));
+
+        assert!(mgr.is_connected());
+        assert!(mgr.connection_error().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_provider_type_connected() {
+        let mock = MockProvider::new(ProviderType::Podman);
+        let mgr = test_manager(mock);
+        assert_eq!(mgr.provider_type(), Some(ProviderType::Podman));
+    }
+
+    #[tokio::test]
+    async fn test_provider_type_disconnected() {
+        let state = StateStore::new();
+        let mgr = ContainerManager::disconnected_for_testing(
+            GlobalConfig::default(),
+            state,
+            "err".to_string(),
+        );
+        assert_eq!(mgr.provider_type(), None);
+    }
+
+    // ==================== Init ====================
+
+    #[tokio::test]
+    async fn test_init_creates_state() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        let workspace = create_test_workspace();
+
+        let cs = mgr.init(workspace.path()).await.unwrap();
+        assert_eq!(cs.status, DevcContainerStatus::Configured);
+        assert_eq!(cs.provider, ProviderType::Docker);
+        assert!(cs.image_id.is_none());
+        assert!(cs.container_id.is_none());
+
+        // Verify it's retrievable
+        let found = mgr.get(&cs.id).await.unwrap();
+        assert!(found.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_init_duplicate_fails() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        let workspace = create_test_workspace();
+
+        mgr.init(workspace.path()).await.unwrap();
+        let result = mgr.init(workspace.path()).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn test_init_disconnected_fails() {
+        let state = StateStore::new();
+        let mgr = ContainerManager::disconnected_for_testing(
+            GlobalConfig::default(),
+            state,
+            "no provider".to_string(),
+        );
+        let workspace = create_test_workspace();
+
+        let result = mgr.init(workspace.path()).await;
+        assert!(result.is_err());
+    }
+
+    // ==================== Build ====================
+
+    #[tokio::test]
+    async fn test_build_pulls_image() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let image_id = mgr.build(&id).await.unwrap();
+        assert!(!image_id.is_empty());
+
+        // ssh_enabled is false by default, so image-based should call pull
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::Pull { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_build_sets_failed_on_error() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.pull_result.lock().unwrap() =
+            Err(ProviderError::RuntimeError("pull failed".into()));
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.build(&id).await;
+        assert!(result.is_err());
+
+        // Status should be Failed
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.status, DevcContainerStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_build_compose_unsupported() {
+        let workspace = create_test_workspace();
+        // Write a compose-based devcontainer.json
+        std::fs::write(
+            workspace.path().join(".devcontainer/devcontainer.json"),
+            r#"{"dockerComposeFile": "docker-compose.yml", "service": "app"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.build(&id).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Compose"));
+    }
+
+    #[tokio::test]
+    async fn test_build_no_source_fails() {
+        let workspace = create_test_workspace();
+        // Write a devcontainer.json with no image source
+        std::fs::write(
+            workspace.path().join(".devcontainer/devcontainer.json"),
+            r#"{"name": "empty"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.build(&id).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("No image source"));
+    }
+
+    #[tokio::test]
+    async fn test_build_calls_provider_build() {
+        let workspace = create_test_workspace();
+        // Dockerfile-based config
+        std::fs::write(
+            workspace.path().join(".devcontainer/devcontainer.json"),
+            r#"{"build": {"dockerfile": "Dockerfile"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.path().join(".devcontainer/Dockerfile"),
+            "FROM ubuntu:22.04\n",
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.build(&id).await.unwrap();
+
+        // Should call build, not pull
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::Build { .. })));
+        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Pull { .. })));
+    }
+
+    // ==================== Create ====================
+
+    #[tokio::test]
+    async fn test_create_requires_image_id() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None, // no image_id
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.create(&id).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("not built yet"));
+    }
+
+    #[tokio::test]
+    async fn test_create_sets_container_id() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Built,
+            Some("sha256:image123"),
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let container_id = mgr.create(&id).await.unwrap();
+        assert_eq!(container_id.0, "mock_container_id");
+
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.container_id, Some("mock_container_id".to_string()));
+        assert_eq!(cs.status, DevcContainerStatus::Created);
+    }
+
+    #[tokio::test]
+    async fn test_create_cleans_orphan() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Built,
+            Some("sha256:image123"),
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.create(&id).await.unwrap();
+
+        // Should have called remove_by_name before create
+        let recorded = calls.lock().unwrap();
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::RemoveByName { .. })));
+    }
+
+    // ==================== Start / Stop ====================
+
+    #[tokio::test]
+    async fn test_start_sets_running() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Created,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.start(&id).await.unwrap();
+
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.status, DevcContainerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_start_invalid_state_fails() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running, // already running
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.start(&id).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("cannot be started"));
+    }
+
+    #[tokio::test]
+    async fn test_start_runs_post_start() {
+        let workspace = create_test_workspace();
+        // Add a postStartCommand
+        std::fs::write(
+            workspace.path().join(".devcontainer/devcontainer.json"),
+            r#"{"image": "ubuntu:22.04", "postStartCommand": "echo hello"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Stopped,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.start(&id).await.unwrap();
+
+        // Should have called exec for postStartCommand
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::Exec { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_stop_sets_stopped() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.stop(&id).await.unwrap();
+
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.status, DevcContainerStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_stop_invalid_state_fails() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Stopped, // already stopped
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.stop(&id).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("cannot be stopped"));
+    }
+
+    // ==================== Remove ====================
+
+    #[tokio::test]
+    async fn test_remove_from_state() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Stopped,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.remove(&id, false).await.unwrap();
+
+        let cs = mgr.get(&id).await.unwrap();
+        assert!(cs.is_none(), "Container should be removed from state");
+    }
+
+    #[tokio::test]
+    async fn test_remove_force_running() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        // Force remove should work even on running containers
+        mgr.remove(&id, true).await.unwrap();
+
+        let cs = mgr.get(&id).await.unwrap();
+        assert!(cs.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_remove_no_force_running_fails() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.remove(&id, false).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("cannot be removed"));
+    }
+
+    #[tokio::test]
+    async fn test_remove_disconnected_removes_state() {
+        let workspace = create_test_workspace();
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Stopped,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = ContainerManager::disconnected_for_testing(
+            GlobalConfig::default(),
+            state,
+            "no provider".to_string(),
+        );
+
+        // Should still remove from state even without provider
+        mgr.remove(&id, false).await.unwrap();
+        let cs = mgr.get(&id).await.unwrap();
+        assert!(cs.is_none());
+    }
+
+    // ==================== Down ====================
+
+    #[tokio::test]
+    async fn test_down_stops_and_removes() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.down(&id).await.unwrap();
+
+        // Should have called stop + remove on provider
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::Remove { force: true, .. })));
+
+        // State should still exist but container_id cleared
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert!(cs.container_id.is_none());
+        assert_eq!(cs.status, DevcContainerStatus::Built);
+    }
+
+    #[tokio::test]
+    async fn test_down_clears_ssh_metadata() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        cs.metadata
+            .insert("ssh_available".to_string(), "true".to_string());
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.down(&id).await.unwrap();
+
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert!(!cs.metadata.contains_key("ssh_available"));
+    }
+
+    #[tokio::test]
+    async fn test_down_sets_built_status() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.down(&id).await.unwrap();
+
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.status, DevcContainerStatus::Built);
+    }
+
+    #[tokio::test]
+    async fn test_down_no_image_sets_configured() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            None, // no image
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.down(&id).await.unwrap();
+
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.status, DevcContainerStatus::Configured);
+    }
+
+    // ==================== Rebuild ====================
+
+    #[tokio::test]
+    async fn test_rebuild_disconnected_fails() {
+        let workspace = create_test_workspace();
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = ContainerManager::disconnected_for_testing(
+            GlobalConfig::default(),
+            state,
+            "no provider".to_string(),
+        );
+
+        let result = mgr.rebuild(&id, false).await;
+        assert!(result.is_err());
+    }
+
+    // ==================== Sync Status ====================
+
+    #[tokio::test]
+    async fn test_sync_running_stays_running() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        // Default inspect returns Running
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let status = mgr.sync_status(&id).await.unwrap();
+        assert_eq!(status, DevcContainerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_sync_running_to_stopped() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.inspect_result.lock().unwrap() = Ok(mock_container_details(
+            "container123",
+            ContainerStatus::Exited,
+        ));
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let status = mgr.sync_status(&id).await.unwrap();
+        assert_eq!(status, DevcContainerStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_sync_container_disappeared() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.inspect_result.lock().unwrap() =
+            Err(ProviderError::ContainerNotFound("gone".into()));
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let status = mgr.sync_status(&id).await.unwrap();
+        // Container had an image, so should be Built
+        assert_eq!(status, DevcContainerStatus::Built);
+    }
+
+    #[tokio::test]
+    async fn test_sync_disconnected_returns_current() {
+        let workspace = create_test_workspace();
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = ContainerManager::disconnected_for_testing(
+            GlobalConfig::default(),
+            state,
+            "no provider".to_string(),
+        );
+
+        let status = mgr.sync_status(&id).await.unwrap();
+        assert_eq!(status, DevcContainerStatus::Running);
+    }
+
+    // ==================== List / Get ====================
+
+    #[tokio::test]
+    async fn test_list_empty() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        let list = mgr.list().await.unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_returns_all() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs1 = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("c1"),
+        );
+        state.add(cs1);
+
+        let workspace2 = create_test_workspace();
+        let cs2 = make_container_state(
+            workspace2.path(),
+            DevcContainerStatus::Stopped,
+            Some("sha256:img2"),
+            Some("c2"),
+        );
+        state.add(cs2);
+
+        let mgr = test_manager_with_state(mock, state);
+        let list = mgr.list().await.unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_name() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let found = mgr.get_by_name("test").await.unwrap();
+        assert!(found.is_some());
+
+        let not_found = mgr.get_by_name("nonexistent").await.unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        let result = mgr.get("nonexistent-id").await.unwrap();
+        assert!(result.is_none());
     }
 }

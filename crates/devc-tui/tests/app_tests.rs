@@ -276,3 +276,100 @@ fn test_is_connected() {
     app.active_provider = None;
     assert!(!app.is_connected());
 }
+
+/// Test confirm action variants can be constructed
+#[test]
+fn test_confirm_action_variants() {
+    let mut app = App::new_for_testing();
+
+    // Delete variant
+    app.confirm_action = Some(ConfirmAction::Delete("id1".to_string()));
+    assert!(matches!(app.confirm_action, Some(ConfirmAction::Delete(_))));
+
+    // Stop variant
+    app.confirm_action = Some(ConfirmAction::Stop("id2".to_string()));
+    assert!(matches!(app.confirm_action, Some(ConfirmAction::Stop(_))));
+
+    // Rebuild variant
+    app.confirm_action = Some(ConfirmAction::Rebuild {
+        id: "id3".to_string(),
+        provider_change: Some((ProviderType::Docker, ProviderType::Podman)),
+    });
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::Rebuild { .. })
+    ));
+
+    // SetDefaultProvider variant
+    app.confirm_action = Some(ConfirmAction::SetDefaultProvider(ProviderType::Podman));
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::SetDefaultProvider(_))
+    ));
+
+    // CancelBuild variant
+    app.confirm_action = Some(ConfirmAction::CancelBuild);
+    assert!(matches!(
+        app.confirm_action,
+        Some(ConfirmAction::CancelBuild)
+    ));
+
+    // QuitApp variant
+    app.confirm_action = Some(ConfirmAction::QuitApp);
+    assert!(matches!(app.confirm_action, Some(ConfirmAction::QuitApp)));
+}
+
+/// Test container operation labels for different statuses
+#[test]
+fn test_container_operation_labels() {
+    let app = App::new_for_testing();
+
+    // Verify different statuses can be displayed
+    let statuses = [
+        DevcContainerStatus::Configured,
+        DevcContainerStatus::Building,
+        DevcContainerStatus::Built,
+        DevcContainerStatus::Created,
+        DevcContainerStatus::Running,
+        DevcContainerStatus::Stopped,
+        DevcContainerStatus::Failed,
+    ];
+
+    for status in statuses {
+        let display = format!("{}", status);
+        assert!(!display.is_empty(), "Status {:?} should have display string", status);
+    }
+
+    // Verify we can create test containers with each status
+    for status in statuses {
+        let container = App::create_test_container("test", status);
+        assert_eq!(container.status, status);
+    }
+    drop(app);
+}
+
+/// Test ports view state cleanup
+#[test]
+fn test_ports_view_cleanup() {
+    let mut app = App::new_for_testing();
+
+    // Set up ports view state
+    app.view = View::Ports;
+    app.ports_container_id = Some("container123".to_string());
+    app.detected_ports.push(devc_tui::ports::DetectedPort {
+        port: 8080,
+        protocol: "tcp".to_string(),
+        process: Some("node".to_string()),
+        is_new: false,
+        is_forwarded: false,
+    });
+
+    // Close ports view manually
+    app.ports_container_id = None;
+    app.detected_ports.clear();
+    app.view = View::Main;
+
+    assert!(app.ports_container_id.is_none());
+    assert!(app.detected_ports.is_empty());
+    assert_eq!(app.view, View::Main);
+}

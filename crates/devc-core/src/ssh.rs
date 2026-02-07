@@ -382,6 +382,37 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn test_validate_username_length_boundary() {
+        // 32 chars should be ok
+        let name_32 = "a".repeat(32);
+        assert!(SshManager::validate_username(&name_32).is_ok());
+
+        // 33 chars should fail
+        let name_33 = "a".repeat(33);
+        assert!(SshManager::validate_username(&name_33).is_err());
+    }
+
+    #[test]
+    fn test_validate_ssh_key_rsa() {
+        // A valid RSA key (truncated but base64-valid)
+        let key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7 test@host";
+        assert!(SshManager::validate_ssh_public_key(key).is_ok());
+    }
+
+    #[test]
+    fn test_validate_ssh_key_ecdsa() {
+        // A valid ecdsa-sha2-nistp256 key prefix with valid base64
+        let key = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY= test@host";
+        assert!(SshManager::validate_ssh_public_key(key).is_ok());
+    }
+
+    #[test]
+    fn test_validate_ssh_key_invalid_base64() {
+        let key = "ssh-ed25519 !!!not-base64!!! test@host";
+        assert!(SshManager::validate_ssh_public_key(key).is_err());
+    }
+
+    #[test]
     fn test_ssh_manager_paths() {
         let manager = SshManager::with_key_path(PathBuf::from("/tmp/test_key"));
         assert_eq!(manager.key_path(), &PathBuf::from("/tmp/test_key"));

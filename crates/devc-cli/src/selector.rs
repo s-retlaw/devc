@@ -309,3 +309,69 @@ impl IsTerminal for std::io::Stdin {
         std::io::IsTerminal::is_terminal(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devc_core::ContainerState;
+    use devc_provider::ProviderType;
+    use std::path::PathBuf;
+
+    fn make_container(name: &str, status: DevcContainerStatus) -> ContainerState {
+        let mut cs = ContainerState::new(
+            name.to_string(),
+            ProviderType::Docker,
+            PathBuf::from("/test/devcontainer.json"),
+            PathBuf::from(format!("/test/{}", name)),
+        );
+        cs.status = status;
+        cs
+    }
+
+    #[test]
+    fn test_filter_running_only() {
+        let containers = vec![
+            make_container("a", DevcContainerStatus::Running),
+            make_container("b", DevcContainerStatus::Stopped),
+            make_container("c", DevcContainerStatus::Running),
+        ];
+        let filtered = SelectionContext::Running.filter(&containers);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|c| c.status == DevcContainerStatus::Running));
+    }
+
+    #[test]
+    fn test_filter_startable() {
+        let containers = vec![
+            make_container("a", DevcContainerStatus::Running),
+            make_container("b", DevcContainerStatus::Stopped),
+            make_container("c", DevcContainerStatus::Built),
+            make_container("d", DevcContainerStatus::Created),
+            make_container("e", DevcContainerStatus::Configured),
+        ];
+        let filtered = SelectionContext::Startable.filter(&containers);
+        assert_eq!(filtered.len(), 3); // Stopped, Built, Created
+    }
+
+    #[test]
+    fn test_filter_uppable() {
+        let containers = vec![
+            make_container("a", DevcContainerStatus::Running),
+            make_container("b", DevcContainerStatus::Stopped),
+            make_container("c", DevcContainerStatus::Configured),
+        ];
+        let filtered = SelectionContext::Uppable.filter(&containers);
+        assert_eq!(filtered.len(), 2); // everything except Running
+    }
+
+    #[test]
+    fn test_filter_any() {
+        let containers = vec![
+            make_container("a", DevcContainerStatus::Running),
+            make_container("b", DevcContainerStatus::Stopped),
+            make_container("c", DevcContainerStatus::Failed),
+        ];
+        let filtered = SelectionContext::Any.filter(&containers);
+        assert_eq!(filtered.len(), 3);
+    }
+}

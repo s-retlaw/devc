@@ -732,6 +732,67 @@ mod tests {
         assert!(!create.env.contains_key("EDITOR"));
     }
 
+    // ==================== Additional sanitize_name tests ====================
+
+    #[test]
+    fn test_sanitize_name_all_special() {
+        // All special characters should result in "container" fallback
+        assert_eq!(sanitize_name("@#$%^&*"), "container");
+    }
+
+    #[test]
+    fn test_sanitize_name_unicode() {
+        // Unicode characters should be replaced with hyphens
+        let result = sanitize_name("projekt-über");
+        assert!(!result.contains("ü"));
+        assert!(result.contains("projekt"));
+    }
+
+    // ==================== Additional parse_mount_string tests ====================
+
+    #[test]
+    fn test_parse_mount_string_volume() {
+        let mount = parse_mount_string("type=volume,source=myvolume,target=/data");
+        assert!(mount.is_some());
+        let mount = mount.unwrap();
+        assert!(matches!(mount.mount_type, MountType::Volume));
+        assert_eq!(mount.source, "myvolume");
+        assert_eq!(mount.target, "/data");
+        assert!(!mount.read_only);
+    }
+
+    #[test]
+    fn test_parse_mount_string_no_target() {
+        // Missing target should return None
+        let mount = parse_mount_string("type=bind,source=/host/path");
+        assert!(mount.is_none());
+    }
+
+    // ==================== create_config default env vars ====================
+
+    #[test]
+    fn test_create_config_default_env_vars() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let create = container.create_config("ubuntu:22.04");
+        // Should have default terminal env vars
+        assert_eq!(create.env.get("TERM").unwrap(), "xterm-256color");
+        assert_eq!(create.env.get("COLORTERM").unwrap(), "truecolor");
+        assert_eq!(create.env.get("LANG").unwrap(), "C.UTF-8");
+        assert_eq!(create.env.get("LC_ALL").unwrap(), "C.UTF-8");
+    }
+
     #[test]
     fn test_run_host_command_string() {
         let dir = std::env::temp_dir();

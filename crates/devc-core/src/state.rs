@@ -255,6 +255,17 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn make_state(name: &str, status: DevcContainerStatus) -> ContainerState {
+        let mut cs = ContainerState::new(
+            name.to_string(),
+            ProviderType::Docker,
+            PathBuf::from("/path/to/devcontainer.json"),
+            PathBuf::from(format!("/path/to/{}", name)),
+        );
+        cs.status = status;
+        cs
+    }
+
     #[test]
     fn test_container_state_new() {
         let state = ContainerState::new(
@@ -289,5 +300,133 @@ mod tests {
 
         store.remove(&id);
         assert!(store.get(&id).is_none());
+    }
+
+    #[test]
+    fn test_save_load_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+
+        let mut store = StateStore::new();
+        let cs = make_state("roundtrip", DevcContainerStatus::Running);
+        let id = cs.id.clone();
+        store.add(cs);
+        store.save_to(&path).unwrap();
+
+        let loaded = StateStore::load_from(&path).unwrap();
+        assert!(loaded.get(&id).is_some());
+        assert_eq!(loaded.get(&id).unwrap().name, "roundtrip");
+        assert_eq!(loaded.get(&id).unwrap().status, DevcContainerStatus::Running);
+    }
+
+    #[test]
+    fn test_load_nonexistent_returns_empty() {
+        let path = PathBuf::from("/tmp/nonexistent_devc_state_test.json");
+        let store = StateStore::load_from(&path).unwrap();
+        assert!(store.containers.is_empty());
+        assert_eq!(store.version, StateStore::CURRENT_VERSION);
+    }
+
+    #[test]
+    fn test_load_corrupted_json_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.json");
+        std::fs::write(&path, "not valid json {{{").unwrap();
+
+        let result = StateStore::load_from(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_future_version_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("future.json");
+        std::fs::write(
+            &path,
+            r#"{"version": 999, "containers": {}}"#,
+        )
+        .unwrap();
+
+        let store = StateStore::load_from(&path).unwrap();
+        assert_eq!(store.version, 999);
+        assert!(store.containers.is_empty());
+    }
+
+    #[test]
+    fn test_find_by_workspace() {
+        let mut store = StateStore::new();
+        let cs = make_state("proj1", DevcContainerStatus::Running);
+        store.add(cs);
+
+        let found = store.find_by_workspace(&PathBuf::from("/path/to/proj1"));
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "proj1");
+
+        let not_found = store.find_by_workspace(&PathBuf::from("/path/to/other"));
+        assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_filter() {
+        let mut store = StateStore::new();
+        store.add(make_state("running1", DevcContainerStatus::Running));
+        store.add(make_state("stopped1", DevcContainerStatus::Stopped));
+        store.add(make_state("running2", DevcContainerStatus::Running));
+
+        let running = store.filter(|c| c.status == DevcContainerStatus::Running);
+        assert_eq!(running.len(), 2);
+
+        let stopped = store.filter(|c| c.status == DevcContainerStatus::Stopped);
+        assert_eq!(stopped.len(), 1);
+    }
+
+    #[test]
+    fn test_touch_updates_last_used() {
+        let mut store = StateStore::new();
+        let cs = make_state("touched", DevcContainerStatus::Running);
+        let id = cs.id.clone();
+        let original_last_used = cs.last_used;
+        store.add(cs);
+
+        // Sleep a tiny bit to ensure time moves forward
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        store.touch(&id);
+
+        let updated = store.get(&id).unwrap();
+        assert!(updated.last_used > original_last_used);
+    }
+
+    #[test]
+    fn test_can_start_states() {
+        assert!(make_state("a", DevcContainerStatus::Created).can_start());
+        assert!(make_state("b", DevcContainerStatus::Stopped).can_start());
+        assert!(!make_state("c", DevcContainerStatus::Running).can_start());
+        assert!(!make_state("d", DevcContainerStatus::Building).can_start());
+        assert!(!make_state("e", DevcContainerStatus::Configured).can_start());
+    }
+
+    #[test]
+    fn test_can_stop_states() {
+        assert!(make_state("a", DevcContainerStatus::Running).can_stop());
+        assert!(!make_state("b", DevcContainerStatus::Stopped).can_stop());
+        assert!(!make_state("c", DevcContainerStatus::Created).can_stop());
+    }
+
+    #[test]
+    fn test_can_remove_states() {
+        assert!(make_state("a", DevcContainerStatus::Stopped).can_remove());
+        assert!(make_state("b", DevcContainerStatus::Configured).can_remove());
+        assert!(make_state("c", DevcContainerStatus::Built).can_remove());
+        assert!(make_state("d", DevcContainerStatus::Failed).can_remove());
+        assert!(!make_state("e", DevcContainerStatus::Running).can_remove());
+        assert!(!make_state("f", DevcContainerStatus::Building).can_remove());
+    }
+
+    #[test]
+    fn test_short_id() {
+        let cs = make_state("short", DevcContainerStatus::Configured);
+        let short = cs.short_id();
+        assert_eq!(short.len(), 8);
+        assert_eq!(short, &cs.id[..8]);
     }
 }

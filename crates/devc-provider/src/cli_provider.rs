@@ -889,6 +889,79 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    // ==================== parse_cli_labels tests ====================
+
+    #[test]
+    fn test_parse_cli_labels_basic() {
+        let labels = parse_cli_labels("foo=bar,baz=qux");
+        assert_eq!(labels.get("foo").unwrap(), "bar");
+        assert_eq!(labels.get("baz").unwrap(), "qux");
+    }
+
+    #[test]
+    fn test_parse_cli_labels_empty() {
+        let labels = parse_cli_labels("");
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn test_parse_cli_labels_single() {
+        let labels = parse_cli_labels("key=value");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels.get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_parse_cli_labels_value_with_equals() {
+        // Values can contain equals signs (e.g. "key=a=b")
+        let labels = parse_cli_labels("key=a=b,other=c");
+        assert_eq!(labels.get("key").unwrap(), "a=b");
+        assert_eq!(labels.get("other").unwrap(), "c");
+    }
+
+    // ==================== detect_devcontainer_source tests ====================
+
+    #[test]
+    fn test_detect_devc_source() {
+        let mut labels = HashMap::new();
+        labels.insert("devc.managed".to_string(), "true".to_string());
+        let (is_dc, source, managed) = detect_devcontainer_source_from_labels(&labels);
+        assert!(is_dc);
+        assert_eq!(source, DevcontainerSource::Devc);
+        assert!(managed);
+    }
+
+    #[test]
+    fn test_detect_vscode_source() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "devcontainer.local_folder".to_string(),
+            "/home/user/project".to_string(),
+        );
+        let (is_dc, source, managed) = detect_devcontainer_source_from_labels(&labels);
+        assert!(is_dc);
+        assert_eq!(source, DevcontainerSource::VsCode);
+        assert!(!managed);
+    }
+
+    #[test]
+    fn test_detect_other_devcontainer() {
+        let mut labels = HashMap::new();
+        labels.insert("devcontainer.metadata".to_string(), "{}".to_string());
+        let (is_dc, source, managed) = detect_devcontainer_source_from_labels(&labels);
+        assert!(is_dc);
+        assert_eq!(source, DevcontainerSource::Other);
+        assert!(!managed);
+    }
+
+    #[test]
+    fn test_detect_non_devcontainer() {
+        let mut labels = HashMap::new();
+        labels.insert("com.docker.compose.service".to_string(), "web".to_string());
+        let (is_dc, _source, _managed) = detect_devcontainer_source_from_labels(&labels);
+        assert!(!is_dc);
+    }
+
     /// Get a provider for testing (tries toolbox, podman, then docker)
     async fn get_test_provider() -> Option<CliProvider> {
         // Try toolbox first (for Fedora toolbox environment)

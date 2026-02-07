@@ -390,4 +390,45 @@ mod tests {
         let manager = DotfilesManager::from_global_config(&config);
         assert!(!manager.is_configured());
     }
+
+    #[test]
+    fn test_expand_home_root() {
+        assert_eq!(expand_home("~/foo", Some("root")), "/root/foo");
+        assert_eq!(expand_home("~/foo", None), "/root/foo");
+    }
+
+    #[test]
+    fn test_expand_home_user() {
+        assert_eq!(expand_home("~/foo", Some("alice")), "/home/alice/foo");
+    }
+
+    #[test]
+    fn test_expand_home_no_tilde() {
+        assert_eq!(expand_home("/absolute/path", Some("user")), "/absolute/path");
+    }
+
+    #[test]
+    fn test_expand_home_tilde_subpath() {
+        assert_eq!(expand_home("~/.config/nvim", Some("bob")), "/home/bob/.config/nvim");
+    }
+
+    #[test]
+    fn test_dotfiles_source_priority() {
+        // Devcontainer config should take priority over global config
+        let mut global = GlobalConfig::default();
+        global.defaults.dotfiles_repo = Some("https://github.com/global/dots".to_string());
+
+        let dc_config = DotfilesConfig {
+            repository: Some("https://github.com/local/dots".to_string()),
+            local_path: None,
+            install_command: Some("./install.sh".to_string()),
+            target_path: Some("~/.mydots".to_string()),
+        };
+
+        let manager = DotfilesManager::from_devcontainer_config(&dc_config, &global);
+        assert!(manager.is_configured());
+        assert!(matches!(manager.config, DotfilesSource::Repository(ref url) if url.contains("local/dots")));
+        assert_eq!(manager.target_path, "~/.mydots");
+        assert_eq!(manager.install_command.as_deref(), Some("./install.sh"));
+    }
 }

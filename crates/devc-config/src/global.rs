@@ -265,4 +265,50 @@ socket = "/run/user/1000/podman/podman.sock"
         );
         assert_eq!(config.defaults.shell, "/bin/zsh");
     }
+
+    #[test]
+    fn test_save_load_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let mut config = GlobalConfig::default();
+        config.defaults.provider = "podman".to_string();
+        config.defaults.shell = "/bin/zsh".to_string();
+        config.save_to(&path).unwrap();
+
+        let loaded = GlobalConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.defaults.provider, "podman");
+        assert_eq!(loaded.defaults.shell, "/bin/zsh");
+    }
+
+    #[test]
+    fn test_load_missing_returns_default() {
+        let path = PathBuf::from("/tmp/nonexistent_devc_config_test.toml");
+        let config = GlobalConfig::load_from(&path).unwrap();
+        assert!(config.defaults.provider.is_empty());
+        assert_eq!(config.defaults.shell, "/bin/bash");
+    }
+
+    #[test]
+    fn test_load_malformed_toml_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad.toml");
+        std::fs::write(&path, "[defaults\nbroken toml {{").unwrap();
+
+        let result = GlobalConfig::load_from(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_first_run_empty_provider() {
+        let config = GlobalConfig::default();
+        assert!(config.is_first_run());
+    }
+
+    #[test]
+    fn test_is_first_run_set_provider() {
+        let mut config = GlobalConfig::default();
+        config.defaults.provider = "docker".to_string();
+        assert!(!config.is_first_run());
+    }
 }

@@ -398,6 +398,43 @@ impl std::fmt::Display for DevcontainerSource {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_container_id_short_truncates() {
+        let id = ContainerId::new("abcdef1234567890abcdef");
+        assert_eq!(id.short(), "abcdef123456");
+    }
+
+    #[test]
+    fn test_container_id_short_preserves_short() {
+        let id = ContainerId::new("abc");
+        assert_eq!(id.short(), "abc");
+    }
+
+    #[test]
+    fn test_provider_type_from_str() {
+        assert_eq!("docker".parse::<ProviderType>().unwrap(), ProviderType::Docker);
+        assert_eq!("podman".parse::<ProviderType>().unwrap(), ProviderType::Podman);
+        assert_eq!("DOCKER".parse::<ProviderType>().unwrap(), ProviderType::Docker);
+        assert!("invalid".parse::<ProviderType>().is_err());
+    }
+
+    #[test]
+    fn test_container_status_from_str() {
+        assert_eq!(ContainerStatus::from("running"), ContainerStatus::Running);
+        assert_eq!(ContainerStatus::from("exited"), ContainerStatus::Exited);
+        assert_eq!(ContainerStatus::from("created"), ContainerStatus::Created);
+        assert_eq!(ContainerStatus::from("paused"), ContainerStatus::Paused);
+        assert_eq!(ContainerStatus::from("dead"), ContainerStatus::Dead);
+        assert_eq!(ContainerStatus::from("restarting"), ContainerStatus::Restarting);
+        assert_eq!(ContainerStatus::from("removing"), ContainerStatus::Removing);
+        assert_eq!(ContainerStatus::from("garbage"), ContainerStatus::Unknown);
+    }
+}
+
 /// A discovered devcontainer (may or may not be managed by devc)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredContainer {
