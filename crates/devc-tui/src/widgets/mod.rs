@@ -3,5 +3,5 @@
 mod dialog;
 mod text_input;
 
-pub use dialog::DialogBuilder;
+pub use dialog::{centered_rect, DialogBuilder};
 pub use text_input::TextInputState;

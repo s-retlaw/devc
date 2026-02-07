@@ -3,14 +3,14 @@
 use ansi_to_tui::IntoText;
 use crate::app::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
 use crate::settings::{SettingsField, SettingsSection};
-use crate::widgets::DialogBuilder;
+use crate::widgets::{centered_rect, DialogBuilder};
 use devc_core::DevcContainerStatus;
 use devc_provider::{ContainerStatus, DevcontainerSource};
 use ratatui::{
     prelude::*,
     widgets::{
-        Block, Borders, Cell, List, ListItem, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Table, Tabs, Wrap,
+        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Table, Tabs, Wrap,
     },
 };
 
@@ -58,50 +58,43 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     match app.view {
-        View::Main => match app.tab {
-            Tab::Containers => {
-                if app.discover_mode {
-                    draw_discovered_containers(frame, app, content_area);
-                } else {
-                    draw_containers(frame, app, content_area);
-                }
-                if app.container_op.is_some() {
-                    draw_operation_progress(frame, app, area);
-                }
-            }
-            Tab::Providers => draw_providers(frame, app, content_area),
-            Tab::Settings => draw_settings(frame, app, content_area),
-        },
-        View::ContainerDetail => {
-            draw_detail(frame, app, content_area);
+        View::Main => {
+            draw_main_content(frame, app, content_area);
             if app.container_op.is_some() {
                 draw_operation_progress(frame, app, area);
             }
         }
-        View::ProviderDetail => draw_provider_detail(frame, app, content_area),
+        View::ContainerDetail => {
+            draw_main_content(frame, app, content_area);
+            let popup = popup_rect(75, 70, 56, 17, content_area);
+            frame.render_widget(Clear, popup);
+            draw_detail(frame, app, popup);
+            if app.container_op.is_some() {
+                draw_operation_progress(frame, app, area);
+            }
+        }
+        View::ProviderDetail => {
+            draw_main_content(frame, app, content_area);
+            let popup = popup_rect(75, 75, 58, 18, content_area);
+            frame.render_widget(Clear, popup);
+            draw_provider_detail(frame, app, popup);
+        }
         View::BuildOutput => draw_build_output(frame, app, content_area),
         View::Logs => draw_logs(frame, app, content_area),
         View::Ports => {
-            draw_ports(frame, app, content_area);
-            // Overlay install modal if installing
+            draw_main_content(frame, app, content_area);
+            let port_rows = app.detected_ports.len().max(3) as u16;
+            let h = (port_rows + 7).max(12);
+            let popup = popup_rect(80, 70, 56, h, content_area);
+            frame.render_widget(Clear, popup);
+            draw_ports(frame, app, popup);
             if app.socat_installing {
                 draw_install_progress(frame, app, area);
             }
         }
         View::Help => draw_help(frame, app, content_area),
         View::Confirm => {
-            // Draw the main content behind the dialog
-            match app.tab {
-                Tab::Containers => {
-                    if app.discover_mode {
-                        draw_discovered_containers(frame, app, content_area);
-                    } else {
-                        draw_containers(frame, app, content_area);
-                    }
-                }
-                Tab::Providers => draw_providers(frame, app, content_area),
-                Tab::Settings => draw_settings(frame, app, content_area),
-            }
+            draw_main_content(frame, app, content_area);
             draw_confirm_dialog(frame, app, area);
         }
         View::Shell => {
@@ -111,6 +104,30 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     draw_footer(frame, app, footer_area);
+}
+
+/// Draw the main tab content (containers/providers/settings list)
+fn draw_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
+    match app.tab {
+        Tab::Containers => {
+            if app.discover_mode {
+                draw_discovered_containers(frame, app, area);
+            } else {
+                draw_containers(frame, app, area);
+            }
+        }
+        Tab::Providers => draw_providers(frame, app, area),
+        Tab::Settings => draw_settings(frame, app, area),
+    }
+}
+
+/// Calculate a popup rectangle centered in the given area with percentage-based sizing and minimums
+fn popup_rect(pct_w: u16, pct_h: u16, min_w: u16, min_h: u16, area: Rect) -> Rect {
+    let w = ((area.width as u32 * pct_w as u32) / 100) as u16;
+    let h = ((area.height as u32 * pct_h as u32) / 100) as u16;
+    let w = w.max(min_w).min(area.width);
+    let h = h.max(min_h).min(area.height);
+    centered_rect(w, h, area)
 }
 
 /// Draw disconnection warning banner
@@ -196,12 +213,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         },
-        View::ContainerDetail => "b: Build  s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  Esc/q: Back  ?: Help",
+        View::ContainerDetail => "b: Build  s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  1-3: Switch tab  Esc/q: Back  ?: Help",
         View::ProviderDetail => {
             if app.provider_detail_state.editing {
                 "Enter: Confirm  Esc: Cancel  Type to edit"
             } else {
-                "e: Edit Socket  t: Test Connection  a/Space: Set Active  s: Save  Esc/q: Back"
+                "e: Edit Socket  t: Test  a/Space: Set Active  s: Save  1-3: Switch tab  Esc/q: Back"
             }
         }
         View::BuildOutput => {
@@ -215,7 +232,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         View::Ports => {
             // Show install option if socat not installed
             if app.socat_installed == Some(false) && !app.socat_installing {
-                "[i]nstall socat  j/k: Navigate  q/Esc: Back"
+                "[i]nstall socat  j/k: Navigate  1-3: Switch tab  q/Esc: Back"
             } else if app.socat_installing {
                 "Installing socat...  q/Esc: Back"
             } else {
@@ -225,9 +242,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     .map(|p| p.is_forwarded)
                     .unwrap_or(false);
                 if is_forwarded {
-                    "[s]top  [o]pen browser  [n]one  j/k: Navigate  q/Esc: Back"
+                    "[s]top  [o]pen browser  [n]one  j/k: Navigate  1-3: Switch tab  q/Esc: Back"
                 } else {
-                    "[f]orward  [a]ll  j/k: Navigate  q/Esc: Back"
+                    "[f]orward  [a]ll  j/k: Navigate  1-3: Switch tab  q/Esc: Back"
                 }
             }
         }
@@ -838,7 +855,8 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .title(format!(" {} ", container.name))
-                .borders(Borders::ALL),
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
         )
         .wrap(Wrap { trim: true });
 

@@ -198,6 +198,84 @@ fn test_logs_view() {
     insta::assert_snapshot!(output);
 }
 
+/// Test provider detail popup overlay
+#[test]
+fn test_provider_detail_popup() {
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Providers;
+    app.selected_provider = 0;
+    app.view = View::ProviderDetail;
+
+    let output = render_app(&mut app, 80, 24);
+    insta::assert_snapshot!(output);
+}
+
+/// Test ports popup overlay (empty, no ports detected)
+#[test]
+fn test_ports_popup_empty() {
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+
+    // Add a running container
+    app.containers = vec![App::create_test_container(
+        "my-rust-project",
+        DevcContainerStatus::Running,
+    )];
+    app.selected = 0;
+    app.containers_table_state.select(Some(0));
+
+    // Set up ports view with no detected ports
+    app.view = View::Ports;
+    app.ports_container_id = Some("test-my-rust-project".to_string());
+    app.socat_installed = Some(true);
+
+    let output = render_app(&mut app, 80, 24);
+    insta::assert_snapshot!(output);
+}
+
+/// Test ports popup overlay with detected ports
+#[test]
+fn test_ports_popup_with_ports() {
+    use devc_tui::ports::DetectedPort;
+
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+
+    // Add a running container
+    app.containers = vec![App::create_test_container(
+        "my-rust-project",
+        DevcContainerStatus::Running,
+    )];
+    app.selected = 0;
+    app.containers_table_state.select(Some(0));
+
+    // Set up ports view with detected ports
+    app.view = View::Ports;
+    app.ports_container_id = Some("test-my-rust-project".to_string());
+    app.socat_installed = Some(true);
+    app.detected_ports = vec![
+        DetectedPort {
+            port: 3000,
+            protocol: "tcp".to_string(),
+            process: Some("node".to_string()),
+            is_new: false,
+            is_forwarded: true,
+        },
+        DetectedPort {
+            port: 8080,
+            protocol: "tcp".to_string(),
+            process: Some("java".to_string()),
+            is_new: true,
+            is_forwarded: false,
+        },
+    ];
+    app.selected_port = 0;
+    app.ports_table_state.select(Some(0));
+
+    let output = render_app(&mut app, 80, 24);
+    insta::assert_snapshot!(output);
+}
+
 /// Test container operation spinner modal
 #[test]
 fn test_container_operation_spinner() {

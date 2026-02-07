@@ -2,27 +2,27 @@
 source: crates/devc-tui/tests/snapshot_tests.rs
 expression: output
 ---
-┌ devc - D┌ my-rust-project ─────────────────────────────────────────┐─────────┐
-│ 1:Contai│Name:        my-rust-project                              │         │
-└─────────│Status:      running                                      │─────────┘
-┌ Containe│Provider:    docker                                       │─────────┐
-│      Nam│ID:          test-my-rust-project                         │         │
+┌ devc - D┌ Docker Configuration ────────────────────────────────────┐─────────┐
+│ 1:Contai│                                                          │         │
+└─────────│Provider: Docker (ACTIVE)                                 │─────────┘
+┌ Provider│                                                          │─────────┐
+│  Active │Socket Path:    /var/run/docker.sock  [e] to edit         │         │
 │         │                                                          │         │
-│▶ ●   my-│Workspace:   /tmp/test                                    │         │
-│         │Config:      /tmp/test/.devcontainer/devcontainer.json    │         │
+│▶ ●      │Connection:     ● Connected  [t] to test                  │         │
+│  ○      │                                                          │         │
+│         │─── Tips ────────────────────────────────────────         │         │
 │         │                                                          │         │
-│         │Image ID:    sha256:abc123                                │         │
-│         │Container:   container-my-rust-project                    │         │
+│         │• Start Docker: sudo systemctl start docker               │         │
+│         │• Default socket: /var/run/docker.sock                    │         │
 │         │                                                          │         │
-│         │Created:     2024-01-15 12:00:00                          │         │
-│         │Last used:   2024-01-15 12:00:00                          │         │
+│         │                                                          │         │
+│         │                                                          │         │
 │         │                                                          │         │
 │         │                                                          │         │
 │         └──────────────────────────────────────────────────────────┘         │
 │                                                                              │
 │                                                                              │
-│                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│b: Build  s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  1-3: Switch tab│
+│e: Edit Socket  t: Test  a/Space: Set Active  s: Save  1-3: Switch tab  Esc/q:│
 └──────────────────────────────────────────────────────────────────────────────┘

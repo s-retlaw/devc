@@ -764,6 +764,27 @@ impl App {
             }
         }
 
+        // View-specific exit handling (runs BEFORE global q/Esc)
+        match (&self.view, code) {
+            (View::Ports, KeyCode::Char('q') | KeyCode::Esc) => {
+                self.exit_ports_view();
+                return Ok(());
+            }
+            (View::ProviderDetail, KeyCode::Esc) if self.provider_detail_state.editing => {
+                self.provider_detail_state.cancel_edit();
+                return Ok(());
+            }
+            (View::BuildOutput, KeyCode::Char('q') | KeyCode::Esc) if self.build_complete => {
+                self.build_output.clear();
+                self.build_output_scroll = 0;
+                self.build_complete = false;
+                self.build_auto_scroll = true;
+                self.view = View::Main;
+                return Ok(());
+            }
+            _ => {}
+        }
+
         // Global keys (work in any view)
         match code {
             KeyCode::Char('q') => {
@@ -792,21 +813,25 @@ impl App {
                 self.view = View::Help;
                 return Ok(());
             }
-            // Tab switching with number keys (always available in Main view)
-            KeyCode::Char('1') if self.view == View::Main => {
+            // Tab switching with number keys (available in Main view and popup views)
+            KeyCode::Char('1') if self.view == View::Main || self.is_popup_view() => {
+                self.close_current_view();
                 self.tab = Tab::Containers;
                 return Ok(());
             }
-            KeyCode::Char('2') if self.view == View::Main => {
+            KeyCode::Char('2') if self.view == View::Main || self.is_popup_view() => {
+                self.close_current_view();
                 self.tab = Tab::Providers;
                 return Ok(());
             }
-            KeyCode::Char('3') if self.view == View::Main => {
+            KeyCode::Char('3') if self.view == View::Main || self.is_popup_view() => {
+                self.close_current_view();
                 self.tab = Tab::Settings;
                 return Ok(());
             }
-            // Tab key cycles through tabs (in Main view)
-            KeyCode::Tab if self.view == View::Main => {
+            // Tab key cycles through tabs (in Main view and popup views)
+            KeyCode::Tab if self.view == View::Main || self.is_popup_view() => {
+                self.close_current_view();
                 self.tab = match self.tab {
                     Tab::Containers => Tab::Providers,
                     Tab::Providers => Tab::Settings,
@@ -814,7 +839,8 @@ impl App {
                 };
                 return Ok(());
             }
-            KeyCode::BackTab if self.view == View::Main => {
+            KeyCode::BackTab if self.view == View::Main || self.is_popup_view() => {
+                self.close_current_view();
                 self.tab = match self.tab {
                     Tab::Containers => Tab::Settings,
                     Tab::Providers => Tab::Containers,
@@ -1344,15 +1370,9 @@ impl App {
                 }
             }
             KeyCode::Char('q') | KeyCode::Esc => {
-                if self.build_complete {
-                    // Build finished - exit immediately
-                    self.view = View::Main;
-                    self.build_output.clear();
-                    self.build_output_scroll = 0;
-                    self.build_complete = false;
-                    self.build_auto_scroll = true;
-                } else {
-                    // Build still in progress - confirm cancellation
+                // Build complete case handled by view-specific exit above global keys.
+                // Here we only handle the in-progress cancellation case.
+                if !self.build_complete {
                     self.confirm_action = Some(ConfirmAction::CancelBuild);
                     self.view = View::Confirm;
                 }
@@ -1504,11 +1524,6 @@ impl App {
                 if self.socat_installed == Some(false) && !self.socat_installing {
                     self.install_socat_in_container();
                 }
-            }
-
-            // Back to containers (q and Esc handled globally, but we handle here too for safety)
-            KeyCode::Char('q') | KeyCode::Esc => {
-                self.exit_ports_view();
             }
 
             _ => {}
@@ -2322,6 +2337,33 @@ impl App {
     /// Get the currently selected container
     pub fn selected_container(&self) -> Option<&ContainerState> {
         self.containers.get(self.selected)
+    }
+
+    /// Check if the current view is a popup overlay
+    fn is_popup_view(&self) -> bool {
+        matches!(
+            self.view,
+            View::ContainerDetail | View::ProviderDetail | View::Ports | View::Logs
+        )
+    }
+
+    /// Close the current popup view with proper cleanup
+    fn close_current_view(&mut self) {
+        match self.view {
+            View::Ports => {
+                self.ports_container_id = None;
+                self.ports_provider_container_id = None;
+                self.port_detect_rx = None;
+                self.detected_ports.clear();
+                self.socat_installed = None;
+                self.socat_installing = false;
+            }
+            View::ProviderDetail if self.provider_detail_state.editing => {
+                self.provider_detail_state.cancel_edit();
+            }
+            _ => {}
+        }
+        self.view = View::Main;
     }
 
     /// Retry connection to the selected provider
