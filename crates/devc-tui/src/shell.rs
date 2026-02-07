@@ -241,7 +241,7 @@ impl PtyShell {
         }
     }
 
-    /// Propagate current terminal size to the PTY
+    /// Propagate current terminal size to the PTY and child process
     fn propagate_winsize(&self) {
         if let Ok((cols, rows)) = crossterm::terminal::size() {
             let ws = libc::winsize {
@@ -253,6 +253,14 @@ impl PtyShell {
             unsafe {
                 libc::ioctl(self.master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
             }
+            // TIOCSWINSZ only sends SIGWINCH to the slave's foreground process group,
+            // but we never set one up (no setsid/TIOCSCTTY). Explicitly signal the
+            // child (docker/podman exec) so it queries the new size and propagates it
+            // to the container's PTY.
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(self.child.id() as i32),
+                nix::sys::signal::Signal::SIGWINCH,
+            );
         }
     }
 
