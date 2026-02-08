@@ -315,10 +315,17 @@ impl ContainerManager {
                 }
             }
             ImageSource::Compose => {
-                self.set_status(id, DevcContainerStatus::Failed).await?;
-                return Err(CoreError::InvalidState(
-                    "Docker Compose not yet supported".to_string(),
-                ));
+                // Compose builds happen during `compose up`, mark as built
+                tracing::info!("Compose project: skipping standalone build");
+                {
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.image_id = Some("compose".to_string());
+                        cs.status = DevcContainerStatus::Built;
+                    }
+                    state.save()?;
+                }
+                return Ok("compose".to_string());
             }
             ImageSource::None => {
                 self.set_status(id, DevcContainerStatus::Failed).await?;
@@ -545,25 +552,50 @@ fi
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
-        // Stop if running
-        if container_state.status == DevcContainerStatus::Running {
-            if let Some(ref container_id) = container_state.container_id {
+        // Handle compose teardown
+        if let Some(ref compose_project) = container_state.compose_project {
+            let container = Container::from_config(&container_state.config_path)?;
+            if let Some(compose_files) = container.compose_files() {
+                let compose_file_strs: Vec<String> = compose_files
+                    .iter()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .collect();
+                let compose_file_refs: Vec<&str> =
+                    compose_file_strs.iter().map(|s| s.as_str()).collect();
+
                 if let Err(e) = provider
-                    .stop(&ContainerId::new(container_id), Some(10))
+                    .compose_down(
+                        &compose_file_refs,
+                        compose_project,
+                        &container.workspace_path,
+                    )
                     .await
                 {
-                    tracing::warn!("Failed to stop container {}: {}", container_id, e);
+                    tracing::warn!("Failed to run compose down: {}", e);
                 }
             }
-        }
+        } else {
+            // Standard single-container teardown
+            // Stop if running
+            if container_state.status == DevcContainerStatus::Running {
+                if let Some(ref container_id) = container_state.container_id {
+                    if let Err(e) = provider
+                        .stop(&ContainerId::new(container_id), Some(10))
+                        .await
+                    {
+                        tracing::warn!("Failed to stop container {}: {}", container_id, e);
+                    }
+                }
+            }
 
-        // Remove the runtime container if it exists
-        if let Some(ref container_id) = container_state.container_id {
-            if let Err(e) = provider
-                .remove(&ContainerId::new(container_id), true)
-                .await
-            {
-                tracing::warn!("Failed to remove container {}: {}", container_id, e);
+            // Remove the runtime container if it exists
+            if let Some(ref container_id) = container_state.container_id {
+                if let Err(e) = provider
+                    .remove(&ContainerId::new(container_id), true)
+                    .await
+                {
+                    tracing::warn!("Failed to remove container {}: {}", container_id, e);
+                }
             }
         }
 
@@ -572,6 +604,8 @@ fi
             let mut state = self.state.write().await;
             if let Some(cs) = state.get_mut(id) {
                 cs.container_id = None;
+                cs.compose_project = None;
+                cs.compose_service = None;
                 cs.status = if cs.image_id.is_some() {
                     DevcContainerStatus::Built
                 } else {
@@ -835,10 +869,17 @@ fi
                 }
             }
             ImageSource::Compose => {
-                self.set_status(id, DevcContainerStatus::Failed).await?;
-                return Err(CoreError::InvalidState(
-                    "Docker Compose not yet supported".to_string(),
-                ));
+                // Compose builds happen during `compose up`, mark as built
+                let _ = progress.send("Compose project: build will happen during 'up'".to_string());
+                {
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.image_id = Some("compose".to_string());
+                        cs.status = DevcContainerStatus::Built;
+                    }
+                    state.save()?;
+                }
+                return Ok("compose".to_string());
             }
             ImageSource::None => {
                 self.set_status(id, DevcContainerStatus::Failed).await?;
@@ -883,8 +924,8 @@ fi
         };
 
         // Run initializeCommand on host before build
+        let container = Container::from_config(&container_state.config_path)?;
         {
-            let container = Container::from_config(&container_state.config_path)?;
             if let Some(ref cmd) = container.devcontainer.initialize_command {
                 send_progress(progress, "Running initializeCommand on host...");
                 crate::run_host_command(cmd, &container.workspace_path)?;
@@ -892,6 +933,13 @@ fi
             if let Some(ref wait_for) = container.devcontainer.wait_for {
                 tracing::info!("waitFor is set to '{}' (async lifecycle deferral not yet implemented)", wait_for);
             }
+        }
+
+        // Handle Docker Compose projects
+        if container.is_compose() {
+            return self
+                .up_compose(id, &container, provider, progress)
+                .await;
         }
 
         // Build if needed
@@ -913,9 +961,6 @@ fi
             send_progress(progress, "Creating container...");
             self.create(id).await?;
         }
-
-        // Load container config for lifecycle commands
-        let container = Container::from_config(&container_state.config_path)?;
 
         // Get the container ID (re-read state after create may have modified it)
         let container_state = {
@@ -1075,6 +1120,147 @@ fi
             }
         }
 
+        Ok(())
+    }
+
+    /// Handle Docker Compose `up` flow
+    ///
+    /// 1. Run `compose up -d --build` to start all services
+    /// 2. Find the dev service container ID via `compose ps`
+    /// 3. Store compose metadata in state
+    /// 4. Run lifecycle commands targeting the dev service container
+    async fn up_compose(
+        &self,
+        id: &str,
+        container: &Container,
+        provider: &dyn ContainerProvider,
+        progress: Option<&mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
+        let compose_files = container.compose_files().ok_or_else(|| {
+            CoreError::InvalidState("No dockerComposeFile specified".to_string())
+        })?;
+        let service_name = container.compose_service().ok_or_else(|| {
+            CoreError::InvalidState("No service specified for compose project".to_string())
+        })?;
+        let project_name = container.compose_project_name();
+
+        let compose_file_strs: Vec<String> = compose_files
+            .iter()
+            .map(|f| f.to_string_lossy().to_string())
+            .collect();
+        let compose_file_refs: Vec<&str> = compose_file_strs.iter().map(|s| s.as_str()).collect();
+
+        // 1. Run compose up
+        send_progress(progress, "Running docker compose up...");
+        let progress_tx: Option<mpsc::UnboundedSender<String>> = progress.map(|p| {
+            let p = p.clone();
+            let (real_tx, mut real_rx) = mpsc::unbounded_channel::<String>();
+            tokio::spawn(async move {
+                while let Some(msg) = real_rx.recv().await {
+                    let _ = p.send(msg);
+                }
+            });
+            real_tx
+        });
+
+        provider
+            .compose_up(
+                &compose_file_refs,
+                &project_name,
+                &container.workspace_path,
+                progress_tx,
+            )
+            .await?;
+
+        // 2. Find the dev service container ID
+        send_progress(progress, "Finding service container...");
+        let services = provider
+            .compose_ps(&compose_file_refs, &project_name, &container.workspace_path)
+            .await?;
+
+        let dev_service = services
+            .iter()
+            .find(|s| s.service_name == service_name)
+            .ok_or_else(|| {
+                CoreError::InvalidState(format!(
+                    "Service '{}' not found in compose project",
+                    service_name
+                ))
+            })?;
+
+        let container_id = dev_service.container_id.clone();
+
+        // 3. Store compose metadata in state
+        {
+            let mut state = self.state.write().await;
+            if let Some(cs) = state.get_mut(id) {
+                cs.container_id = Some(container_id.0.clone());
+                cs.image_id = Some("compose".to_string());
+                cs.compose_project = Some(project_name.clone());
+                cs.compose_service = Some(service_name.to_string());
+                cs.status = DevcContainerStatus::Running;
+            }
+            state.save()?;
+        }
+
+        // 4. Run lifecycle commands targeting the dev service container
+        let user = container.devcontainer.effective_user();
+        let workspace_folder = container.devcontainer.workspace_folder.as_deref();
+        let remote_env = container.devcontainer.remote_env.as_ref();
+
+        if let Some(ref cmd) = container.devcontainer.on_create_command {
+            send_progress(progress, "Running onCreate command...");
+            run_lifecycle_command_with_env(
+                provider,
+                &container_id,
+                cmd,
+                user,
+                workspace_folder,
+                remote_env,
+            )
+            .await?;
+        }
+
+        if let Some(ref cmd) = container.devcontainer.update_content_command {
+            send_progress(progress, "Running updateContentCommand...");
+            run_lifecycle_command_with_env(
+                provider,
+                &container_id,
+                cmd,
+                user,
+                workspace_folder,
+                remote_env,
+            )
+            .await?;
+        }
+
+        if let Some(ref cmd) = container.devcontainer.post_create_command {
+            send_progress(progress, "Running postCreateCommand...");
+            run_lifecycle_command_with_env(
+                provider,
+                &container_id,
+                cmd,
+                user,
+                workspace_folder,
+                remote_env,
+            )
+            .await?;
+        }
+
+        if let Some(ref cmd) = container.devcontainer.post_start_command {
+            send_progress(progress, "Running postStartCommand...");
+            run_lifecycle_command_with_env(
+                provider,
+                &container_id,
+                cmd,
+                user,
+                workspace_folder,
+                remote_env,
+            )
+            .await?;
+        }
+
+        send_progress(progress, "Compose project started!");
         Ok(())
     }
 
@@ -1323,6 +1509,18 @@ fi
         Ok(())
     }
 
+    /// Load the devcontainer config for a given container state.
+    ///
+    /// This is useful for reading port forwarding configuration, compose files,
+    /// and other settings from the devcontainer.json.
+    pub fn get_devcontainer_config(
+        &self,
+        state: &ContainerState,
+    ) -> Result<devc_config::DevContainerConfig> {
+        let container = Container::from_config(&state.config_path)?;
+        Ok(container.devcontainer)
+    }
+
     /// Discover all devcontainers from the current provider
     /// Includes containers not managed by devc (e.g., VS Code-created)
     pub async fn discover(&self) -> Result<Vec<DiscoveredContainer>> {
@@ -1439,7 +1637,7 @@ fn send_progress(progress: Option<&mpsc::UnboundedSender<String>>, msg: &str) {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use devc_provider::{ContainerStatus, ProviderError, ProviderType};
+    use devc_provider::{ComposeServiceInfo, ContainerStatus, ProviderError, ProviderType};
 
     /// Create a test workspace with a devcontainer.json that uses an image
     fn create_test_workspace() -> tempfile::TempDir {
@@ -1658,7 +1856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_compose_unsupported() {
+    async fn test_build_compose_skips_build() {
         let workspace = create_test_workspace();
         // Write a compose-based devcontainer.json
         std::fs::write(
@@ -1668,6 +1866,7 @@ mod tests {
         .unwrap();
 
         let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
         let mut state = StateStore::new();
         let cs = make_container_state(
             workspace.path(),
@@ -1680,9 +1879,18 @@ mod tests {
 
         let mgr = test_manager_with_state(mock, state);
         let result = mgr.build(&id).await;
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("Compose"));
+        assert!(result.is_ok(), "Compose build should succeed (skip)");
+        assert_eq!(result.unwrap(), "compose");
+
+        // Status should be Built
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.status, DevcContainerStatus::Built);
+        assert_eq!(cs.image_id, Some("compose".to_string()));
+
+        // Should NOT have called any provider build/pull
+        let recorded = calls.lock().unwrap();
+        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Build { .. })));
+        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Pull { .. })));
     }
 
     #[tokio::test]
@@ -2325,5 +2533,131 @@ mod tests {
         let mgr = test_manager(mock);
         let result = mgr.get("nonexistent-id").await.unwrap();
         assert!(result.is_none());
+    }
+
+    // ==================== Compose ====================
+
+    #[tokio::test]
+    async fn test_up_compose_calls_compose_up() {
+        let workspace = create_test_workspace();
+        // Write a compose-based devcontainer.json
+        std::fs::write(
+            workspace.path().join(".devcontainer/devcontainer.json"),
+            r#"{"dockerComposeFile": "docker-compose.yml", "service": "app", "workspaceFolder": "/workspace"}"#,
+        )
+        .unwrap();
+        // Create a dummy compose file (content doesn't matter for mock)
+        std::fs::write(
+            workspace.path().join(".devcontainer/docker-compose.yml"),
+            "version: '3'\nservices:\n  app:\n    image: ubuntu:22.04\n",
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+        // compose_ps returns a service entry
+        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
+            service_name: "app".to_string(),
+            container_id: ContainerId::new("compose_container_123"),
+            status: ContainerStatus::Running,
+        }]);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.up(&id).await.unwrap();
+
+        // Verify compose_up was called
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposeUp { .. })));
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposePs { .. })));
+
+        // Verify state was updated with compose metadata
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.container_id, Some("compose_container_123".to_string()));
+        assert!(cs.compose_project.as_ref().unwrap().starts_with("devc-"));
+        assert_eq!(cs.compose_service, Some("app".to_string()));
+        assert_eq!(cs.status, DevcContainerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_down_compose_calls_compose_down() {
+        let workspace = create_test_workspace();
+        // Write a compose-based devcontainer.json
+        std::fs::write(
+            workspace.path().join(".devcontainer/devcontainer.json"),
+            r#"{"dockerComposeFile": "docker-compose.yml", "service": "app"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.path().join(".devcontainer/docker-compose.yml"),
+            "version: '3'\nservices:\n  app:\n    image: ubuntu:22.04\n",
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("compose"),
+            Some("compose_container_123"),
+        );
+        cs.compose_project = Some("devc-test".to_string());
+        cs.compose_service = Some("app".to_string());
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.down(&id).await.unwrap();
+
+        // Verify compose_down was called
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposeDown { .. })));
+        // Should NOT call individual stop/remove
+        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
+        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })));
+
+        // State should be cleaned up
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert!(cs.container_id.is_none());
+        assert!(cs.compose_project.is_none());
+        assert!(cs.compose_service.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_down_non_compose_uses_stop_remove() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.down(&id).await.unwrap();
+
+        // Should call stop + remove, NOT compose_down
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })));
+        assert!(!recorded.iter().any(|c| matches!(c, MockCall::ComposeDown { .. })));
     }
 }

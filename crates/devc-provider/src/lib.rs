@@ -82,6 +82,12 @@ pub trait ContainerProvider: Send + Sync {
     /// Get provider information
     fn info(&self) -> ProviderInfo;
 
+    /// Get resource usage stats for one or more containers
+    ///
+    /// Returns stats for all requested containers. Containers that are not running
+    /// or cannot provide stats are silently skipped.
+    async fn stats(&self, ids: &[&ContainerId]) -> Result<Vec<ContainerStats>>;
+
     /// Discover all devcontainers (including those not managed by devc)
     /// Returns containers with devcontainer-related labels or mounts
     async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>>;
@@ -101,6 +107,31 @@ pub trait ContainerProvider: Send + Sync {
         src: &str,
         dest: &std::path::Path,
     ) -> Result<()>;
+
+    /// Start services defined in Docker Compose files
+    async fn compose_up(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &std::path::Path,
+        progress: Option<mpsc::UnboundedSender<String>>,
+    ) -> Result<()>;
+
+    /// Stop and remove services defined in Docker Compose files
+    async fn compose_down(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &std::path::Path,
+    ) -> Result<()>;
+
+    /// List services in a Docker Compose project
+    async fn compose_ps(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &std::path::Path,
+    ) -> Result<Vec<ComposeServiceInfo>>;
 }
 
 /// Interactive exec stream with stdin/stdout/stderr
@@ -162,8 +193,14 @@ pub async fn detect_available_providers(
 
 /// Check if we're running inside a Fedora Toolbox or similar container
 #[cfg(target_os = "linux")]
-fn is_in_toolbox() -> bool {
+pub fn is_in_toolbox() -> bool {
     std::path::Path::new("/run/.containerenv").exists()
+}
+
+/// Non-Linux stub: never in a toolbox
+#[cfg(not(target_os = "linux"))]
+pub fn is_in_toolbox() -> bool {
+    false
 }
 
 /// Create the default provider based on global config

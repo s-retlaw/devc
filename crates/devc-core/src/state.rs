@@ -36,6 +36,12 @@ pub struct ContainerState {
     /// Additional metadata
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+    /// Docker Compose project name (if this container uses compose)
+    #[serde(default)]
+    pub compose_project: Option<String>,
+    /// Docker Compose service name (if this container uses compose)
+    #[serde(default)]
+    pub compose_service: Option<String>,
 }
 
 /// devc container status (separate from Docker status)
@@ -216,6 +222,8 @@ impl ContainerState {
             last_used: now,
             workspace_path,
             metadata: HashMap::new(),
+            compose_project: None,
+            compose_service: None,
         }
     }
 

@@ -20,7 +20,7 @@ test:
 
 # Run e2e tests (requires Docker or Podman)
 test-e2e:
-    cargo nextest run --profile e2e -p devc-core -p devc-provider --run-ignored ignored-only
+    cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
 
 # Run all tests including e2e
 test-all:

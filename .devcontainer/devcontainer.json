@@ -1,9 +1,18 @@
 {
     "name": "devc",
-    "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
-    "features": {
-        "ghcr.io/devcontainers/features/git:1": {}
+    "build": {
+        "dockerfile": "Dockerfile"
     },
+    "features": {
+        // Docker-in-Docker: installs Docker Engine + starts dockerd on boot
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "dockerDashComposeVersion": "v2"
+        }
+    },
+
+    // Privileged is needed for Docker-in-Docker and Podman-in-container
+    "privileged": true,
+
     "customizations": {
         "vscode": {
             "extensions": [
@@ -14,6 +23,9 @@
             ]
         }
     },
+
+    // Pre-fetch crate dependencies after container creation
     "postCreateCommand": "cargo fetch",
+
     "remoteUser": "vscode"
 }

@@ -57,6 +57,9 @@ pub struct DevContainerConfig {
     /// App ports (ports that are always forwarded)
     pub app_port: Option<IntOrArray>,
 
+    /// Per-port attributes (label, protocol, onAutoForward)
+    pub ports_attributes: Option<HashMap<String, PortAttributesEntry>>,
+
     // Lifecycle commands
     /// Command to run after container is created
     pub post_create_command: Option<Command>,
@@ -385,6 +388,94 @@ impl DevContainerConfig {
         ports
     }
 
+    /// Get auto-forward configuration for ports declared in the devcontainer config.
+    ///
+    /// Returns a list of `PortForwardConfig` from `forwardPorts`, `appPort`, and `portsAttributes`:
+    /// - `forwardPorts` numeric entries default to `Notify`
+    /// - `forwardPorts` object entries map `onAutoForward` to the enum, carrying label/protocol
+    /// - `appPort` entries always use `Silent` (always forwarded quietly)
+    /// - `portsAttributes` entries override/supplement label, protocol, and action
+    pub fn auto_forward_config(&self) -> Vec<PortForwardConfig> {
+        let mut result = Vec::new();
+
+        if let Some(ref forward) = self.forward_ports {
+            for mapping in forward {
+                match mapping {
+                    PortMapping::Number(p) => {
+                        result.push(PortForwardConfig {
+                            port: *p,
+                            action: AutoForwardAction::Notify,
+                            label: None,
+                            protocol: None,
+                        });
+                    }
+                    PortMapping::Object(obj) => {
+                        result.push(PortForwardConfig {
+                            port: obj.port,
+                            action: parse_auto_forward_action(obj.on_auto_forward.as_deref()),
+                            label: obj.label.clone(),
+                            protocol: obj.protocol.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(ref app) = self.app_port {
+            match app {
+                IntOrArray::Int(p) => {
+                    result.push(PortForwardConfig {
+                        port: *p,
+                        action: AutoForwardAction::Silent,
+                        label: None,
+                        protocol: None,
+                    });
+                }
+                IntOrArray::Array(arr) => {
+                    for p in arr {
+                        result.push(PortForwardConfig {
+                            port: *p,
+                            action: AutoForwardAction::Silent,
+                            label: None,
+                            protocol: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Merge portsAttributes overrides
+        if let Some(ref attrs) = self.ports_attributes {
+            for (key, entry) in attrs {
+                let port: u16 = match key.parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if let Some(existing) = result.iter_mut().find(|c| c.port == port) {
+                    if let Some(ref label) = entry.label {
+                        existing.label = Some(label.clone());
+                    }
+                    if let Some(ref protocol) = entry.protocol {
+                        existing.protocol = Some(protocol.clone());
+                    }
+                    if entry.on_auto_forward.is_some() {
+                        existing.action =
+                            parse_auto_forward_action(entry.on_auto_forward.as_deref());
+                    }
+                } else {
+                    result.push(PortForwardConfig {
+                        port,
+                        action: parse_auto_forward_action(entry.on_auto_forward.as_deref()),
+                        label: entry.label.clone(),
+                        protocol: entry.protocol.clone(),
+                    });
+                }
+            }
+        }
+
+        result
+    }
+
     /// Apply variable substitution to all string fields that support it
     pub fn substitute_variables(&mut self, ctx: &crate::SubstitutionContext) {
         use crate::substitute::{substitute, substitute_map, substitute_opt, substitute_vec};
@@ -458,6 +549,50 @@ impl DevContainerConfig {
         if let Some(ref mut cmd) = self.post_attach_command {
             substitute_command(cmd, ctx);
         }
+    }
+}
+
+/// Action to take when a port is auto-forwarded
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoForwardAction {
+    /// Notify the user when the port is forwarded
+    Notify,
+    /// Forward silently without notification
+    Silent,
+    /// Do not auto-forward this port
+    Ignore,
+    /// Open in browser after forwarding (every time)
+    OpenBrowser,
+    /// Open in browser after forwarding (only the first time)
+    OpenBrowserOnce,
+}
+
+/// Configuration for a single auto-forwarded port
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortForwardConfig {
+    pub port: u16,
+    pub action: AutoForwardAction,
+    pub label: Option<String>,
+    pub protocol: Option<String>,
+}
+
+/// Attributes for a port from the `portsAttributes` field
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PortAttributesEntry {
+    pub label: Option<String>,
+    pub protocol: Option<String>,
+    pub on_auto_forward: Option<String>,
+}
+
+/// Parse an `onAutoForward` string into an `AutoForwardAction`.
+fn parse_auto_forward_action(value: Option<&str>) -> AutoForwardAction {
+    match value {
+        Some("silent") => AutoForwardAction::Silent,
+        Some("ignore") => AutoForwardAction::Ignore,
+        Some("openBrowser") => AutoForwardAction::OpenBrowser,
+        Some("openBrowserOnce") => AutoForwardAction::OpenBrowserOnce,
+        _ => AutoForwardAction::Notify,
     }
 }
 
@@ -655,6 +790,149 @@ mod tests {
         let json = r#"{"image": "ubuntu:22.04", "overrideCommand": false}"#;
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.override_command, Some(false));
+    }
+
+    /// Helper to build a PortForwardConfig concisely in tests
+    fn pfc(port: u16, action: AutoForwardAction, label: Option<&str>, protocol: Option<&str>) -> PortForwardConfig {
+        PortForwardConfig {
+            port,
+            action,
+            label: label.map(String::from),
+            protocol: protocol.map(String::from),
+        }
+    }
+
+    #[test]
+    fn test_auto_forward_config_numeric_ports() {
+        let json = r#"{"forwardPorts": [3000, 8080]}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 2);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Notify, None, None));
+        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::Notify, None, None));
+    }
+
+    #[test]
+    fn test_auto_forward_config_object_ports() {
+        let json = r#"{"forwardPorts": [
+            {"port": 3000, "onAutoForward": "silent"},
+            {"port": 8080, "onAutoForward": "ignore"},
+            {"port": 9090, "onAutoForward": "notify"}
+        ]}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 3);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Silent, None, None));
+        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::Ignore, None, None));
+        assert_eq!(fwd[2], pfc(9090, AutoForwardAction::Notify, None, None));
+    }
+
+    #[test]
+    fn test_auto_forward_config_app_port() {
+        let json = r#"{"appPort": [4000, 5000]}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 2);
+        assert_eq!(fwd[0], pfc(4000, AutoForwardAction::Silent, None, None));
+        assert_eq!(fwd[1], pfc(5000, AutoForwardAction::Silent, None, None));
+    }
+
+    #[test]
+    fn test_auto_forward_config_app_port_single() {
+        let json = r#"{"appPort": 3000}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 1);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Silent, None, None));
+    }
+
+    #[test]
+    fn test_auto_forward_config_combined() {
+        let json = r#"{"forwardPorts": [3000], "appPort": 8080}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 2);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Notify, None, None));
+        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::Silent, None, None));
+    }
+
+    #[test]
+    fn test_auto_forward_config_empty() {
+        let json = r#"{"image": "ubuntu:22.04"}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert!(fwd.is_empty());
+    }
+
+    #[test]
+    fn test_auto_forward_config_open_browser() {
+        let json = r#"{"forwardPorts": [
+            {"port": 3000, "onAutoForward": "openBrowser"},
+            {"port": 8080, "onAutoForward": "openBrowserOnce"}
+        ]}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 2);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::OpenBrowser, None, None));
+        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::OpenBrowserOnce, None, None));
+    }
+
+    #[test]
+    fn test_auto_forward_config_label_and_protocol() {
+        let json = r#"{"forwardPorts": [
+            {"port": 3000, "label": "App", "protocol": "https"},
+            {"port": 8080, "label": "API"}
+        ]}"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 2);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Notify, Some("App"), Some("https")));
+        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::Notify, Some("API"), None));
+    }
+
+    #[test]
+    fn test_ports_attributes_merges_existing() {
+        let json = r#"{
+            "forwardPorts": [3000, 8080],
+            "portsAttributes": {
+                "3000": {"label": "Frontend", "protocol": "https", "onAutoForward": "silent"},
+                "8080": {"label": "Backend"}
+            }
+        }"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 2);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Silent, Some("Frontend"), Some("https")));
+        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::Notify, Some("Backend"), None));
+    }
+
+    #[test]
+    fn test_ports_attributes_adds_new_port() {
+        let json = r#"{
+            "forwardPorts": [3000],
+            "portsAttributes": {
+                "9090": {"label": "Metrics", "onAutoForward": "openBrowser"}
+            }
+        }"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 2);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Notify, None, None));
+        assert_eq!(fwd[1], pfc(9090, AutoForwardAction::OpenBrowser, Some("Metrics"), None));
+    }
+
+    #[test]
+    fn test_ports_attributes_overrides_forward_ports_label() {
+        let json = r#"{
+            "forwardPorts": [{"port": 3000, "label": "Old Label"}],
+            "portsAttributes": {
+                "3000": {"label": "New Label"}
+            }
+        }"#;
+        let config: DevContainerConfig = serde_json::from_str(json).unwrap();
+        let fwd = config.auto_forward_config();
+        assert_eq!(fwd.len(), 1);
+        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Notify, Some("New Label"), None));
     }
 
     #[test]

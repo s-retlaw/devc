@@ -7,10 +7,10 @@
 //! - Works with Docker alternatives (Colima, Rancher, Lima, OrbStack)
 
 use crate::{
-    BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider, ContainerStatus,
-    CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig, ExecResult,
-    ExecStream, ImageId, LogConfig, LogStream, MountInfo, MountType, NetworkInfo, NetworkSettings,
-    PortInfo, ProviderError, ProviderInfo, ProviderType, Result,
+    BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider, ContainerStats,
+    ContainerStatus, CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig,
+    ExecResult, ExecStream, ImageId, LogConfig, LogStream, MountInfo, MountType, NetworkInfo,
+    NetworkSettings, PortInfo, ProviderError, ProviderInfo, ProviderType, Result,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -803,6 +803,277 @@ impl ContainerProvider for CliProvider {
         Ok(())
     }
 
+    async fn stats(&self, ids: &[&ContainerId]) -> Result<Vec<ContainerStats>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut args = vec!["stats", "--no-stream", "--no-trunc", "--format={{json .}}"];
+        let id_strings: Vec<&str> = ids.iter().map(|id| id.0.as_str()).collect();
+        args.extend(id_strings);
+
+        let output = match self.run_cmd(&args).await {
+            Ok(out) => out,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let mut results = Vec::new();
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                // ID field: Docker uses "ID", Podman uses "ContainerID"
+                let id_str = parsed["ID"]
+                    .as_str()
+                    .or_else(|| parsed["ContainerID"].as_str())
+                    .or_else(|| parsed["id"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                // CPU: Docker has "CPUPerc" as string "0.50%", Podman has "CPU" as float
+                let cpu = parsed["CPUPerc"]
+                    .as_str()
+                    .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok())
+                    .or_else(|| parsed["CPU"].as_f64())
+                    .unwrap_or(0.0);
+
+                // MemPerc: Docker has string "1.23%", Podman has float
+                let mem_percent = parsed["MemPerc"]
+                    .as_str()
+                    .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok())
+                    .or_else(|| parsed["MemPerc"].as_f64())
+                    .unwrap_or(0.0);
+
+                // MemUsage: Docker has string "123MiB / 456GiB", Podman has integer (bytes)
+                // MemLimit: Podman has integer (bytes), Docker encodes it in MemUsage string
+                let (mem_usage, mem_limit) = if let Some(s) = parsed["MemUsage"].as_str() {
+                    // Docker format: "123.4MiB / 7.8GiB"
+                    parse_mem_usage(s)
+                } else {
+                    // Podman format: MemUsage and MemLimit are separate integer fields (bytes)
+                    let usage = parsed["MemUsage"].as_u64().unwrap_or(0);
+                    let limit = parsed["MemLimit"].as_u64().unwrap_or(0);
+                    (usage, limit)
+                };
+
+                // PIDs: Docker has string "1", Podman has integer 1
+                let pids = parsed["PIDs"]
+                    .as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .or_else(|| parsed["PIDs"].as_u64())
+                    .unwrap_or(0);
+
+                // Network I/O: Docker has "NetIO" string "648B / 0B",
+                // Podman has "Network" object with per-interface rx/tx bytes
+                let (net_rx, net_tx) = if let Some(s) = parsed["NetIO"].as_str() {
+                    parse_mem_usage(s) // same "X / Y" format
+                } else if let Some(net) = parsed["Network"].as_object() {
+                    // Podman: sum across all interfaces
+                    let mut rx = 0u64;
+                    let mut tx = 0u64;
+                    for (_iface, stats) in net {
+                        rx += stats["RxBytes"].as_u64().unwrap_or(0);
+                        tx += stats["TxBytes"].as_u64().unwrap_or(0);
+                    }
+                    (rx, tx)
+                } else {
+                    (0, 0)
+                };
+
+                // Block I/O: Docker has "BlockIO" string "0B / 0B",
+                // Podman has "BlockInput"/"BlockOutput" integers
+                let (block_read, block_write) = if let Some(s) = parsed["BlockIO"].as_str() {
+                    parse_mem_usage(s)
+                } else {
+                    let read = parsed["BlockInput"].as_u64().unwrap_or(0);
+                    let write = parsed["BlockOutput"].as_u64().unwrap_or(0);
+                    (read, write)
+                };
+
+                results.push(ContainerStats {
+                    id: ContainerId::new(id_str),
+                    cpu_percent: cpu,
+                    memory_usage: mem_usage,
+                    memory_limit: mem_limit,
+                    memory_percent: mem_percent,
+                    pids,
+                    net_rx,
+                    net_tx,
+                    block_read,
+                    block_write,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    async fn compose_up(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &Path,
+        progress: Option<mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
+        let mut cmd = self.build_command();
+        cmd.arg("compose");
+        for f in compose_files {
+            cmd.arg("-f").arg(f);
+        }
+        cmd.arg("-p").arg(project_name);
+        cmd.args(["up", "-d", "--build"]);
+        cmd.current_dir(project_dir);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
+
+        if let Some(stderr) = child.stderr.take() {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(ref tx) = progress {
+                    let _ = tx.send(line);
+                }
+            }
+        }
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
+
+        if !status.success() {
+            return Err(ProviderError::RuntimeError(
+                "docker compose up failed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn compose_down(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &Path,
+    ) -> Result<()> {
+        let mut args = vec!["compose".to_string()];
+        for f in compose_files {
+            args.push("-f".to_string());
+            args.push(f.to_string());
+        }
+        args.push("-p".to_string());
+        args.push(project_name.to_string());
+        args.push("down".to_string());
+
+        let mut cmd = self.build_command();
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        cmd.current_dir(project_dir);
+
+        let output = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ProviderError::RuntimeError(format!(
+                "docker compose down failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn compose_ps(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &Path,
+    ) -> Result<Vec<crate::ComposeServiceInfo>> {
+        let mut args = vec!["compose".to_string()];
+        for f in compose_files {
+            args.push("-f".to_string());
+            args.push(f.to_string());
+        }
+        args.push("-p".to_string());
+        args.push(project_name.to_string());
+        args.push("ps".to_string());
+        args.push("--format=json".to_string());
+
+        let mut cmd = self.build_command();
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        cmd.current_dir(project_dir);
+
+        let output = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ProviderError::RuntimeError(format!(
+                "docker compose ps failed: {}",
+                stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut services = Vec::new();
+
+        // Try parsing as a JSON array first (podman-compose format),
+        // then fall back to one-JSON-object-per-line (docker compose format).
+        let entries: Vec<serde_json::Value> =
+            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(stdout.trim()) {
+                arr
+            } else {
+                stdout
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+                    .collect()
+            };
+
+        for parsed in entries {
+            // Docker compose uses "Service"; podman-compose stores it in labels
+            let service_name = parsed["Service"]
+                .as_str()
+                .or_else(|| parsed["Labels"]["com.docker.compose.service"].as_str())
+                .unwrap_or("")
+                .to_string();
+            // Docker compose uses "ID"; podman-compose uses "Id"
+            let container_id = parsed["ID"]
+                .as_str()
+                .or_else(|| parsed["Id"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let state = parsed["State"]
+                .as_str()
+                .unwrap_or("unknown");
+
+            services.push(crate::ComposeServiceInfo {
+                service_name,
+                container_id: ContainerId::new(container_id),
+                status: ContainerStatus::from(state),
+            });
+        }
+
+        Ok(services)
+    }
+
     async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>> {
         // List ALL containers with detailed format including labels
         let format = "--format={{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Labels}}";
@@ -842,6 +1113,48 @@ impl ContainerProvider for CliProvider {
 
         Ok(discovered)
     }
+}
+
+/// Parse memory usage string from `docker stats` output (e.g., "123.4MiB / 7.8GiB")
+fn parse_mem_usage(s: &str) -> (u64, u64) {
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.len() == 2 {
+        (
+            parse_size_str(parts[0].trim()),
+            parse_size_str(parts[1].trim()),
+        )
+    } else {
+        (0, 0)
+    }
+}
+
+/// Parse a size string like "123.4MiB", "7.8GiB", "500KiB", "1024B"
+fn parse_size_str(s: &str) -> u64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+
+    // Try each suffix from longest to shortest
+    let suffixes: &[(&str, f64)] = &[
+        ("GiB", 1024.0 * 1024.0 * 1024.0),
+        ("MiB", 1024.0 * 1024.0),
+        ("KiB", 1024.0),
+        ("GB", 1_000_000_000.0),
+        ("MB", 1_000_000.0),
+        ("KB", 1_000.0),
+        ("B", 1.0),
+    ];
+
+    for (suffix, multiplier) in suffixes {
+        if let Some(num_str) = s.strip_suffix(suffix) {
+            if let Ok(num) = num_str.trim().parse::<f64>() {
+                return (num * multiplier) as u64;
+            }
+        }
+    }
+
+    0
 }
 
 /// Parse CLI labels format "key=value,key2=value2" into HashMap
@@ -917,6 +1230,47 @@ mod tests {
         let labels = parse_cli_labels("key=a=b,other=c");
         assert_eq!(labels.get("key").unwrap(), "a=b");
         assert_eq!(labels.get("other").unwrap(), "c");
+    }
+
+    // ==================== parse_mem_usage / parse_size_str tests ====================
+
+    #[test]
+    fn test_parse_size_str_gib() {
+        assert_eq!(parse_size_str("7.8GiB"), (7.8 * 1024.0 * 1024.0 * 1024.0) as u64);
+    }
+
+    #[test]
+    fn test_parse_size_str_mib() {
+        assert_eq!(parse_size_str("123.4MiB"), (123.4 * 1024.0 * 1024.0) as u64);
+    }
+
+    #[test]
+    fn test_parse_size_str_kib() {
+        assert_eq!(parse_size_str("512KiB"), (512.0 * 1024.0) as u64);
+    }
+
+    #[test]
+    fn test_parse_size_str_bytes() {
+        assert_eq!(parse_size_str("1024B"), 1024);
+    }
+
+    #[test]
+    fn test_parse_size_str_empty() {
+        assert_eq!(parse_size_str(""), 0);
+    }
+
+    #[test]
+    fn test_parse_mem_usage_standard() {
+        let (usage, limit) = parse_mem_usage("123.4MiB / 7.8GiB");
+        assert_eq!(usage, (123.4 * 1024.0 * 1024.0) as u64);
+        assert_eq!(limit, (7.8 * 1024.0 * 1024.0 * 1024.0) as u64);
+    }
+
+    #[test]
+    fn test_parse_mem_usage_invalid() {
+        let (usage, limit) = parse_mem_usage("garbage");
+        assert_eq!(usage, 0);
+        assert_eq!(limit, 0);
     }
 
     // ==================== detect_devcontainer_source tests ====================

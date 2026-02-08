@@ -299,6 +299,8 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         Cell::from(" "),
         Cell::from("Name"),
         Cell::from("Status"),
+        Cell::from("CPU"),
+        Cell::from("Mem"),
         Cell::from("Provider"),
         Cell::from("Workspace"),
     ])
@@ -346,10 +348,20 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                 container.name.to_string()
             };
 
+            // Get stats for running containers
+            let (cpu_display, mem_display) = container
+                .container_id
+                .as_ref()
+                .and_then(|cid| app.container_stats.get(cid))
+                .map(|s| (s.cpu_display(), s.memory_display()))
+                .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
                 Cell::from(name_display).style(Style::default().bold()),
                 Cell::from(container.status.to_string()).style(Style::default().fg(status_color)),
+                Cell::from(cpu_display),
+                Cell::from(mem_display),
                 Cell::from(container.provider.to_string()),
                 Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
             ])
@@ -359,10 +371,12 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     // Define column widths
     let widths = [
         Constraint::Length(3),   // Status icon
-        Constraint::Length(22),  // Name
+        Constraint::Length(20),  // Name
         Constraint::Length(12),  // Status
-        Constraint::Length(10),  // Provider
-        Constraint::Min(20),     // Workspace (takes remaining)
+        Constraint::Length(7),   // CPU
+        Constraint::Length(15),  // Mem
+        Constraint::Length(8),   // Provider
+        Constraint::Min(10),     // Workspace (takes remaining)
     ];
 
     let table = Table::new(rows, widths)
@@ -802,7 +816,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         DevcContainerStatus::Configured => Color::DarkGray,
     };
 
-    let text = vec![
+    let mut text = vec![
         Line::from(vec![
             Span::raw("Name:        "),
             Span::styled(&container.name, Style::default().bold()),
@@ -850,6 +864,31 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(container.last_used.format("%Y-%m-%d %H:%M:%S").to_string()),
         ]),
     ];
+
+    // Add resource stats if available
+    if let Some(stats) = container.container_id.as_ref().and_then(|cid| app.container_stats.get(cid)) {
+        text.push(Line::from(""));
+        text.push(Line::from(vec![
+            Span::raw("CPU:         "),
+            Span::raw(stats.cpu_display()),
+        ]));
+        text.push(Line::from(vec![
+            Span::raw("Memory:      "),
+            Span::raw(format!("{} ({:.1}%)", stats.memory_display(), stats.memory_percent)),
+        ]));
+        text.push(Line::from(vec![
+            Span::raw("PIDs:        "),
+            Span::raw(stats.pids.to_string()),
+        ]));
+        text.push(Line::from(vec![
+            Span::raw("Net I/O:     "),
+            Span::raw(stats.net_io_display()),
+        ]));
+        text.push(Line::from(vec![
+            Span::raw("Block I/O:   "),
+            Span::raw(stats.block_io_display()),
+        ]));
+    }
 
     let detail = Paragraph::new(text)
         .block(
@@ -1077,11 +1116,21 @@ fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Build table rows
+    let container_id_for_auto = app.ports_provider_container_id.clone();
+    let auto_configs = container_id_for_auto
+        .as_ref()
+        .and_then(|cid| app.auto_forward_configs.get(cid));
     let rows: Vec<Row> = app
         .detected_ports
         .iter()
         .map(|port| {
-            let status = if port.is_forwarded {
+            let is_auto = container_id_for_auto
+                .as_ref()
+                .map(|cid| app.auto_forwarded_ports.contains(&(cid.clone(), port.port)))
+                .unwrap_or(false);
+            let status = if port.is_forwarded && is_auto {
+                "● Forwarded [auto]"
+            } else if port.is_forwarded {
                 "● Forwarded"
             } else {
                 "○ Detected"
@@ -1094,6 +1143,16 @@ fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
             let new_marker = if port.is_new { " [NEW]" } else { "" };
             let process = port.process.as_deref().unwrap_or("-");
 
+            // Look up label from auto_forward_configs
+            let label = auto_configs.and_then(|configs| {
+                configs.iter().find(|c| c.port == port.port).and_then(|c| c.label.as_deref())
+            });
+            let port_cell = if let Some(label) = label {
+                format!("{} ({})", port.port, label)
+            } else {
+                port.port.to_string()
+            };
+
             let style = if port.is_forwarded {
                 Style::default().fg(Color::Green)
             } else {
@@ -1101,7 +1160,7 @@ fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             Row::new(vec![
-                Cell::from(port.port.to_string()),
+                Cell::from(port_cell),
                 Cell::from(status),
                 Cell::from(local),
                 Cell::from(format!("{}{}", process, new_marker)),
@@ -1124,8 +1183,8 @@ fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
     .bottom_margin(1);
 
     let widths = [
-        Constraint::Length(8),
-        Constraint::Length(14),
+        Constraint::Length(20),
+        Constraint::Length(20),
         Constraint::Length(18),
         Constraint::Min(10),
     ];

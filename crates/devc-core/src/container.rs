@@ -194,7 +194,7 @@ impl Container {
             }
             ImageSource::Compose => {
                 return Err(CoreError::InvalidState(
-                    "Docker Compose not yet supported".to_string(),
+                    "Cannot build standalone image for Compose project (use 'up' instead)".to_string(),
                 ));
             }
             ImageSource::None => {
@@ -384,6 +384,42 @@ impl Container {
     pub fn shell_config(&self) -> ExecConfig {
         let shell = self.global_config.defaults.shell.clone();
         self.exec_config(vec![shell], true, true)
+    }
+
+    /// Check if this container uses Docker Compose
+    pub fn is_compose(&self) -> bool {
+        matches!(self.devcontainer.image_source(), ImageSource::Compose)
+    }
+
+    /// Get the compose service name (the dev container service)
+    pub fn compose_service(&self) -> Option<&str> {
+        self.devcontainer.service.as_deref()
+    }
+
+    /// Get compose project name for Docker Compose
+    pub fn compose_project_name(&self) -> String {
+        format!("devc-{}", self.name)
+    }
+
+    /// Resolve compose file paths relative to the config directory
+    pub fn compose_files(&self) -> Option<Vec<PathBuf>> {
+        let compose_ref = self.devcontainer.docker_compose_file.as_ref()?;
+        let config_dir = self
+            .config_path
+            .parent()
+            .unwrap_or(Path::new("."));
+
+        let files: Vec<String> = match compose_ref {
+            devc_config::StringOrArray::String(s) => vec![s.clone()],
+            devc_config::StringOrArray::Array(arr) => arr.clone(),
+        };
+
+        Some(
+            files
+                .iter()
+                .map(|f| config_dir.join(f))
+                .collect(),
+        )
     }
 }
 
@@ -791,6 +827,80 @@ mod tests {
         assert_eq!(create.env.get("COLORTERM").unwrap(), "truecolor");
         assert_eq!(create.env.get("LANG").unwrap(), "C.UTF-8");
         assert_eq!(create.env.get("LC_ALL").unwrap(), "C.UTF-8");
+    }
+
+    #[test]
+    fn test_is_compose() {
+        let config = DevContainerConfig {
+            docker_compose_file: Some(devc_config::StringOrArray::String(
+                "docker-compose.yml".to_string(),
+            )),
+            service: Some("app".to_string()),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        assert!(container.is_compose());
+        assert_eq!(container.compose_service(), Some("app"));
+        assert_eq!(container.compose_project_name(), "devc-test");
+    }
+
+    #[test]
+    fn test_is_not_compose() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        assert!(!container.is_compose());
+        assert!(container.compose_service().is_none());
+        assert!(container.compose_files().is_none());
+    }
+
+    #[test]
+    fn test_compose_files_resolution() {
+        let config = DevContainerConfig {
+            docker_compose_file: Some(devc_config::StringOrArray::Array(vec![
+                "docker-compose.yml".to_string(),
+                "docker-compose.dev.yml".to_string(),
+            ])),
+            service: Some("app".to_string()),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let files = container.compose_files().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files[0],
+            PathBuf::from("/tmp/test/.devcontainer/docker-compose.yml")
+        );
+        assert_eq!(
+            files[1],
+            PathBuf::from("/tmp/test/.devcontainer/docker-compose.dev.yml")
+        );
     }
 
     #[test]

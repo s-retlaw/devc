@@ -48,6 +48,8 @@ impl DemoApp {
                 last_used: now - chrono::Duration::hours(2),
                 workspace_path: PathBuf::from("/home/user/projects/rust-app"),
                 metadata: Default::default(),
+                compose_project: None,
+                compose_service: None,
             },
             ContainerState {
                 id: "def456ghi789".to_string(),
@@ -61,6 +63,8 @@ impl DemoApp {
                 last_used: now - chrono::Duration::days(1),
                 workspace_path: PathBuf::from("/home/user/projects/api"),
                 metadata: Default::default(),
+                compose_project: None,
+                compose_service: None,
             },
             ContainerState {
                 id: "ghi789jkl012".to_string(),
@@ -74,6 +78,8 @@ impl DemoApp {
                 last_used: now,
                 workspace_path: PathBuf::from("/home/user/projects/frontend"),
                 metadata: Default::default(),
+                compose_project: None,
+                compose_service: None,
             },
             ContainerState {
                 id: "jkl012mno345".to_string(),
@@ -87,6 +93,8 @@ impl DemoApp {
                 last_used: now - chrono::Duration::hours(12),
                 workspace_path: PathBuf::from("/home/user/projects/db"),
                 metadata: Default::default(),
+                compose_project: None,
+                compose_service: None,
             },
         ];
 

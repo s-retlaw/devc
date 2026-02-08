@@ -423,6 +423,52 @@ mod tests {
     }
 
     #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(500), "500B");
+        assert_eq!(format_bytes(1024), "1.0K");
+        assert_eq!(format_bytes(1536), "1.5K");
+        assert_eq!(format_bytes(1048576), "1.0M");
+        assert_eq!(format_bytes(1073741824), "1.0G");
+        assert_eq!(format_bytes(1610612736), "1.5G");
+        assert_eq!(format_bytes(8589934592), "8.0G");
+    }
+
+    #[test]
+    fn test_container_stats_cpu_display() {
+        let stats = ContainerStats {
+            id: ContainerId::new("test"),
+            cpu_percent: 45.678,
+            memory_usage: 0,
+            memory_limit: 0,
+            memory_percent: 0.0,
+            pids: 0,
+            net_rx: 0,
+            net_tx: 0,
+            block_read: 0,
+            block_write: 0,
+        };
+        assert_eq!(stats.cpu_display(), "45.7%");
+    }
+
+    #[test]
+    fn test_container_stats_memory_display() {
+        let stats = ContainerStats {
+            id: ContainerId::new("test"),
+            cpu_percent: 0.0,
+            memory_usage: 134217728, // 128M
+            memory_limit: 8589934592, // 8G
+            memory_percent: 1.56,
+            pids: 0,
+            net_rx: 0,
+            net_tx: 0,
+            block_read: 0,
+            block_write: 0,
+        };
+        assert_eq!(stats.memory_display(), "128.0M / 8.0G");
+    }
+
+    #[test]
     fn test_container_status_from_str() {
         assert_eq!(ContainerStatus::from("running"), ContainerStatus::Running);
         assert_eq!(ContainerStatus::from("exited"), ContainerStatus::Exited);
@@ -433,6 +479,68 @@ mod tests {
         assert_eq!(ContainerStatus::from("removing"), ContainerStatus::Removing);
         assert_eq!(ContainerStatus::from("garbage"), ContainerStatus::Unknown);
     }
+}
+
+/// Container resource usage statistics
+#[derive(Debug, Clone)]
+pub struct ContainerStats {
+    pub id: ContainerId,
+    pub cpu_percent: f64,
+    pub memory_usage: u64,
+    pub memory_limit: u64,
+    pub memory_percent: f64,
+    pub pids: u64,
+    pub net_rx: u64,
+    pub net_tx: u64,
+    pub block_read: u64,
+    pub block_write: u64,
+}
+
+impl ContainerStats {
+    /// Format CPU percentage for display
+    pub fn cpu_display(&self) -> String {
+        format!("{:.1}%", self.cpu_percent)
+    }
+
+    /// Format memory usage for display (e.g., "123.4M / 7.8G")
+    pub fn memory_display(&self) -> String {
+        format!("{} / {}", format_bytes(self.memory_usage), format_bytes(self.memory_limit))
+    }
+
+    /// Format network I/O for display (e.g., "1.2M / 3.4M")
+    pub fn net_io_display(&self) -> String {
+        format!("{} / {}", format_bytes(self.net_rx), format_bytes(self.net_tx))
+    }
+
+    /// Format block I/O for display (e.g., "0B / 4.0K")
+    pub fn block_io_display(&self) -> String {
+        format!("{} / {}", format_bytes(self.block_read), format_bytes(self.block_write))
+    }
+}
+
+/// Format byte count as human-readable string (B, K, M, G)
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1}G", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}M", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}K", bytes as f64 / KB as f64)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
+/// Information about a service within a Docker Compose project
+#[derive(Debug, Clone)]
+pub struct ComposeServiceInfo {
+    pub service_name: String,
+    pub container_id: ContainerId,
+    pub status: ContainerStatus,
 }
 
 /// A discovered devcontainer (may or may not be managed by devc)

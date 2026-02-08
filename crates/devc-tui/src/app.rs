@@ -4,6 +4,7 @@ use crate::clipboard::copy_to_clipboard;
 use crate::event::{Event, EventHandler};
 use crate::ports::{spawn_port_detector, DetectedPort, PortDetectionUpdate};
 use crate::settings::{ProviderDetailState, SettingsState};
+use crate::stats::spawn_stats_poller;
 #[cfg(unix)]
 use crate::shell::PtyShell;
 use crate::shell::{ShellConfig, ShellExitReason};
@@ -266,6 +267,24 @@ pub struct App {
     pub container_op: Option<ContainerOperation>,
     /// Channel receiver for container operation results
     pub container_op_rx: Option<mpsc::UnboundedReceiver<ContainerOpResult>>,
+
+    // Resource monitoring state
+    /// Container stats keyed by provider container ID
+    pub container_stats: HashMap<String, devc_provider::ContainerStats>,
+    /// Receiver for stats updates from background poller
+    pub stats_rx: Option<mpsc::UnboundedReceiver<Vec<devc_provider::ContainerStats>>>,
+    /// Container IDs currently being polled for stats (to detect changes)
+    pub stats_polling_ids: Vec<String>,
+
+    // Auto port forwarding state
+    /// Background port detectors for auto-forwarding, keyed by provider container ID
+    pub auto_port_detectors: HashMap<String, mpsc::UnboundedReceiver<PortDetectionUpdate>>,
+    /// Auto-forward configurations per provider container ID
+    pub auto_forward_configs: HashMap<String, Vec<devc_config::PortForwardConfig>>,
+    /// Set of (provider_container_id, port) pairs that have been auto-forwarded
+    pub auto_forwarded_ports: HashSet<(String, u16)>,
+    /// Set of (provider_container_id, port) pairs where browser was already opened (for OpenBrowserOnce)
+    pub auto_opened_ports: HashSet<(String, u16)>,
 }
 
 impl App {
@@ -342,6 +361,13 @@ impl App {
             active_shell_container: None,
             container_op: None,
             container_op_rx: None,
+            container_stats: HashMap::new(),
+            stats_rx: None,
+            stats_polling_ids: Vec::new(),
+            auto_port_detectors: HashMap::new(),
+            auto_forward_configs: HashMap::new(),
+            auto_forwarded_ports: HashSet::new(),
+            auto_opened_ports: HashSet::new(),
         }
     }
 
@@ -370,6 +396,8 @@ impl App {
             last_used: fixed_time,
             workspace_path: PathBuf::from("/tmp/test"),
             metadata: HashMap::new(),
+            compose_project: None,
+            compose_service: None,
         }
     }
 
@@ -459,12 +487,38 @@ impl App {
             active_shell_container: None,
             container_op: None,
             container_op_rx: None,
+            container_stats: HashMap::new(),
+            stats_rx: None,
+            stats_polling_ids: Vec::new(),
+            auto_port_detectors: HashMap::new(),
+            auto_forward_configs: HashMap::new(),
+            auto_forwarded_ports: HashSet::new(),
+            auto_opened_ports: HashSet::new(),
         })
     }
 
     /// Check if connected to a container provider
     pub fn is_connected(&self) -> bool {
         self.active_provider.is_some()
+    }
+
+    /// Create a CliProvider for the given provider type.
+    /// Handles toolbox environment detection for Podman.
+    async fn create_cli_provider(
+        provider_type: ProviderType,
+    ) -> std::result::Result<devc_provider::CliProvider, devc_provider::ProviderError> {
+        match provider_type {
+            ProviderType::Docker => devc_provider::CliProvider::new_docker().await,
+            ProviderType::Podman => {
+                if devc_provider::is_in_toolbox() {
+                    match devc_provider::CliProvider::new_toolbox().await {
+                        Ok(p) => return Ok(p),
+                        Err(_) => {} // Fall through to regular podman
+                    }
+                }
+                devc_provider::CliProvider::new_podman().await
+            }
+        }
     }
 
     /// Run the application main loop
@@ -585,6 +639,229 @@ impl App {
         }
     }
 
+    /// Ensure auto port detection is running for all running containers that declare ports.
+    ///
+    /// Called on each tick. For each running container with a provider container ID,
+    /// if no detector exists yet, load its devcontainer config and if it declares ports
+    /// via `auto_forward_config()`, spawn a port detector and cache the config.
+    /// Remove detectors for containers that have stopped.
+    async fn ensure_auto_port_detection(&mut self) {
+        let running_container_ids: HashMap<String, String> = self
+            .containers
+            .iter()
+            .filter(|c| c.status == DevcContainerStatus::Running)
+            .filter_map(|c| {
+                c.container_id
+                    .as_ref()
+                    .map(|cid| (cid.clone(), c.id.clone()))
+            })
+            .collect();
+
+        // Remove detectors for containers that stopped
+        let to_remove: Vec<String> = self
+            .auto_port_detectors
+            .keys()
+            .filter(|cid| !running_container_ids.contains_key(*cid))
+            .cloned()
+            .collect();
+        for cid in to_remove {
+            self.auto_port_detectors.remove(&cid);
+            self.auto_forward_configs.remove(&cid);
+        }
+
+        // Collect containers that need a new detector
+        let needs_detector: Vec<(String, String)> = running_container_ids
+            .iter()
+            .filter(|(cid, _)| !self.auto_port_detectors.contains_key(*cid))
+            .map(|(cid, did)| (cid.clone(), did.clone()))
+            .collect();
+
+        if needs_detector.is_empty() {
+            return;
+        }
+
+        // Load configs while holding the manager lock, then release it
+        let configs_to_start: Vec<(String, Vec<devc_config::PortForwardConfig>)> = {
+            let manager = self.manager.read().await;
+            let mut result = Vec::new();
+            for (provider_cid, devc_id) in &needs_detector {
+                let state = match manager.get(devc_id).await {
+                    Ok(Some(s)) => s,
+                    _ => continue,
+                };
+                let config = match manager.get_devcontainer_config(&state) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let auto_fwd = config.auto_forward_config();
+                if !auto_fwd.is_empty() {
+                    result.push((provider_cid.clone(), auto_fwd));
+                }
+            }
+            result
+        };
+
+        // Now spawn detectors (no lock held)
+        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+        for (provider_cid, auto_fwd) in configs_to_start {
+            // Create a new provider instance for the background detector task.
+            // We use CliProvider directly (same pattern as existing port detection code).
+            let provider_arc: Arc<dyn ContainerProvider + Send + Sync> = {
+                match Self::create_cli_provider(provider_type).await {
+                    Ok(p) => Arc::new(p),
+                    Err(_) => continue,
+                }
+            };
+
+            let container_id = devc_provider::ContainerId::new(&provider_cid);
+            let forwarded: HashSet<u16> = self
+                .active_forwarders
+                .keys()
+                .filter(|(cid, _)| cid == &provider_cid)
+                .map(|(_, port)| *port)
+                .collect();
+
+            let rx = spawn_port_detector(provider_arc, container_id, provider_type, forwarded);
+            self.auto_port_detectors.insert(provider_cid.clone(), rx);
+            self.auto_forward_configs.insert(provider_cid, auto_fwd);
+        }
+    }
+
+    /// Poll auto port detectors and auto-forward matching ports.
+    ///
+    /// Called on each tick. Drains updates from all detectors. When a detected port
+    /// matches an auto-forward config entry (and action != Ignore, and not already
+    /// forwarded), spawns a forwarder.
+    async fn poll_auto_port_detectors(&mut self) {
+        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+
+        let cids: Vec<String> = self.auto_port_detectors.keys().cloned().collect();
+        for cid in cids {
+            let rx = match self.auto_port_detectors.get_mut(&cid) {
+                Some(rx) => rx,
+                None => continue,
+            };
+
+            // Drain all pending updates
+            while let Ok(update) = rx.try_recv() {
+                let config = match self.auto_forward_configs.get(&cid) {
+                    Some(c) => c.clone(),
+                    None => continue,
+                };
+
+                for detected in &update.ports {
+                    for pfc in &config {
+                        if detected.port != pfc.port {
+                            continue;
+                        }
+                        if pfc.action == devc_config::AutoForwardAction::Ignore {
+                            continue;
+                        }
+                        let key = (cid.clone(), pfc.port);
+                        if self.auto_forwarded_ports.contains(&key) {
+                            continue;
+                        }
+                        if self.active_forwarders.contains_key(&key) {
+                            self.auto_forwarded_ports.insert(key);
+                            continue;
+                        }
+
+                        // Auto-forward this port
+                        match spawn_forwarder(provider_type, &cid, pfc.port, pfc.port).await {
+                            Ok(forwarder) => {
+                                self.active_forwarders.insert(key.clone(), forwarder);
+                                self.auto_forwarded_ports.insert(key.clone());
+                                match pfc.action {
+                                    devc_config::AutoForwardAction::Notify => {
+                                        let msg = if let Some(ref label) = pfc.label {
+                                            format!(
+                                                "Auto-forwarded port {} ({}) (localhost:{})",
+                                                pfc.port, label, pfc.port
+                                            )
+                                        } else {
+                                            format!(
+                                                "Auto-forwarded port {} (localhost:{})",
+                                                pfc.port, pfc.port
+                                            )
+                                        };
+                                        self.status_message = Some(msg);
+                                    }
+                                    devc_config::AutoForwardAction::OpenBrowser => {
+                                        let _ = open_in_browser(pfc.port, pfc.protocol.as_deref());
+                                    }
+                                    devc_config::AutoForwardAction::OpenBrowserOnce => {
+                                        if !self.auto_opened_ports.contains(&key) {
+                                            self.auto_opened_ports.insert(key);
+                                            let _ = open_in_browser(pfc.port, pfc.protocol.as_deref());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!("Failed to auto-forward port {}: {}", pfc.port, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ensure stats poller is running for the current set of running containers.
+    /// Restarts the poller if the set of running container IDs has changed.
+    async fn ensure_stats_poller(&mut self) {
+        if self.tab != Tab::Containers {
+            return;
+        }
+
+        let running_ids: Vec<String> = self
+            .containers
+            .iter()
+            .filter(|c| c.status == DevcContainerStatus::Running)
+            .filter_map(|c| c.container_id.clone())
+            .collect();
+
+        // Check if the set of running IDs changed
+        if running_ids == self.stats_polling_ids {
+            return;
+        }
+
+        self.stats_polling_ids = running_ids.clone();
+
+        if running_ids.is_empty() {
+            self.stats_rx = None;
+            self.container_stats.clear();
+            return;
+        }
+
+        // Create a provider for polling
+        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+        let provider: Option<Arc<dyn ContainerProvider>> = Self::create_cli_provider(provider_type)
+            .await
+            .ok()
+            .map(|p| Arc::new(p) as Arc<dyn ContainerProvider>);
+
+        if let Some(provider) = provider {
+            let container_ids: Vec<devc_provider::ContainerId> = running_ids
+                .iter()
+                .map(|id| devc_provider::ContainerId::new(id.clone()))
+                .collect();
+            self.stats_rx = Some(spawn_stats_poller(provider, container_ids));
+        }
+    }
+
+    /// Poll stats receiver and update cached stats
+    fn poll_stats(&mut self) {
+        if let Some(ref mut rx) = self.stats_rx {
+            while let Ok(stats_vec) = rx.try_recv() {
+                for stat in stats_vec {
+                    self.container_stats.insert(stat.id.0.clone(), stat);
+                }
+            }
+        }
+    }
+
     /// Handle a single build progress message
     async fn handle_build_progress(&mut self, line: String) -> AppResult<()> {
         let is_complete = line.contains("complete") || line.contains("Error:") || line.contains("Failed:");
@@ -615,6 +892,12 @@ impl App {
                 if self.tab == Tab::Containers && self.view == View::Main && !self.loading {
                     self.refresh_containers().await?;
                 }
+                // Resource monitoring: ensure stats poller is running and drain updates
+                self.ensure_stats_poller().await;
+                self.poll_stats();
+                // Auto port forwarding: ensure detectors are running and poll for updates
+                self.ensure_auto_port_detection().await;
+                self.poll_auto_port_detectors().await;
             }
             Event::Resize(_, _) => {
                 // Terminal will redraw automatically
@@ -1507,7 +1790,13 @@ impl App {
                     self.status_message = Some("socat required - press 'i' to install".to_string());
                 } else if let Some(port) = self.detected_ports.get(self.selected_port) {
                     if port.is_forwarded {
-                        if let Err(e) = open_in_browser(port.port) {
+                        // Look up protocol from auto_forward_configs for this port
+                        let protocol = self.ports_provider_container_id.as_ref().and_then(|cid| {
+                            self.auto_forward_configs.get(cid).and_then(|configs| {
+                                configs.iter().find(|c| c.port == port.port).and_then(|c| c.protocol.as_deref())
+                            })
+                        });
+                        if let Err(e) = open_in_browser(port.port, protocol) {
                             self.status_message = Some(format!("Failed to open browser: {}", e));
                         }
                     } else {
@@ -1594,10 +1883,7 @@ impl App {
 
         // Start port detection polling - create a new provider instance for the background task
         let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
-        let provider_result = match provider_type {
-            ProviderType::Docker => devc_provider::CliProvider::new_docker().await,
-            ProviderType::Podman => devc_provider::CliProvider::new_podman().await,
-        };
+        let provider_result = Self::create_cli_provider(provider_type).await;
 
         match provider_result {
             Ok(provider) => {

@@ -387,8 +387,9 @@ fn build_exec_command(
 }
 
 /// Open a URL in the default browser
-pub fn open_in_browser(port: u16) -> Result<(), String> {
-    let url = format!("http://localhost:{}", port);
+pub fn open_in_browser(port: u16, protocol: Option<&str>) -> Result<(), String> {
+    let scheme = if protocol == Some("https") { "https" } else { "http" };
+    let url = format!("{}://localhost:{}", scheme, port);
 
     #[cfg(target_os = "linux")]
     let result = std::process::Command::new("xdg-open")
