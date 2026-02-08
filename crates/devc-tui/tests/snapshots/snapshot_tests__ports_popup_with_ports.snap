@@ -6,9 +6,9 @@ expression: output
 │ 1:Containers  │  2:Providers  │  3:Settings                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Contai┌ Port Forwarding: my-rust-project ────────────────────────────┐───────┐
-│      N│  PORT             STATUS          LOCAL            PROCESS   │kspace │
+│      N│  PORT             STATUS          LOCAL            PROCESS   │       │
 │       │                                                              │       │
-│▶ ●   m│▶ 3000             ● Forwarded     localhost:3000   node      │p/test │
+│▶ ●   m│▶ 3000             ● Forwarded     localhost:3000   node      │       │
 │       │  8080             ○ Detected      -                java [NEW]│       │
 │       │                                                              │       │
 │       │                                                              │       │

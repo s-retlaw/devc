@@ -361,3 +361,130 @@ services:
         .compose_down(&compose_file_strs, &project_name, project_dir)
         .await;
 }
+
+// ========================================================================
+// Test G: Compose service visibility (compose_ps + logs for companion)
+// ========================================================================
+
+#[tokio::test]
+#[ignore] // Requires container runtime
+async fn test_e2e_compose_service_visibility() {
+    let provider = match get_test_provider().await {
+        Some(p) => p,
+        None => {
+            eprintln!("Skipping test: no container runtime available");
+            return;
+        }
+    };
+
+    ensure_alpine(&provider).await;
+
+    let workspace = create_compose_workspace(
+        r#"{
+            "dockerComposeFile": "docker-compose.yml",
+            "service": "app"
+        }"#,
+        r#"
+services:
+  app:
+    image: alpine:latest
+    command: ["sh", "-c", "echo app-started && sleep infinity"]
+  db:
+    image: alpine:latest
+    command: ["sh", "-c", "echo db-started && sleep infinity"]
+  redis:
+    image: alpine:latest
+    command: ["sh", "-c", "echo redis-started && sleep infinity"]
+"#,
+    );
+
+    let container =
+        devc_core::Container::from_workspace(workspace.path()).expect("should load config");
+    let compose_files = container.compose_files().expect("should have compose files");
+    let compose_file_strs: Vec<&str> = compose_files.iter().map(|p| p.to_str().unwrap()).collect();
+    let project_name = container.compose_project_name();
+    let project_dir = container.config_path.parent().unwrap();
+
+    // Clean up any previous run
+    let _ = provider
+        .compose_down(&compose_file_strs, &project_name, project_dir)
+        .await;
+
+    // Start compose services
+    provider
+        .compose_up(&compose_file_strs, &project_name, project_dir, None)
+        .await
+        .expect("compose_up should succeed");
+
+    // Give services time to start
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // 1. Test compose_ps returns all three services
+    let services = provider
+        .compose_ps(&compose_file_strs, &project_name, project_dir)
+        .await
+        .expect("compose_ps should succeed");
+
+    assert!(
+        services.len() >= 3,
+        "should find at least 3 services, got {}: {:?}",
+        services.len(),
+        services.iter().map(|s| &s.service_name).collect::<Vec<_>>()
+    );
+
+    let service_names: Vec<&str> = services.iter().map(|s| s.service_name.as_str()).collect();
+    assert!(service_names.iter().any(|n| n.contains("app")), "should find app service: {:?}", service_names);
+    assert!(service_names.iter().any(|n| n.contains("db")), "should find db service: {:?}", service_names);
+    assert!(service_names.iter().any(|n| n.contains("redis")), "should find redis service: {:?}", service_names);
+
+    // 2. All services should be running
+    for svc in &services {
+        assert_eq!(
+            svc.status,
+            devc_provider::ContainerStatus::Running,
+            "service {} should be running, got {:?}",
+            svc.service_name,
+            svc.status
+        );
+    }
+
+    // 3. Test fetching logs for companion service (db)
+    let db_service = services
+        .iter()
+        .find(|s| s.service_name.contains("db"))
+        .expect("should find db service");
+
+    let log_config = devc_provider::LogConfig {
+        follow: false,
+        stdout: true,
+        stderr: true,
+        tail: Some(100),
+        timestamps: false,
+        since: None,
+        until: None,
+    };
+
+    // Verify we can fetch logs for companion service without error
+    // (podman-compose may not capture stdout from command overrides,
+    // so we just verify the API call succeeds)
+    let log_stream = provider
+        .logs(&db_service.container_id, &log_config)
+        .await
+        .expect("should be able to fetch logs for companion service");
+
+    // Read whatever is available (may be empty with podman-compose)
+    use tokio::io::AsyncReadExt as _;
+    let mut reader = log_stream.stream;
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reader.read_to_end(&mut buf),
+    )
+    .await;
+    // No assertion on content - just verifying the API works without error
+
+    // Cleanup
+    let _ = provider
+        .compose_down(&compose_file_strs, &project_name, project_dir)
+        .await;
+}

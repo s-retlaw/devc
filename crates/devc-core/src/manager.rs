@@ -406,6 +406,60 @@ impl ContainerManager {
             )));
         }
 
+        // Handle compose start: bring up all services
+        let is_compose = container_state.compose_project.is_some()
+            || Container::from_config(&container_state.config_path)
+                .map(|c| c.is_compose())
+                .unwrap_or(false);
+        if is_compose {
+            let container = Container::from_config(&container_state.config_path)?;
+            if let Some(compose_files) = container.compose_files() {
+                let owned = compose_file_strs(&compose_files);
+                let compose_file_refs: Vec<&str> =
+                    owned.iter().map(|s| s.as_str()).collect();
+                let project_name = container.compose_project_name();
+
+                provider
+                    .compose_up(
+                        &compose_file_refs,
+                        &project_name,
+                        &container.workspace_path,
+                        None,
+                    )
+                    .await?;
+
+                // Re-discover the primary service container ID after compose_up
+                let services = provider
+                    .compose_ps(&compose_file_refs, &project_name, &container.workspace_path)
+                    .await?;
+                let primary_service = container.compose_service().ok_or_else(|| {
+                    CoreError::InvalidState(
+                        "No service specified for compose project".to_string(),
+                    )
+                })?;
+                let svc = services
+                    .iter()
+                    .find(|s| s.service_name == primary_service)
+                    .ok_or_else(|| {
+                        CoreError::InvalidState(format!(
+                            "Service '{}' not found in compose project",
+                            primary_service
+                        ))
+                    })?;
+                {
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.container_id = Some(svc.container_id.0.clone());
+                        cs.compose_project = Some(project_name);
+                        cs.compose_service = Some(primary_service.to_string());
+                    }
+                }
+
+                self.set_status(id, DevcContainerStatus::Running).await?;
+                return Ok(());
+            }
+        }
+
         let container_id = container_state.container_id.as_ref().ok_or_else(|| {
             CoreError::InvalidState("Container not created yet".to_string())
         })?;
@@ -469,7 +523,7 @@ fi
         }
     }
 
-    /// Stop a container
+    /// Stop a container (or all compose services for a compose project)
     pub async fn stop(&self, id: &str) -> Result<()> {
         let provider = self.require_provider()?;
 
@@ -486,6 +540,37 @@ fi
                 "Container cannot be stopped in {} state",
                 container_state.status
             )));
+        }
+
+        // Handle compose stop: bring down all services
+        if let Some(ref compose_project) = container_state.compose_project {
+            let container = Container::from_config(&container_state.config_path)?;
+            if let Some(compose_files) = container.compose_files() {
+                let owned = compose_file_strs(&compose_files);
+                let compose_file_refs: Vec<&str> =
+                    owned.iter().map(|s| s.as_str()).collect();
+
+                provider
+                    .compose_down(
+                        &compose_file_refs,
+                        compose_project,
+                        &container.workspace_path,
+                    )
+                    .await?;
+
+                // Clear container_id since containers are destroyed by compose_down.
+                // Keep compose_project and compose_service so start() can detect
+                // this is a compose project and call compose_up to recreate services.
+                {
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.container_id = None;
+                    }
+                }
+
+                self.set_status(id, DevcContainerStatus::Stopped).await?;
+                return Ok(());
+            }
         }
 
         let container_id = container_state.container_id.as_ref().ok_or_else(|| {
@@ -556,12 +641,9 @@ fi
         if let Some(ref compose_project) = container_state.compose_project {
             let container = Container::from_config(&container_state.config_path)?;
             if let Some(compose_files) = container.compose_files() {
-                let compose_file_strs: Vec<String> = compose_files
-                    .iter()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .collect();
+                let owned = compose_file_strs(&compose_files);
                 let compose_file_refs: Vec<&str> =
-                    compose_file_strs.iter().map(|s| s.as_str()).collect();
+                    owned.iter().map(|s| s.as_str()).collect();
 
                 if let Err(e) = provider
                     .compose_down(
@@ -1144,11 +1226,8 @@ fi
         })?;
         let project_name = container.compose_project_name();
 
-        let compose_file_strs: Vec<String> = compose_files
-            .iter()
-            .map(|f| f.to_string_lossy().to_string())
-            .collect();
-        let compose_file_refs: Vec<&str> = compose_file_strs.iter().map(|s| s.as_str()).collect();
+        let owned = compose_file_strs(&compose_files);
+        let compose_file_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
 
         // 1. Run compose up
         send_progress(progress, "Running docker compose up...");
@@ -1624,6 +1703,14 @@ fn find_devcontainer_config(workspace: &std::path::Path) -> Result<std::path::Pa
 
     // If not found, return a default path (will be created later if needed)
     Ok(devcontainer_dir)
+}
+
+/// Convert a slice of PathBuf compose files to owned Strings and borrowed &str refs.
+///
+/// Returns (owned, refs) where `refs` borrows from `owned`.
+/// Caller must keep `owned` alive while using `refs`.
+fn compose_file_strs(files: &[std::path::PathBuf]) -> Vec<String> {
+    files.iter().map(|f| f.to_string_lossy().to_string()).collect()
 }
 
 /// Helper to send progress messages

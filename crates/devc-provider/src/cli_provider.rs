@@ -7,7 +7,7 @@
 //! - Works with Docker alternatives (Colima, Rancher, Lima, OrbStack)
 
 use crate::{
-    BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider, ContainerStats,
+    BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider,
     ContainerStatus, CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig,
     ExecResult, ExecStream, ImageId, LogConfig, LogStream, MountInfo, MountType, NetworkInfo,
     NetworkSettings, PortInfo, ProviderError, ProviderInfo, ProviderType, Result,
@@ -73,16 +73,7 @@ impl CliProvider {
 
     /// Run a command and get output
     async fn run_cmd(&self, args: &[&str]) -> Result<String> {
-        let mut cmd = if self.cmd_prefix.is_empty() {
-            Command::new(&self.cmd)
-        } else {
-            let mut c = Command::new(&self.cmd_prefix[0]);
-            for prefix_arg in &self.cmd_prefix[1..] {
-                c.arg(prefix_arg);
-            }
-            c.arg(&self.cmd);
-            c
-        };
+        let mut cmd = self.build_command();
         cmd.args(args);
 
         let output = cmd
@@ -112,6 +103,11 @@ impl CliProvider {
             c.arg(&self.cmd);
             c
         }
+    }
+
+    /// Build `--env=K=V` arguments from an environment variable map
+    fn env_args(env: &HashMap<String, String>) -> Vec<String> {
+        env.iter().map(|(k, v)| format!("--env={}={}", k, v)).collect()
     }
 
     /// Check if we should use --userns=keep-id (podman rootless)
@@ -287,9 +283,7 @@ impl ContainerProvider for CliProvider {
         }
 
         // Environment
-        for (k, v) in &config.env {
-            args.push(format!("--env={}={}", k, v));
-        }
+        args.extend(Self::env_args(&config.env));
 
         // Working directory
         if let Some(ref wd) = config.working_dir {
@@ -420,9 +414,7 @@ impl ContainerProvider for CliProvider {
             args.push(format!("--user={}", user));
         }
 
-        for (k, v) in &config.env {
-            args.push(format!("--env={}={}", k, v));
-        }
+        args.extend(Self::env_args(&config.env));
 
         args.push(id.0.clone());
         args.extend(config.cmd.clone());
@@ -528,7 +520,6 @@ impl ContainerProvider for CliProvider {
 
         let state = info.get("State").and_then(serde_json::Value::as_object);
         let config = info.get("Config").and_then(serde_json::Value::as_object);
-        let _host_config = info.get("HostConfig").and_then(serde_json::Value::as_object);
 
         let status = state
             .and_then(|s| s.get("Status"))
@@ -803,113 +794,6 @@ impl ContainerProvider for CliProvider {
         Ok(())
     }
 
-    async fn stats(&self, ids: &[&ContainerId]) -> Result<Vec<ContainerStats>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut args = vec!["stats", "--no-stream", "--no-trunc", "--format={{json .}}"];
-        let id_strings: Vec<&str> = ids.iter().map(|id| id.0.as_str()).collect();
-        args.extend(id_strings);
-
-        let output = match self.run_cmd(&args).await {
-            Ok(out) => out,
-            Err(_) => return Ok(Vec::new()),
-        };
-
-        let mut results = Vec::new();
-        for line in output.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                // ID field: Docker uses "ID", Podman uses "ContainerID"
-                let id_str = parsed["ID"]
-                    .as_str()
-                    .or_else(|| parsed["ContainerID"].as_str())
-                    .or_else(|| parsed["id"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                // CPU: Docker has "CPUPerc" as string "0.50%", Podman has "CPU" as float
-                let cpu = parsed["CPUPerc"]
-                    .as_str()
-                    .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok())
-                    .or_else(|| parsed["CPU"].as_f64())
-                    .unwrap_or(0.0);
-
-                // MemPerc: Docker has string "1.23%", Podman has float
-                let mem_percent = parsed["MemPerc"]
-                    .as_str()
-                    .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok())
-                    .or_else(|| parsed["MemPerc"].as_f64())
-                    .unwrap_or(0.0);
-
-                // MemUsage: Docker has string "123MiB / 456GiB", Podman has integer (bytes)
-                // MemLimit: Podman has integer (bytes), Docker encodes it in MemUsage string
-                let (mem_usage, mem_limit) = if let Some(s) = parsed["MemUsage"].as_str() {
-                    // Docker format: "123.4MiB / 7.8GiB"
-                    parse_mem_usage(s)
-                } else {
-                    // Podman format: MemUsage and MemLimit are separate integer fields (bytes)
-                    let usage = parsed["MemUsage"].as_u64().unwrap_or(0);
-                    let limit = parsed["MemLimit"].as_u64().unwrap_or(0);
-                    (usage, limit)
-                };
-
-                // PIDs: Docker has string "1", Podman has integer 1
-                let pids = parsed["PIDs"]
-                    .as_str()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .or_else(|| parsed["PIDs"].as_u64())
-                    .unwrap_or(0);
-
-                // Network I/O: Docker has "NetIO" string "648B / 0B",
-                // Podman has "Network" object with per-interface rx/tx bytes
-                let (net_rx, net_tx) = if let Some(s) = parsed["NetIO"].as_str() {
-                    parse_mem_usage(s) // same "X / Y" format
-                } else if let Some(net) = parsed["Network"].as_object() {
-                    // Podman: sum across all interfaces
-                    let mut rx = 0u64;
-                    let mut tx = 0u64;
-                    for (_iface, stats) in net {
-                        rx += stats["RxBytes"].as_u64().unwrap_or(0);
-                        tx += stats["TxBytes"].as_u64().unwrap_or(0);
-                    }
-                    (rx, tx)
-                } else {
-                    (0, 0)
-                };
-
-                // Block I/O: Docker has "BlockIO" string "0B / 0B",
-                // Podman has "BlockInput"/"BlockOutput" integers
-                let (block_read, block_write) = if let Some(s) = parsed["BlockIO"].as_str() {
-                    parse_mem_usage(s)
-                } else {
-                    let read = parsed["BlockInput"].as_u64().unwrap_or(0);
-                    let write = parsed["BlockOutput"].as_u64().unwrap_or(0);
-                    (read, write)
-                };
-
-                results.push(ContainerStats {
-                    id: ContainerId::new(id_str),
-                    cpu_percent: cpu,
-                    memory_usage: mem_usage,
-                    memory_limit: mem_limit,
-                    memory_percent: mem_percent,
-                    pids,
-                    net_rx,
-                    net_tx,
-                    block_read,
-                    block_write,
-                });
-            }
-        }
-
-        Ok(results)
-    }
-
     async fn compose_up(
         &self,
         compose_files: &[&str],
@@ -1115,48 +999,6 @@ impl ContainerProvider for CliProvider {
     }
 }
 
-/// Parse memory usage string from `docker stats` output (e.g., "123.4MiB / 7.8GiB")
-fn parse_mem_usage(s: &str) -> (u64, u64) {
-    let parts: Vec<&str> = s.split('/').collect();
-    if parts.len() == 2 {
-        (
-            parse_size_str(parts[0].trim()),
-            parse_size_str(parts[1].trim()),
-        )
-    } else {
-        (0, 0)
-    }
-}
-
-/// Parse a size string like "123.4MiB", "7.8GiB", "500KiB", "1024B"
-fn parse_size_str(s: &str) -> u64 {
-    let s = s.trim();
-    if s.is_empty() {
-        return 0;
-    }
-
-    // Try each suffix from longest to shortest
-    let suffixes: &[(&str, f64)] = &[
-        ("GiB", 1024.0 * 1024.0 * 1024.0),
-        ("MiB", 1024.0 * 1024.0),
-        ("KiB", 1024.0),
-        ("GB", 1_000_000_000.0),
-        ("MB", 1_000_000.0),
-        ("KB", 1_000.0),
-        ("B", 1.0),
-    ];
-
-    for (suffix, multiplier) in suffixes {
-        if let Some(num_str) = s.strip_suffix(suffix) {
-            if let Ok(num) = num_str.trim().parse::<f64>() {
-                return (num * multiplier) as u64;
-            }
-        }
-    }
-
-    0
-}
-
 /// Parse CLI labels format "key=value,key2=value2" into HashMap
 fn parse_cli_labels(label_str: &str) -> HashMap<String, String> {
     let mut labels = HashMap::new();
@@ -1230,47 +1072,6 @@ mod tests {
         let labels = parse_cli_labels("key=a=b,other=c");
         assert_eq!(labels.get("key").unwrap(), "a=b");
         assert_eq!(labels.get("other").unwrap(), "c");
-    }
-
-    // ==================== parse_mem_usage / parse_size_str tests ====================
-
-    #[test]
-    fn test_parse_size_str_gib() {
-        assert_eq!(parse_size_str("7.8GiB"), (7.8 * 1024.0 * 1024.0 * 1024.0) as u64);
-    }
-
-    #[test]
-    fn test_parse_size_str_mib() {
-        assert_eq!(parse_size_str("123.4MiB"), (123.4 * 1024.0 * 1024.0) as u64);
-    }
-
-    #[test]
-    fn test_parse_size_str_kib() {
-        assert_eq!(parse_size_str("512KiB"), (512.0 * 1024.0) as u64);
-    }
-
-    #[test]
-    fn test_parse_size_str_bytes() {
-        assert_eq!(parse_size_str("1024B"), 1024);
-    }
-
-    #[test]
-    fn test_parse_size_str_empty() {
-        assert_eq!(parse_size_str(""), 0);
-    }
-
-    #[test]
-    fn test_parse_mem_usage_standard() {
-        let (usage, limit) = parse_mem_usage("123.4MiB / 7.8GiB");
-        assert_eq!(usage, (123.4 * 1024.0 * 1024.0) as u64);
-        assert_eq!(limit, (7.8 * 1024.0 * 1024.0 * 1024.0) as u64);
-    }
-
-    #[test]
-    fn test_parse_mem_usage_invalid() {
-        let (usage, limit) = parse_mem_usage("garbage");
-        assert_eq!(usage, 0);
-        assert_eq!(limit, 0);
     }
 
     // ==================== detect_devcontainer_source tests ====================

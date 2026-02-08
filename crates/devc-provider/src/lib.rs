@@ -82,12 +82,6 @@ pub trait ContainerProvider: Send + Sync {
     /// Get provider information
     fn info(&self) -> ProviderInfo;
 
-    /// Get resource usage stats for one or more containers
-    ///
-    /// Returns stats for all requested containers. Containers that are not running
-    /// or cannot provide stats are silently skipped.
-    async fn stats(&self, ids: &[&ContainerId]) -> Result<Vec<ContainerStats>>;
-
     /// Discover all devcontainers (including those not managed by devc)
     /// Returns containers with devcontainer-related labels or mounts
     async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>>;

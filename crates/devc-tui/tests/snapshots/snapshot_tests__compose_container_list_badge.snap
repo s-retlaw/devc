@@ -8,21 +8,21 @@ expression: output
 ┌ Containers ──────────────────────────────────────────────────────────────────┐
 │      Name                         Status       Provider Workspace            │
 │                                                                              │
-│▶ ●   test-container               running      docker   /tmp/test            │
-│              ┌ Rebuild Container ─────────────────────────────┐              │
-│              │                                                │              │
-│              │            Rebuild 'test-container'?           │              │
-│              │                                                │              │
-│              │         ▶ [X] Force rebuild (no cache)         │              │
-│              │                                                │              │
-│              │              Confirm        Cancel             │              │
-│              │                                                │              │
-│              │  Tab: Switch  Enter/Space: Select  Esc: Cancel │              │
-│              └────────────────────────────────────────────────┘              │
+│▶ ●   compose-app [compose:3]      running      docker   /tmp/test            │
+│  ●   standalone                   running      docker   /tmp/test            │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│y/Enter: Confirm  n/Esc: Cancel  Space: Toggle no-cache                       │
+│D: Discover  j/k: Navigate  Enter: Details  s: Start/Stop  u: Up  R: Rebuild  │
 └──────────────────────────────────────────────────────────────────────────────┘

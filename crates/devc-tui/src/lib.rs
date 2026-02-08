@@ -9,7 +9,6 @@ mod event;
 pub mod ports;
 pub mod settings;
 pub mod shell;
-pub mod stats;
 pub mod tunnel;
 pub mod ui;
 pub mod widgets;

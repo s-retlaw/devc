@@ -66,7 +66,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         View::ContainerDetail => {
             draw_main_content(frame, app, content_area);
-            let popup = popup_rect(75, 70, 56, 17, content_area);
+            let is_compose = app.selected_container()
+                .map(|c| c.compose_project.is_some())
+                .unwrap_or(false);
+            let popup = if is_compose {
+                popup_rect(80, 85, 60, 25, content_area)
+            } else {
+                popup_rect(75, 70, 56, 17, content_area)
+            };
             frame.render_widget(Clear, popup);
             draw_detail(frame, app, popup);
             if app.container_op.is_some() {
@@ -213,7 +220,17 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         },
-        View::ContainerDetail => "s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  1-3: Switch tab  Esc/q: Back  ?: Help",
+        View::ContainerDetail => {
+            let has_services = app.selected_container()
+                .and_then(|c| app.compose_services.get(&c.id))
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if has_services {
+                "j/k: Select service  l: Logs  s: Start/Stop  u: Up  R: Rebuild  S: Shell  q: Back"
+            } else {
+                "s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  1-3: Switch tab  Esc/q: Back  ?: Help"
+            }
+        }
         View::ProviderDetail => {
             if app.provider_detail_state.editing {
                 "Enter: Confirm  Esc: Cancel  Type to edit"
@@ -299,8 +316,6 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         Cell::from(" "),
         Cell::from("Name"),
         Cell::from("Status"),
-        Cell::from("CPU"),
-        Cell::from("Mem"),
         Cell::from("Provider"),
         Cell::from("Workspace"),
     ])
@@ -344,24 +359,20 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             let has_shell = app.shell_sessions.contains_key(&container.id);
             let name_display = if has_shell {
                 format!("{} [S]", container.name)
+            } else if container.compose_project.is_some() {
+                let suffix = match app.compose_services.get(&container.id) {
+                    Some(s) => format!(":{}", s.len()),
+                    None => "...".to_string(),
+                };
+                format!("{} [compose{}]", container.name, suffix)
             } else {
                 container.name.to_string()
             };
-
-            // Get stats for running containers
-            let (cpu_display, mem_display) = container
-                .container_id
-                .as_ref()
-                .and_then(|cid| app.container_stats.get(cid))
-                .map(|s| (s.cpu_display(), s.memory_display()))
-                .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
 
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
                 Cell::from(name_display).style(Style::default().bold()),
                 Cell::from(container.status.to_string()).style(Style::default().fg(status_color)),
-                Cell::from(cpu_display),
-                Cell::from(mem_display),
                 Cell::from(container.provider.to_string()),
                 Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
             ])
@@ -371,10 +382,8 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     // Define column widths
     let widths = [
         Constraint::Length(3),   // Status icon
-        Constraint::Length(20),  // Name
+        Constraint::Length(28),  // Name
         Constraint::Length(12),  // Status
-        Constraint::Length(7),   // CPU
-        Constraint::Length(15),  // Mem
         Constraint::Length(8),   // Provider
         Constraint::Min(10),     // Workspace (takes remaining)
     ];
@@ -799,13 +808,8 @@ fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(detail, area);
 }
 
-/// Draw the container detail view
-fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
-    let container = match app.selected_container() {
-        Some(c) => c,
-        None => return,
-    };
-
+/// Build the info text lines for the container detail view
+fn build_detail_text(container: &devc_core::ContainerState) -> Vec<Line<'static>> {
     let status_color = match container.status {
         DevcContainerStatus::Running => Color::Green,
         DevcContainerStatus::Stopped => Color::DarkGray,
@@ -816,10 +820,10 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         DevcContainerStatus::Configured => Color::DarkGray,
     };
 
-    let mut text = vec![
+    let text = vec![
         Line::from(vec![
             Span::raw("Name:        "),
-            Span::styled(&container.name, Style::default().bold()),
+            Span::styled(container.name.clone(), Style::default().bold()),
         ]),
         Line::from(vec![
             Span::raw("Status:      "),
@@ -834,7 +838,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::raw("ID:          "),
-            Span::styled(&container.id, Style::default().fg(Color::DarkGray)),
+            Span::styled(container.id.clone(), Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -848,11 +852,11 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::raw("Image ID:    "),
-            Span::raw(container.image_id.as_deref().unwrap_or("Not built")),
+            Span::raw(container.image_id.as_deref().unwrap_or("Not built").to_string()),
         ]),
         Line::from(vec![
             Span::raw("Container:   "),
-            Span::raw(container.container_id.as_deref().unwrap_or("Not created")),
+            Span::raw(container.container_id.as_deref().unwrap_or("Not created").to_string()),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -865,41 +869,150 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         ]),
     ];
 
-    // Add resource stats if available
-    if let Some(stats) = container.container_id.as_ref().and_then(|cid| app.container_stats.get(cid)) {
-        text.push(Line::from(""));
-        text.push(Line::from(vec![
-            Span::raw("CPU:         "),
-            Span::raw(stats.cpu_display()),
-        ]));
-        text.push(Line::from(vec![
-            Span::raw("Memory:      "),
-            Span::raw(format!("{} ({:.1}%)", stats.memory_display(), stats.memory_percent)),
-        ]));
-        text.push(Line::from(vec![
-            Span::raw("PIDs:        "),
-            Span::raw(stats.pids.to_string()),
-        ]));
-        text.push(Line::from(vec![
-            Span::raw("Net I/O:     "),
-            Span::raw(stats.net_io_display()),
-        ]));
-        text.push(Line::from(vec![
-            Span::raw("Block I/O:   "),
-            Span::raw(stats.block_io_display()),
-        ]));
+    text
+}
+
+/// Draw the container detail view
+fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
+    let container = match app.selected_container() {
+        Some(c) => c.clone(),
+        None => return,
+    };
+
+    let is_compose = container.compose_project.is_some();
+    let text = build_detail_text(&container);
+
+    if is_compose {
+        // For compose containers, render outer block then split into info + services
+        let outer_block = Block::default()
+            .title(format!(" {} ", container.name))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner_area = outer_block.inner(area);
+        frame.render_widget(outer_block, area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(12),  // Info paragraph
+                Constraint::Min(6),   // Services table
+            ])
+            .split(inner_area);
+
+        let info = Paragraph::new(text).wrap(Wrap { trim: true });
+        frame.render_widget(info, chunks[0]);
+
+        draw_compose_services(frame, app, &container, chunks[1]);
+    } else {
+        // Non-compose: single Paragraph as before
+        let detail = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .title(format!(" {} ", container.name))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(detail, area);
+    }
+}
+
+/// Draw the compose services table within the detail popup
+fn draw_compose_services(
+    frame: &mut Frame,
+    app: &mut App,
+    container: &devc_core::ContainerState,
+    area: Rect,
+) {
+    let services = app.compose_services.get(&container.id);
+
+    if app.compose_services_loading && services.is_none() {
+        let loading = Paragraph::new("Loading services...")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .title(" Compose Services ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            );
+        frame.render_widget(loading, area);
+        return;
     }
 
-    let detail = Paragraph::new(text)
+    let services = match services {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            let empty = Paragraph::new("No services found")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(
+                    Block::default()
+                        .title(" Compose Services ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray)),
+                );
+            frame.render_widget(empty, area);
+            return;
+        }
+    };
+
+    let primary_service = container.compose_service.as_deref();
+
+    let header = Row::new(vec![
+        Cell::from(" "),
+        Cell::from("Service"),
+        Cell::from("Status"),
+    ])
+    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .bottom_margin(0);
+
+    let rows: Vec<Row> = services
+        .iter()
+        .map(|svc| {
+            let is_primary = primary_service == Some(svc.service_name.as_str());
+            let status_icon = match svc.status {
+                devc_provider::ContainerStatus::Running => "●",
+                devc_provider::ContainerStatus::Exited => "○",
+                _ => "?",
+            };
+            let status_color = match svc.status {
+                devc_provider::ContainerStatus::Running => Color::Green,
+                devc_provider::ContainerStatus::Exited => Color::DarkGray,
+                _ => Color::Yellow,
+            };
+
+            let name = if is_primary {
+                format!("{} (dev)", svc.service_name)
+            } else {
+                svc.service_name.clone()
+            };
+
+            Row::new(vec![
+                Cell::from(status_icon).style(Style::default().fg(status_color)),
+                Cell::from(name).style(Style::default().bold()),
+                Cell::from(svc.status.to_string()).style(Style::default().fg(status_color)),
+            ])
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(3),   // Status icon
+        Constraint::Length(18),  // Service name
+        Constraint::Min(10),     // Status
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
         .block(
             Block::default()
-                .title(format!(" {} ", container.name))
+                .title(" Compose Services ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(Color::DarkGray)),
         )
-        .wrap(Wrap { trim: true });
+        .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+        .highlight_symbol("▶ ");
 
-    frame.render_widget(detail, area);
+    frame.render_stateful_widget(table, area, &mut app.compose_services_table_state);
 }
 
 /// Draw build output view with scrolling
@@ -1012,6 +1125,11 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         .selected_container()
         .map(|c| c.name.as_str())
         .unwrap_or("Unknown");
+    let display_name = if let Some(ref svc_name) = app.logs_service_name {
+        format!("{}/{}", container_name, svc_name)
+    } else {
+        container_name.to_string()
+    };
 
     let inner_height = area.height.saturating_sub(2) as usize;
     let total_lines = app.logs.len();
@@ -1041,13 +1159,13 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         };
         format!(
             " Logs: {} [{}/{}] {}% ",
-            container_name,
+            display_name,
             app.logs_scroll + 1,
             total_lines,
             percent
         )
     } else {
-        format!(" Logs: {} (empty) ", container_name)
+        format!(" Logs: {} (empty) ", display_name)
     };
 
     let logs = Paragraph::new(text).block(

@@ -1,0 +1,26 @@
+services:
+  app:
+    image: alpine:latest
+    command: ["sh", "-c", "echo 'app: listening on :3000' && while true; do echo \"$(date): app heartbeat\" >> /tmp/app.log; sleep 5; done"]
+    volumes:
+      - ..:/workspace:z
+    working_dir: /workspace
+
+  db:
+    image: alpine:latest
+    command: ["sh", "-c", "echo 'db: PostgreSQL 16 ready on :5432' && while true; do echo \"$(date): db checkpoint\" >> /tmp/db.log; sleep 10; done"]
+    environment:
+      POSTGRES_USER: devuser
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: app_dev
+
+  redis:
+    image: alpine:latest
+    command: ["sh", "-c", "echo 'redis: ready on :6379' && while true; do echo \"$(date): redis keyspace\" >> /tmp/redis.log; sleep 8; done"]
+
+  worker:
+    image: alpine:latest
+    command: ["sh", "-c", "echo 'worker: processing jobs' && while true; do echo \"$(date): worker processed batch\" >> /tmp/worker.log; sleep 15; done"]
+    depends_on:
+      - db
+      - redis

@@ -1,0 +1,8 @@
+{
+  "name": "compose-demo",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "forwardPorts": [3000, 5432, 6379],
+  "postCreateCommand": "echo 'Dev container ready!'"
+}

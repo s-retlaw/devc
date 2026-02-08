@@ -301,3 +301,119 @@ fn test_container_operation_spinner() {
     let output = render_app(&mut app, 80, 24);
     insta::assert_snapshot!(output);
 }
+
+/// Test compose container list view with badge
+#[test]
+fn test_compose_container_list_badge() {
+    use devc_provider::{ComposeServiceInfo, ContainerId, ContainerStatus};
+
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+    app.view = View::Main;
+
+    // Add a compose container and a regular container
+    app.containers = vec![
+        App::create_test_compose_container(
+            "compose-app",
+            DevcContainerStatus::Running,
+            "devc-compose-app",
+            "app",
+        ),
+        App::create_test_container("standalone", DevcContainerStatus::Running),
+    ];
+    app.selected = 0;
+    app.containers_table_state.select(Some(0));
+
+    // Populate compose services cache for the compose container
+    app.compose_services.insert(
+        "test-compose-app".to_string(),
+        vec![
+            ComposeServiceInfo {
+                service_name: "app".to_string(),
+                container_id: ContainerId::new("container-app-123"),
+                status: ContainerStatus::Running,
+            },
+            ComposeServiceInfo {
+                service_name: "db".to_string(),
+                container_id: ContainerId::new("container-db-456"),
+                status: ContainerStatus::Running,
+            },
+            ComposeServiceInfo {
+                service_name: "redis".to_string(),
+                container_id: ContainerId::new("container-redis-789"),
+                status: ContainerStatus::Running,
+            },
+        ],
+    );
+
+    let output = render_app(&mut app, 80, 24);
+    insta::assert_snapshot!(output);
+}
+
+/// Test compose container detail view with services table
+#[test]
+fn test_compose_container_detail_with_services() {
+    use devc_provider::{ComposeServiceInfo, ContainerId, ContainerStatus};
+    use ratatui::widgets::TableState;
+
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+
+    // Add a compose container
+    app.containers = vec![App::create_test_compose_container(
+        "compose-app",
+        DevcContainerStatus::Running,
+        "devc-compose-app",
+        "app",
+    )];
+    app.selected = 0;
+    app.view = View::ContainerDetail;
+
+    // Populate compose services
+    app.compose_services.insert(
+        "test-compose-app".to_string(),
+        vec![
+            ComposeServiceInfo {
+                service_name: "app".to_string(),
+                container_id: ContainerId::new("container-app-123"),
+                status: ContainerStatus::Running,
+            },
+            ComposeServiceInfo {
+                service_name: "db".to_string(),
+                container_id: ContainerId::new("container-db-456"),
+                status: ContainerStatus::Running,
+            },
+            ComposeServiceInfo {
+                service_name: "redis".to_string(),
+                container_id: ContainerId::new("container-redis-789"),
+                status: ContainerStatus::Exited,
+            },
+        ],
+    );
+    app.compose_selected_service = 0;
+    app.compose_services_table_state = TableState::default().with_selected(0);
+
+    let output = render_app(&mut app, 90, 30);
+    insta::assert_snapshot!(output);
+}
+
+/// Test compose container detail view loading state
+#[test]
+fn test_compose_container_detail_loading() {
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+
+    // Add a compose container
+    app.containers = vec![App::create_test_compose_container(
+        "compose-app",
+        DevcContainerStatus::Running,
+        "devc-compose-app",
+        "app",
+    )];
+    app.selected = 0;
+    app.view = View::ContainerDetail;
+    app.compose_services_loading = true;
+
+    let output = render_app(&mut app, 90, 30);
+    insta::assert_snapshot!(output);
+}

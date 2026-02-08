@@ -6,9 +6,9 @@ expression: output
 │ 1:Containers  │  2:Providers  │  3:Settings                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Contai┌ Port Forwarding: my-rust-project ────────────────────────────┐───────┐
-│      N│No ports detected.                                            │kspace │
+│      N│No ports detected.                                            │       │
 │       │                                                              │       │
-│▶ ●   m│Waiting for port detection...                                 │p/test │
+│▶ ●   m│Waiting for port detection...                                 │       │
 │       │                                                              │       │
 │       │                                                              │       │
 │       │                                                              │       │

@@ -4,7 +4,6 @@ use crate::clipboard::copy_to_clipboard;
 use crate::event::{Event, EventHandler};
 use crate::ports::{spawn_port_detector, DetectedPort, PortDetectionUpdate};
 use crate::settings::{ProviderDetailState, SettingsState};
-use crate::stats::spawn_stats_poller;
 #[cfg(unix)]
 use crate::shell::PtyShell;
 use crate::shell::{ShellConfig, ShellExitReason};
@@ -12,7 +11,7 @@ use crate::tunnel::{check_socat_installed, install_socat, open_in_browser, spawn
 use crate::{resume_tui, suspend_tui, ui};
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
-use devc_core::{ContainerManager, ContainerState, DevcContainerStatus};
+use devc_core::{Container, ContainerManager, ContainerState, DevcContainerStatus};
 use devc_provider::{create_provider, detect_available_providers, ContainerProvider, DiscoveredContainer, ProviderType};
 use ratatui::prelude::*;
 use ratatui::widgets::TableState;
@@ -268,13 +267,17 @@ pub struct App {
     /// Channel receiver for container operation results
     pub container_op_rx: Option<mpsc::UnboundedReceiver<ContainerOpResult>>,
 
-    // Resource monitoring state
-    /// Container stats keyed by provider container ID
-    pub container_stats: HashMap<String, devc_provider::ContainerStats>,
-    /// Receiver for stats updates from background poller
-    pub stats_rx: Option<mpsc::UnboundedReceiver<Vec<devc_provider::ContainerStats>>>,
-    /// Container IDs currently being polled for stats (to detect changes)
-    pub stats_polling_ids: Vec<String>,
+    // Compose service visibility state
+    /// Cached compose service info keyed by devc container ID
+    pub compose_services: HashMap<String, Vec<devc_provider::ComposeServiceInfo>>,
+    /// Table state for compose services in detail view
+    pub compose_services_table_state: TableState,
+    /// Currently selected service index in compose services table
+    pub compose_selected_service: usize,
+    /// Whether compose services are currently being loaded
+    pub compose_services_loading: bool,
+    /// Name of the service whose logs are being viewed (None = primary container)
+    pub logs_service_name: Option<String>,
 
     // Auto port forwarding state
     /// Background port detectors for auto-forwarding, keyed by provider container ID
@@ -361,9 +364,11 @@ impl App {
             active_shell_container: None,
             container_op: None,
             container_op_rx: None,
-            container_stats: HashMap::new(),
-            stats_rx: None,
-            stats_polling_ids: Vec::new(),
+            compose_services: HashMap::new(),
+            compose_services_table_state: TableState::default(),
+            compose_selected_service: 0,
+            compose_services_loading: false,
+            logs_service_name: None,
             auto_port_detectors: HashMap::new(),
             auto_forward_configs: HashMap::new(),
             auto_forwarded_ports: HashSet::new(),
@@ -398,6 +403,39 @@ impl App {
             metadata: HashMap::new(),
             compose_project: None,
             compose_service: None,
+        }
+    }
+
+    /// Create a test compose container state for testing
+    ///
+    /// Similar to `create_test_container` but with compose_project and compose_service set.
+    pub fn create_test_compose_container(
+        name: &str,
+        status: DevcContainerStatus,
+        project: &str,
+        service: &str,
+    ) -> ContainerState {
+        use chrono::{TimeZone, Utc};
+        use devc_provider::ProviderType;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let fixed_time = Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap();
+
+        ContainerState {
+            id: format!("test-{}", name),
+            name: name.to_string(),
+            provider: ProviderType::Docker,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            image_id: Some("sha256:abc123".to_string()),
+            container_id: Some(format!("container-{}", name)),
+            status,
+            created_at: fixed_time,
+            last_used: fixed_time,
+            workspace_path: PathBuf::from("/tmp/test"),
+            metadata: HashMap::new(),
+            compose_project: Some(project.to_string()),
+            compose_service: Some(service.to_string()),
         }
     }
 
@@ -487,9 +525,11 @@ impl App {
             active_shell_container: None,
             container_op: None,
             container_op_rx: None,
-            container_stats: HashMap::new(),
-            stats_rx: None,
-            stats_polling_ids: Vec::new(),
+            compose_services: HashMap::new(),
+            compose_services_table_state: TableState::default(),
+            compose_selected_service: 0,
+            compose_services_loading: false,
+            logs_service_name: None,
             auto_port_detectors: HashMap::new(),
             auto_forward_configs: HashMap::new(),
             auto_forwarded_ports: HashSet::new(),
@@ -808,58 +848,72 @@ impl App {
         }
     }
 
-    /// Ensure stats poller is running for the current set of running containers.
-    /// Restarts the poller if the set of running container IDs has changed.
-    async fn ensure_stats_poller(&mut self) {
-        if self.tab != Tab::Containers {
+    /// Fetch compose services for the currently selected container
+    async fn fetch_compose_services(&mut self) {
+        let container = match self.selected_container() {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        // Only fetch for compose containers
+        if container.compose_project.is_none() {
             return;
         }
 
-        let running_ids: Vec<String> = self
-            .containers
-            .iter()
-            .filter(|c| c.status == DevcContainerStatus::Running)
-            .filter_map(|c| c.container_id.clone())
-            .collect();
-
-        // Check if the set of running IDs changed
-        if running_ids == self.stats_polling_ids {
+        // Already cached
+        if self.compose_services.contains_key(&container.id) {
             return;
         }
 
-        self.stats_polling_ids = running_ids.clone();
+        self.compose_services_loading = true;
 
-        if running_ids.is_empty() {
-            self.stats_rx = None;
-            self.container_stats.clear();
-            return;
-        }
-
-        // Create a provider for polling
-        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
-        let provider: Option<Arc<dyn ContainerProvider>> = Self::create_cli_provider(provider_type)
-            .await
-            .ok()
-            .map(|p| Arc::new(p) as Arc<dyn ContainerProvider>);
-
-        if let Some(provider) = provider {
-            let container_ids: Vec<devc_provider::ContainerId> = running_ids
-                .iter()
-                .map(|id| devc_provider::ContainerId::new(id.clone()))
-                .collect();
-            self.stats_rx = Some(spawn_stats_poller(provider, container_ids));
-        }
-    }
-
-    /// Poll stats receiver and update cached stats
-    fn poll_stats(&mut self) {
-        if let Some(ref mut rx) = self.stats_rx {
-            while let Ok(stats_vec) = rx.try_recv() {
-                for stat in stats_vec {
-                    self.container_stats.insert(stat.id.0.clone(), stat);
+        // Load compose file paths from the devcontainer config
+        let compose_info = {
+            let core_container = match Container::from_config(&container.config_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    self.compose_services_loading = false;
+                    return;
                 }
+            };
+            let files = match core_container.compose_files() {
+                Some(f) => f,
+                None => {
+                    self.compose_services_loading = false;
+                    return;
+                }
+            };
+            let project_name = core_container.compose_project_name();
+            let workspace_path = core_container.workspace_path.clone();
+            (files, project_name, workspace_path)
+        };
+
+        let (files, project_name, workspace_path) = compose_info;
+
+        // Create a provider for the compose_ps call
+        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+        let provider = match Self::create_cli_provider(provider_type).await {
+            Ok(p) => p,
+            Err(_) => {
+                self.compose_services_loading = false;
+                return;
+            }
+        };
+
+        let file_strs: Vec<String> = files.iter().map(|f| f.to_string_lossy().to_string()).collect();
+        let file_refs: Vec<&str> = file_strs.iter().map(|s| s.as_str()).collect();
+
+        match provider.compose_ps(&file_refs, &project_name, &workspace_path).await {
+            Ok(services) => {
+                self.compose_services.insert(container.id.clone(), services);
+            }
+            Err(_) => {
+                // Store empty vec so we don't retry
+                self.compose_services.insert(container.id.clone(), Vec::new());
             }
         }
+
+        self.compose_services_loading = false;
     }
 
     /// Handle a single build progress message
@@ -892,9 +946,6 @@ impl App {
                 if self.tab == Tab::Containers && self.view == View::Main && !self.loading {
                     self.refresh_containers().await?;
                 }
-                // Resource monitoring: ensure stats poller is running and drain updates
-                self.ensure_stats_poller().await;
-                self.poll_stats();
                 // Auto port forwarding: ensure detectors are running and poll for updates
                 self.ensure_auto_port_detection().await;
                 self.poll_auto_port_detectors().await;
@@ -1087,6 +1138,7 @@ impl App {
                     return Ok(());
                 }
                 if self.view != View::Main {
+                    self.cleanup_view_state();
                     self.view = View::Main;
                 } else {
                     self.should_quit = true;
@@ -1099,6 +1151,7 @@ impl App {
                     return Ok(());
                 }
                 if self.view != View::Main {
+                    self.cleanup_view_state();
                     self.view = View::Main;
                 }
                 return Ok(());
@@ -1269,6 +1322,9 @@ impl App {
                 KeyCode::Enter => {
                     if !self.containers.is_empty() {
                         self.view = View::ContainerDetail;
+                        self.compose_selected_service = 0;
+                        self.compose_services_table_state.select(Some(0));
+                        self.fetch_compose_services().await;
                     }
                 }
                 KeyCode::Char('s') => {
@@ -1578,6 +1634,23 @@ impl App {
         Ok(())
     }
 
+    /// Move compose service selection by delta (positive = down, negative = up)
+    fn move_compose_service_selection(&mut self, delta: isize) {
+        if let Some(container) = self.selected_container() {
+            let container_id = container.id.clone();
+            if let Some(services) = self.compose_services.get(&container_id) {
+                if !services.is_empty() {
+                    let len = services.len();
+                    let current = self.compose_selected_service as isize;
+                    self.compose_selected_service =
+                        ((current + delta).rem_euclid(len as isize)) as usize;
+                    self.compose_services_table_state
+                        .select(Some(self.compose_selected_service));
+                }
+            }
+        }
+    }
+
     /// Handle container detail view keys
     async fn handle_detail_key(
         &mut self,
@@ -1585,6 +1658,20 @@ impl App {
         _modifiers: KeyModifiers,
     ) -> AppResult<()> {
         match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.move_compose_service_selection(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.move_compose_service_selection(-1);
+            }
+            KeyCode::Char('r') | KeyCode::F(5) => {
+                // Refresh: invalidate cached services and re-fetch
+                if let Some(container) = self.selected_container() {
+                    let id = container.id.clone();
+                    self.compose_services.remove(&id);
+                }
+                self.fetch_compose_services().await;
+            }
             KeyCode::Char('s') => {
                 self.toggle_selected().await?;
             }
@@ -2051,6 +2138,16 @@ impl App {
         self.container_op = None;
         self.container_op_rx = None;
 
+        let affected_id = match &result {
+            ContainerOpResult::Success(op) | ContainerOpResult::Failed(op, _) => {
+                match op {
+                    ContainerOperation::Starting { id, .. }
+                    | ContainerOperation::Stopping { id, .. }
+                    | ContainerOperation::Deleting { id, .. } => Some(id.clone()),
+                }
+            }
+        };
+
         match result {
             ContainerOpResult::Success(op) => {
                 let msg = match &op {
@@ -2072,6 +2169,16 @@ impl App {
 
         self.loading = false;
         self.refresh_containers().await?;
+
+        // Invalidate cached compose services so status gets refreshed
+        if let Some(id) = affected_id {
+            self.compose_services.remove(&id);
+        }
+        // Re-fetch if still in detail view
+        if self.view == View::ContainerDetail {
+            self.fetch_compose_services().await;
+        }
+
         Ok(())
     }
 
@@ -2143,6 +2250,30 @@ impl App {
         }
     }
 
+    /// Detect which shell is available in the container.
+    /// Tests the configured shell first, falls back to /bin/sh.
+    #[cfg(unix)]
+    fn detect_shell(provider_type: ProviderType, container_id: &str, preferred: &str) -> String {
+        let runtime = match provider_type {
+            ProviderType::Docker => "docker",
+            ProviderType::Podman => "podman",
+        };
+
+        let result = std::process::Command::new(runtime)
+            .args(["exec", container_id, "test", "-x", preferred])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        if let Ok(status) = result {
+            if status.success() {
+                return preferred.to_string();
+            }
+        }
+
+        "/bin/sh".to_string()
+    }
+
     /// Run shell session - called from main loop when View::Shell
     ///
     /// Uses kill/recreate pattern for EventHandler instead of pause/resume.
@@ -2211,7 +2342,8 @@ impl App {
                 if !p.is_alive() {
                     // PTY died while we were away, spawn a new one below
                     drop(p);
-                    let config = self.make_shell_config(provider_type, provider_container_id.clone());
+                    let mut config = self.make_shell_config(provider_type, provider_container_id.clone());
+                    config.shell = Self::detect_shell(provider_type, &provider_container_id, &config.shell);
                     match PtyShell::spawn(&config) {
                         Ok(new_p) => new_p,
                         Err(e) => {
@@ -2240,7 +2372,8 @@ impl App {
             }
             _ => {
                 // Spawn new PTY
-                let config = self.make_shell_config(provider_type, provider_container_id.clone());
+                let mut config = self.make_shell_config(provider_type, provider_container_id.clone());
+                config.shell = Self::detect_shell(provider_type, &provider_container_id, &config.shell);
                 match PtyShell::spawn(&config) {
                     Ok(p) => p,
                     Err(e) => {
@@ -2349,6 +2482,10 @@ impl App {
             self.containers_table_state.select(Some(self.selected));
         }
 
+        // Invalidate stale compose_services entries for containers that no longer exist
+        let container_ids: HashSet<String> = self.containers.iter().map(|c| c.id.clone()).collect();
+        self.compose_services.retain(|id, _| container_ids.contains(id));
+
         Ok(())
     }
 
@@ -2438,12 +2575,13 @@ impl App {
             }
         }
 
+        self.build_complete = true;
         self.loading = false;
         self.refresh_containers().await?;
         Ok(())
     }
 
-    /// Fetch logs for the selected container
+    /// Fetch logs for the selected container or companion service
     async fn fetch_logs(&mut self) -> AppResult<()> {
         if self.containers.is_empty() {
             return Ok(());
@@ -2451,6 +2589,71 @@ impl App {
 
         let container = &self.containers[self.selected];
 
+        // Check if we should fetch logs for a companion service
+        let companion = if self.view == View::ContainerDetail {
+            let container_id = container.id.clone();
+            self.compose_services.get(&container_id).and_then(|services| {
+                services.get(self.compose_selected_service).and_then(|svc| {
+                    // If this is the primary service, use normal log path
+                    let is_primary = container.compose_service.as_deref() == Some(&svc.service_name);
+                    if is_primary {
+                        None
+                    } else {
+                        Some((svc.container_id.clone(), svc.service_name.clone()))
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
+        if let Some((svc_container_id, svc_name)) = companion {
+            // Fetch logs directly from the provider for the companion service
+            self.status_message = Some(format!("Loading logs for {}...", svc_name));
+            self.loading = true;
+
+            let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+            match Self::create_cli_provider(provider_type).await {
+                Ok(provider) => {
+                    let log_config = devc_provider::LogConfig {
+                        follow: false,
+                        stdout: true,
+                        stderr: true,
+                        tail: Some(1000),
+                        timestamps: false,
+                        since: None,
+                        until: None,
+                    };
+                    match provider.logs(&svc_container_id, &log_config).await {
+                        Ok(log_stream) => {
+                            use tokio::io::AsyncBufReadExt;
+                            let reader = tokio::io::BufReader::new(log_stream.stream);
+                            let mut lines_reader = reader.lines();
+                            let mut lines = Vec::new();
+                            while let Ok(Some(line)) = lines_reader.next_line().await {
+                                lines.push(line);
+                            }
+                            self.logs = lines;
+                            self.logs_scroll = self.logs.len().saturating_sub(1);
+                            self.logs_service_name = Some(svc_name);
+                            self.view = View::Logs;
+                            self.status_message = Some(format!("{} log lines", self.logs.len()));
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to fetch logs: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to create provider: {}", e));
+                }
+            }
+
+            self.loading = false;
+            return Ok(());
+        }
+
+        // Normal path: fetch logs for the primary container
         if container.container_id.is_none() {
             self.status_message = Some("Container has not been created yet".to_string());
             return Ok(());
@@ -2458,6 +2661,7 @@ impl App {
 
         self.status_message = Some(format!("Loading logs for {}...", container.name));
         self.loading = true;
+        self.logs_service_name = None;
 
         match self.manager.read().await.logs(&container.id, Some(1000)).await {
             Ok(lines) => {
@@ -2647,6 +2851,21 @@ impl App {
         )
     }
 
+    /// Clean up view-specific state when leaving any view
+    fn cleanup_view_state(&mut self) {
+        match self.view {
+            View::ContainerDetail => {
+                self.compose_selected_service = 0;
+                self.compose_services_table_state = TableState::default();
+                self.compose_services_loading = false;
+            }
+            View::Logs => {
+                self.logs_service_name = None;
+            }
+            _ => {}
+        }
+    }
+
     /// Close the current popup view with proper cleanup
     fn close_current_view(&mut self) {
         match self.view {
@@ -2663,6 +2882,7 @@ impl App {
             }
             _ => {}
         }
+        self.cleanup_view_state();
         self.view = View::Main;
     }
 

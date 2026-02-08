@@ -6,9 +6,9 @@ expression: output
 │ 1:Containers  │  2:Providers  │  3:Settings                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Containers ──────────────────────────────────────────────────────────────────┐
-│      Name            Status       CPU     Mem             Provider Workspace │
+│      Name                         Status       Provider Workspace            │
 │                                                                              │
-│▶ ●   test-container  running      -       -               docker   /tmp/test │
+│▶ ●   test-container               running      docker   /tmp/test            │
 │              ┌ Confirm ───────────────────────────────────────┐              │
 │              │                                                │              │
 │              │       Delete container 'test-container'?       │              │

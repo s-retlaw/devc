@@ -29,7 +29,6 @@ pub enum MockCall {
     List { all: bool },
     Logs { id: String },
     Ping,
-    Stats { ids: Vec<String> },
     ComposeUp { project: String },
     ComposeDown { project: String },
     ComposePs { project: String },
@@ -73,8 +72,6 @@ pub struct MockProvider {
     pub copy_into_result: Arc<Mutex<Result<()>>>,
     /// Result for copy_from calls
     pub copy_from_result: Arc<Mutex<Result<()>>>,
-    /// Result for stats calls
-    pub stats_result: Arc<Mutex<Result<Vec<ContainerStats>>>>,
     /// Result for compose_up calls
     pub compose_up_result: Arc<Mutex<Result<()>>>,
     /// Result for compose_down calls
@@ -108,7 +105,6 @@ impl MockProvider {
             discover_result: Arc::new(Mutex::new(Ok(Vec::new()))),
             copy_into_result: Arc::new(Mutex::new(Ok(()))),
             copy_from_result: Arc::new(Mutex::new(Ok(()))),
-            stats_result: Arc::new(Mutex::new(Ok(Vec::new()))),
             compose_up_result: Arc::new(Mutex::new(Ok(()))),
             compose_down_result: Arc::new(Mutex::new(Ok(()))),
             compose_ps_result: Arc::new(Mutex::new(Ok(Vec::new()))),
@@ -395,10 +391,4 @@ impl ContainerProvider for MockProvider {
         clone_result(&self.compose_ps_result)
     }
 
-    async fn stats(&self, ids: &[&ContainerId]) -> Result<Vec<ContainerStats>> {
-        self.record(MockCall::Stats {
-            ids: ids.iter().map(|id| id.0.clone()).collect(),
-        });
-        clone_result(&self.stats_result)
-    }
 }
