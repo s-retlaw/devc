@@ -917,45 +917,7 @@ impl ContainerProvider for CliProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut services = Vec::new();
-
-        // Try parsing as a JSON array first (podman-compose format),
-        // then fall back to one-JSON-object-per-line (docker compose format).
-        let entries: Vec<serde_json::Value> =
-            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(stdout.trim()) {
-                arr
-            } else {
-                stdout
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
-                    .collect()
-            };
-
-        for parsed in entries {
-            // Docker compose uses "Service"; podman-compose stores it in labels
-            let service_name = parsed["Service"]
-                .as_str()
-                .or_else(|| parsed["Labels"]["com.docker.compose.service"].as_str())
-                .unwrap_or("")
-                .to_string();
-            // Docker compose uses "ID"; podman-compose uses "Id"
-            let container_id = parsed["ID"]
-                .as_str()
-                .or_else(|| parsed["Id"].as_str())
-                .unwrap_or("")
-                .to_string();
-            let state = parsed["State"]
-                .as_str()
-                .unwrap_or("unknown");
-
-            services.push(crate::ComposeServiceInfo {
-                service_name,
-                container_id: ContainerId::new(container_id),
-                status: ContainerStatus::from(state),
-            });
-        }
-
-        Ok(services)
+        Ok(parse_compose_ps_output(&stdout))
     }
 
     async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>> {
@@ -1038,6 +1000,53 @@ fn detect_devcontainer_source_from_labels(
     (false, DevcontainerSource::Other, false)
 }
 
+/// Parse the JSON output of `docker/podman compose ps --format=json`.
+///
+/// Handles both podman-compose (JSON array with `Id`, `State`, and service in
+/// `Labels["com.docker.compose.service"]`) and docker compose (one JSON object
+/// per line with `ID`, `Service`, `State`).
+fn parse_compose_ps_output(stdout: &str) -> Vec<crate::ComposeServiceInfo> {
+    let mut services = Vec::new();
+
+    // Try parsing as a JSON array first (podman-compose format),
+    // then fall back to one-JSON-object-per-line (docker compose format).
+    let entries: Vec<serde_json::Value> =
+        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(stdout.trim()) {
+            arr
+        } else {
+            stdout
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+                .collect()
+        };
+
+    for parsed in entries {
+        // Docker compose uses "Service"; podman-compose stores it in labels
+        let service_name = parsed["Service"]
+            .as_str()
+            .or_else(|| parsed["Labels"]["com.docker.compose.service"].as_str())
+            .unwrap_or("")
+            .to_string();
+        // Docker compose uses "ID"; podman-compose uses "Id"
+        let container_id = parsed["ID"]
+            .as_str()
+            .or_else(|| parsed["Id"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let state = parsed["State"]
+            .as_str()
+            .unwrap_or("unknown");
+
+        services.push(crate::ComposeServiceInfo {
+            service_name,
+            container_id: ContainerId::new(container_id),
+            status: ContainerStatus::from(state),
+        });
+    }
+
+    services
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1115,6 +1124,67 @@ mod tests {
         labels.insert("com.docker.compose.service".to_string(), "web".to_string());
         let (is_dc, _source, _managed) = detect_devcontainer_source_from_labels(&labels);
         assert!(!is_dc);
+    }
+
+    // ==================== parse_compose_ps_output tests ====================
+
+    #[test]
+    fn test_parse_compose_ps_podman_format() {
+        // Podman-compose returns a JSON array with Id, State,
+        // and service name in Labels["com.docker.compose.service"]
+        let stdout = r#"[
+            {
+                "Id": "abc123def456",
+                "State": "running",
+                "Labels": {
+                    "com.docker.compose.service": "web"
+                }
+            },
+            {
+                "Id": "789xyz000111",
+                "State": "exited",
+                "Labels": {
+                    "com.docker.compose.service": "db"
+                }
+            }
+        ]"#;
+
+        let services = parse_compose_ps_output(stdout);
+        assert_eq!(services.len(), 2);
+
+        assert_eq!(services[0].service_name, "web");
+        assert_eq!(services[0].container_id.0, "abc123def456");
+        assert_eq!(services[0].status, ContainerStatus::Running);
+
+        assert_eq!(services[1].service_name, "db");
+        assert_eq!(services[1].container_id.0, "789xyz000111");
+        assert_eq!(services[1].status, ContainerStatus::Exited);
+    }
+
+    #[test]
+    fn test_parse_compose_ps_docker_format() {
+        // Docker compose returns one JSON object per line (NDJSON)
+        // with ID, Service, State fields
+        let stdout = r#"{"ID":"aaa111","Service":"app","State":"running"}
+{"ID":"bbb222","Service":"redis","State":"exited"}"#;
+
+        let services = parse_compose_ps_output(stdout);
+        assert_eq!(services.len(), 2);
+
+        assert_eq!(services[0].service_name, "app");
+        assert_eq!(services[0].container_id.0, "aaa111");
+        assert_eq!(services[0].status, ContainerStatus::Running);
+
+        assert_eq!(services[1].service_name, "redis");
+        assert_eq!(services[1].container_id.0, "bbb222");
+        assert_eq!(services[1].status, ContainerStatus::Exited);
+    }
+
+    #[test]
+    fn test_parse_compose_ps_empty_output() {
+        assert!(parse_compose_ps_output("").is_empty());
+        assert!(parse_compose_ps_output("  ").is_empty());
+        assert!(parse_compose_ps_output("\n\n").is_empty());
     }
 
     /// Get a provider for testing (tries toolbox, podman, then docker)

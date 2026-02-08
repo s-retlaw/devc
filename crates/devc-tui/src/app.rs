@@ -2926,3 +2926,104 @@ impl App {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devc_provider::{ComposeServiceInfo, ContainerId, ContainerStatus};
+
+    #[test]
+    fn test_compose_service_selection_forward_wraps() {
+        let mut app = App::new_for_testing();
+        let container =
+            App::create_test_compose_container("myapp", DevcContainerStatus::Running, "proj", "app");
+        let cid = container.id.clone();
+        app.containers.push(container);
+        app.selected = 0;
+
+        // Insert 3 services for this container
+        app.compose_services.insert(
+            cid.clone(),
+            vec![
+                ComposeServiceInfo {
+                    service_name: "app".to_string(),
+                    container_id: ContainerId::new("c1"),
+                    status: ContainerStatus::Running,
+                },
+                ComposeServiceInfo {
+                    service_name: "db".to_string(),
+                    container_id: ContainerId::new("c2"),
+                    status: ContainerStatus::Running,
+                },
+                ComposeServiceInfo {
+                    service_name: "redis".to_string(),
+                    container_id: ContainerId::new("c3"),
+                    status: ContainerStatus::Running,
+                },
+            ],
+        );
+
+        assert_eq!(app.compose_selected_service, 0);
+        app.move_compose_service_selection(1); // 0 -> 1
+        assert_eq!(app.compose_selected_service, 1);
+        app.move_compose_service_selection(1); // 1 -> 2
+        assert_eq!(app.compose_selected_service, 2);
+        app.move_compose_service_selection(1); // 2 -> 0 (wraps)
+        assert_eq!(app.compose_selected_service, 0);
+        app.move_compose_service_selection(1); // 0 -> 1
+        assert_eq!(app.compose_selected_service, 1);
+    }
+
+    #[test]
+    fn test_compose_service_selection_backward_wraps() {
+        let mut app = App::new_for_testing();
+        let container =
+            App::create_test_compose_container("myapp", DevcContainerStatus::Running, "proj", "app");
+        let cid = container.id.clone();
+        app.containers.push(container);
+        app.selected = 0;
+
+        app.compose_services.insert(
+            cid.clone(),
+            vec![
+                ComposeServiceInfo {
+                    service_name: "app".to_string(),
+                    container_id: ContainerId::new("c1"),
+                    status: ContainerStatus::Running,
+                },
+                ComposeServiceInfo {
+                    service_name: "db".to_string(),
+                    container_id: ContainerId::new("c2"),
+                    status: ContainerStatus::Running,
+                },
+                ComposeServiceInfo {
+                    service_name: "redis".to_string(),
+                    container_id: ContainerId::new("c3"),
+                    status: ContainerStatus::Running,
+                },
+            ],
+        );
+
+        assert_eq!(app.compose_selected_service, 0);
+        app.move_compose_service_selection(-1); // 0 -> 2 (wraps backward)
+        assert_eq!(app.compose_selected_service, 2);
+        app.move_compose_service_selection(-1); // 2 -> 1
+        assert_eq!(app.compose_selected_service, 1);
+    }
+
+    #[test]
+    fn test_compose_service_selection_empty_noop() {
+        let mut app = App::new_for_testing();
+        let container =
+            App::create_test_compose_container("myapp", DevcContainerStatus::Running, "proj", "app");
+        app.containers.push(container);
+        app.selected = 0;
+        // No services in compose_services map
+
+        app.compose_selected_service = 0;
+        app.move_compose_service_selection(1);
+        assert_eq!(app.compose_selected_service, 0);
+        app.move_compose_service_selection(-1);
+        assert_eq!(app.compose_selected_service, 0);
+    }
+}

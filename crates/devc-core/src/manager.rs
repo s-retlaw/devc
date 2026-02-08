@@ -2747,4 +2747,127 @@ mod tests {
         assert!(recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })));
         assert!(!recorded.iter().any(|c| matches!(c, MockCall::ComposeDown { .. })));
     }
+
+    // ==================== Compose Start / Stop ====================
+
+    /// Helper: create a compose workspace with devcontainer.json + docker-compose.yml
+    fn create_compose_workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"dockerComposeFile": "docker-compose.yml", "service": "app", "workspaceFolder": "/workspace"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            devcontainer_dir.join("docker-compose.yml"),
+            "version: '3'\nservices:\n  app:\n    image: ubuntu:22.04\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[tokio::test]
+    async fn test_compose_start_calls_compose_up_and_sets_container_id() {
+        let workspace = create_compose_workspace();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
+            service_name: "app".to_string(),
+            container_id: ContainerId::new("compose_start_abc"),
+            status: ContainerStatus::Running,
+        }]);
+
+        let mut state = StateStore::new();
+        // Use Stopped status — can_start() requires Created or Stopped
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Stopped,
+            None,
+            None,
+        );
+        cs.compose_project = Some("devc-test".to_string());
+        cs.compose_service = Some("app".to_string());
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.start(&id).await.unwrap();
+
+        // Verify compose_up and compose_ps were called
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposeUp { .. })));
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposePs { .. })));
+
+        // Verify container_id was set from the matched service
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.container_id, Some("compose_start_abc".to_string()));
+        assert_eq!(cs.status, DevcContainerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_compose_start_service_not_found_returns_error() {
+        let workspace = create_compose_workspace();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        // compose_ps returns a service that does NOT match the primary service "app"
+        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
+            service_name: "db".to_string(),
+            container_id: ContainerId::new("compose_db_123"),
+            status: ContainerStatus::Running,
+        }]);
+
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Stopped,
+            None,
+            None,
+        );
+        cs.compose_project = Some("devc-test".to_string());
+        cs.compose_service = Some("app".to_string());
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.start(&id).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_compose_stop_calls_compose_down() {
+        let workspace = create_compose_workspace();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("compose"),
+            Some("compose_container_456"),
+        );
+        cs.compose_project = Some("devc-test".to_string());
+        cs.compose_service = Some("app".to_string());
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.stop(&id).await.unwrap();
+
+        // Should call compose_down, NOT individual stop
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposeDown { .. })));
+        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
+
+        // container_id should be cleared
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert!(cs.container_id.is_none());
+        assert_eq!(cs.status, DevcContainerStatus::Stopped);
+    }
 }
