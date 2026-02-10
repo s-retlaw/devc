@@ -108,16 +108,14 @@ impl Container {
         let mut devcontainer = DevContainerConfig::load_from(config_path)?;
         let global_config = GlobalConfig::load()?;
 
-        // Workspace is parent of .devcontainer directory or config file
+        // Workspace is parent of .devcontainer directory or config file.
+        // For subdirectory configs like .devcontainer/python/devcontainer.json,
+        // we need to find the .devcontainer ancestor and go up from there.
         let workspace_path = config_path
-            .parent()
-            .and_then(|p| {
-                if p.file_name().map(|n| n == ".devcontainer").unwrap_or(false) {
-                    p.parent()
-                } else {
-                    Some(p)
-                }
-            })
+            .ancestors()
+            .find(|a| a.file_name().map(|n| n == ".devcontainer").unwrap_or(false))
+            .and_then(|dc| dc.parent())
+            .or_else(|| config_path.parent())
             .unwrap_or(Path::new("."))
             .to_path_buf();
 
@@ -135,9 +133,27 @@ impl Container {
             .name
             .clone()
             .or_else(|| {
-                workspace_path
+                // For subdirectory configs like .devcontainer/python/devcontainer.json,
+                // use "workspace-subdir" format to disambiguate
+                let workspace_name = workspace_path
                     .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
+                    .map(|n| n.to_string_lossy().to_string())?;
+                let subdir_name = config_path.parent().and_then(|parent| {
+                    // Check if parent is a subdirectory of .devcontainer
+                    // (i.e., parent is not .devcontainer itself)
+                    let parent_name = parent.file_name()?;
+                    if parent_name == ".devcontainer" {
+                        return None;
+                    }
+                    // Verify there's a .devcontainer ancestor
+                    parent.ancestors().any(|a| {
+                        a.file_name().map(|n| n == ".devcontainer").unwrap_or(false)
+                    }).then(|| parent_name.to_string_lossy().to_string())
+                });
+                match subdir_name {
+                    Some(sub) => Some(format!("{}-{}", workspace_name, sub)),
+                    None => Some(workspace_name),
+                }
             })
             .unwrap_or_else(|| "devcontainer".to_string());
 
@@ -936,5 +952,64 @@ mod tests {
         let cmd = devc_config::Command::Object(commands);
         let result = run_host_command(&cmd, &dir);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_from_config_subdir_workspace_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer/python");
+        std::fs::create_dir_all(&dc).unwrap();
+        let config_path = dc.join("devcontainer.json");
+        std::fs::write(&config_path, r#"{"image": "python:3.12"}"#).unwrap();
+
+        let container = Container::from_config(&config_path).unwrap();
+        // Workspace should be the project root, not the subdir
+        assert_eq!(container.workspace_path, tmp.path());
+    }
+
+    #[test]
+    fn test_from_config_subdir_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer/python");
+        std::fs::create_dir_all(&dc).unwrap();
+        let config_path = dc.join("devcontainer.json");
+        std::fs::write(&config_path, r#"{"image": "python:3.12"}"#).unwrap();
+
+        let container = Container::from_config(&config_path).unwrap();
+        let workspace_name = tmp.path().file_name().unwrap().to_string_lossy();
+        let expected_prefix = sanitize_name(&workspace_name);
+        // Name should be "{sanitized_workspace}-python"
+        assert!(container.name.ends_with("-python"), "name was: {}", container.name);
+        assert!(container.name.starts_with(&expected_prefix),
+            "name was: {}, expected to start with: {}", container.name, expected_prefix);
+    }
+
+    #[test]
+    fn test_from_config_toplevel_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&dc).unwrap();
+        let config_path = dc.join("devcontainer.json");
+        std::fs::write(&config_path, r#"{"image": "ubuntu:22.04"}"#).unwrap();
+
+        let container = Container::from_config(&config_path).unwrap();
+        let workspace_name = tmp.path().file_name().unwrap().to_string_lossy();
+        // Name should just be workspace name (no subdir suffix)
+        assert_eq!(container.name, sanitize_name(&workspace_name));
+        assert!(!container.name.contains('-') || workspace_name.contains('-'),
+            "name should not have subdir suffix: {}", container.name);
+    }
+
+    #[test]
+    fn test_from_config_explicit_name_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer/python");
+        std::fs::create_dir_all(&dc).unwrap();
+        let config_path = dc.join("devcontainer.json");
+        std::fs::write(&config_path, r#"{"name": "My App", "image": "python:3.12"}"#).unwrap();
+
+        let container = Container::from_config(&config_path).unwrap();
+        // Explicit name takes precedence
+        assert_eq!(container.name, "my-app");
     }
 }

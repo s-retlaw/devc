@@ -198,60 +198,142 @@ fn draw_header_with_tabs(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(tabs, area);
 }
 
+/// Build context-sensitive footer help for the container list view
+fn container_list_footer(app: &App) -> String {
+    if app.containers.is_empty() {
+        return "D: Discover  ?: Help  q: Quit".to_string();
+    }
+
+    let status = app.selected_container().map(|c| c.status);
+    let mut keys = Vec::new();
+
+    if let Some(st) = status {
+        match st {
+            DevcContainerStatus::Running => keys.push("s: Stop"),
+            DevcContainerStatus::Stopped | DevcContainerStatus::Created => keys.push("s: Start"),
+            _ => {}
+        }
+        match st {
+            DevcContainerStatus::Configured
+            | DevcContainerStatus::Built
+            | DevcContainerStatus::Created
+            | DevcContainerStatus::Stopped
+            | DevcContainerStatus::Failed => keys.push("u: Up"),
+            _ => {}
+        }
+        if st != DevcContainerStatus::Building {
+            keys.push("R: Rebuild");
+        }
+        if st == DevcContainerStatus::Running {
+            keys.push("p: Ports");
+            keys.push("S: Shell");
+            keys.push("l: Logs");
+        }
+        if st != DevcContainerStatus::Building {
+            keys.push("d: Delete");
+        }
+    }
+
+    let action_part = keys.join("  ");
+    if action_part.is_empty() {
+        "D: Discover  j/k: Navigate  Enter: Details  ?: Help  q: Quit".to_string()
+    } else {
+        format!("D: Discover  j/k: Navigate  Enter: Details  {}  ?: Help  q: Quit", action_part)
+    }
+}
+
+/// Build context-sensitive footer help for the container detail view
+fn container_detail_footer(app: &App) -> String {
+    let has_services = app.selected_container()
+        .and_then(|c| app.compose_services.get(&c.id))
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    let status = app.selected_container().map(|c| c.status);
+    let mut keys = Vec::new();
+
+    if has_services {
+        keys.push("j/k: Select service");
+    }
+
+    if let Some(st) = status {
+        match st {
+            DevcContainerStatus::Running => keys.push("s: Stop"),
+            DevcContainerStatus::Stopped | DevcContainerStatus::Created => keys.push("s: Start"),
+            _ => {}
+        }
+        match st {
+            DevcContainerStatus::Configured
+            | DevcContainerStatus::Built
+            | DevcContainerStatus::Created
+            | DevcContainerStatus::Stopped
+            | DevcContainerStatus::Failed => keys.push("u: Up"),
+            _ => {}
+        }
+        if st != DevcContainerStatus::Building {
+            keys.push("R: Rebuild");
+        }
+        if st == DevcContainerStatus::Running {
+            keys.push("l: Logs");
+            keys.push("S: Shell");
+        }
+        if st != DevcContainerStatus::Building {
+            keys.push("d: Delete");
+        }
+    }
+
+    let action_part = keys.join("  ");
+    if action_part.is_empty() {
+        "1-3: Switch tab  Esc/q: Back  ?: Help".to_string()
+    } else {
+        format!("{}  1-3: Switch tab  Esc/q: Back  ?: Help", action_part)
+    }
+}
+
 /// Draw the footer with context-sensitive help
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let help_text = match app.view {
+    let help_text: String = match app.view {
         View::Main => match app.tab {
             Tab::Containers => {
                 if app.discover_mode {
-                    "Esc/q: Exit  j/k: Navigate  a: Adopt  r: Refresh  ?: Help"
+                    "Esc/q: Exit  j/k: Navigate  a: Adopt  r: Refresh  ?: Help".to_string()
                 } else {
-                    "D: Discover  j/k: Navigate  Enter: Details  s: Start/Stop  u: Up  R: Rebuild  p: Ports  S: Shell  d: Delete  ?: Help  q: Quit"
+                    container_list_footer(app)
                 }
             }
             Tab::Providers => {
-                "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Configure  Space/a: Set Active  s: Save  ?: Help  q: Quit"
+                "Tab/1-3: Switch tabs  j/k: Navigate  Enter: Configure  Space/a: Set Active  s: Save  ?: Help  q: Quit".to_string()
             }
             Tab::Settings => {
                 if app.settings_state.editing {
-                    "Enter: Confirm  Esc: Cancel  Type to edit"
+                    "Enter: Confirm  Esc: Cancel  Type to edit".to_string()
                 } else {
-                    "Tab/1-3: Switch tabs  j/k: Navigate  Enter/Space: Edit  s: Save  r: Reset  ?: Help  q: Quit"
+                    "Tab/1-3: Switch tabs  j/k: Navigate  Enter/Space: Edit  s: Save  r: Reset  ?: Help  q: Quit".to_string()
                 }
             }
         },
-        View::ContainerDetail => {
-            let has_services = app.selected_container()
-                .and_then(|c| app.compose_services.get(&c.id))
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
-            if has_services {
-                "j/k: Select service  l: Logs  s: Start/Stop  u: Up  R: Rebuild  S: Shell  q: Back"
-            } else {
-                "s: Start/Stop  u: Up  R: Rebuild  l: Logs  S: Shell  1-3: Switch tab  Esc/q: Back  ?: Help"
-            }
-        }
+        View::ContainerDetail => container_detail_footer(app),
         View::ProviderDetail => {
             if app.provider_detail_state.editing {
-                "Enter: Confirm  Esc: Cancel  Type to edit"
+                "Enter: Confirm  Esc: Cancel  Type to edit".to_string()
             } else {
-                "e: Edit Socket  t: Test  a/Space: Set Active  s: Save  1-3: Switch tab  Esc/q: Back"
+                "e: Edit Socket  t: Test  a/Space: Set Active  s: Save  1-3: Switch tab  Esc/q: Back".to_string()
             }
         }
         View::BuildOutput => {
             if app.build_complete {
-                "j/k: Scroll  g/G: Top/Bottom  c: Copy  q/Esc: Close"
+                "j/k: Scroll  g/G: Top/Bottom  c: Copy  q/Esc: Close".to_string()
             } else {
-                "j/k: Scroll  g/G: Top/Bottom  c: Copy  (building...)"
+                "j/k: Scroll  g/G: Top/Bottom  c: Copy  (building...)".to_string()
             }
         }
-        View::Logs => "j/k: Scroll  g/G: Top/Bottom  PgUp/PgDn: Page  r: Refresh  Esc/q: Back",
+        View::Logs => "j/k: Scroll  g/G: Top/Bottom  PgUp/PgDn: Page  r: Refresh  Esc/q: Back".to_string(),
         View::Ports => {
             // Show install option if socat not installed
             if app.socat_installed == Some(false) && !app.socat_installing {
-                "[i]nstall socat  j/k: Navigate  1-3: Switch tab  q/Esc: Back"
+                "[i]nstall socat  j/k: Navigate  1-3: Switch tab  q/Esc: Back".to_string()
             } else if app.socat_installing {
-                "Installing socat...  q/Esc: Back"
+                "Installing socat...  q/Esc: Back".to_string()
             } else {
                 let is_forwarded = app
                     .detected_ports
@@ -259,27 +341,27 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     .map(|p| p.is_forwarded)
                     .unwrap_or(false);
                 if is_forwarded {
-                    "[s]top  [o]pen browser  [n]one  j/k: Navigate  1-3: Switch tab  q/Esc: Back"
+                    "[s]top  [o]pen browser  [n]one  j/k: Navigate  1-3: Switch tab  q/Esc: Back".to_string()
                 } else {
-                    "[f]orward  [a]ll  j/k: Navigate  1-3: Switch tab  q/Esc: Back"
+                    "[f]orward  [a]ll  j/k: Navigate  1-3: Switch tab  q/Esc: Back".to_string()
                 }
             }
         }
-        View::Help => "Press any key to close",
+        View::Help => "Press any key to close".to_string(),
         View::Confirm => {
             if matches!(app.confirm_action, Some(ConfirmAction::Rebuild { .. })) {
-                "y/Enter: Confirm  n/Esc: Cancel  Space: Toggle no-cache"
+                "y/Enter: Confirm  n/Esc: Cancel  Space: Toggle no-cache".to_string()
             } else {
-                "y/Enter: Yes  n/Esc: No"
+                "y/Enter: Yes  n/Esc: No".to_string()
             }
         }
-        View::Shell => "Ctrl+\\ to detach and return to TUI (session preserved)",
+        View::Shell => "Ctrl+\\ to detach and return to TUI (session preserved)".to_string(),
     };
 
     let status = app.status_message.as_deref().unwrap_or("");
 
     let footer_text = if status.is_empty() {
-        help_text.to_string()
+        help_text
     } else {
         format!("{} │ {}", status, help_text)
     };
@@ -1353,6 +1435,7 @@ fn draw_operation_progress(frame: &mut Frame, app: &App, area: Rect) {
         ContainerOperation::Starting { .. } => "Starting",
         ContainerOperation::Stopping { .. } => "Stopping",
         ContainerOperation::Deleting { .. } => "Deleting",
+        ContainerOperation::Up { .. } => "Container Up",
     };
 
     DialogBuilder::new(title)

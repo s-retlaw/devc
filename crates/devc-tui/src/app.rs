@@ -126,6 +126,7 @@ pub enum ContainerOperation {
     Starting { id: String, name: String },
     Stopping { id: String, name: String },
     Deleting { id: String, name: String },
+    Up { id: String, name: String, progress: String },
 }
 
 impl ContainerOperation {
@@ -134,6 +135,13 @@ impl ContainerOperation {
             ContainerOperation::Starting { name, .. } => format!("Starting {}...", name),
             ContainerOperation::Stopping { name, .. } => format!("Stopping {}...", name),
             ContainerOperation::Deleting { name, .. } => format!("Deleting {}...", name),
+            ContainerOperation::Up { name, progress, .. } => {
+                if progress.is_empty() {
+                    format!("Starting up {}...", name)
+                } else {
+                    progress.clone()
+                }
+            }
         }
     }
 }
@@ -170,6 +178,10 @@ pub struct App {
     pub manager: Arc<RwLock<ContainerManager>>,
     /// Global configuration
     pub config: GlobalConfig,
+    /// Workspace directory for auto-discovery
+    pub workspace_dir: Option<std::path::PathBuf>,
+    /// Last time auto-discovery was run (for debouncing)
+    pub last_discovery: std::time::Instant,
     /// Current tab
     pub tab: Tab,
     /// Current view within the tab
@@ -266,6 +278,8 @@ pub struct App {
     pub container_op: Option<ContainerOperation>,
     /// Channel receiver for container operation results
     pub container_op_rx: Option<mpsc::UnboundedReceiver<ContainerOpResult>>,
+    /// Channel receiver for container operation progress updates (e.g. Up steps)
+    pub container_op_progress_rx: Option<mpsc::UnboundedReceiver<String>>,
 
     // Compose service visibility state
     /// Cached compose service info keyed by devc container ID
@@ -304,6 +318,8 @@ impl App {
         Self {
             manager: Arc::new(RwLock::new(manager)),
             config,
+            workspace_dir: None,
+            last_discovery: std::time::Instant::now(),
             tab: Tab::Containers,
             view: View::Main,
             active_provider: Some(ProviderType::Docker),
@@ -364,6 +380,7 @@ impl App {
             active_shell_container: None,
             container_op: None,
             container_op_rx: None,
+            container_op_progress_rx: None,
             compose_services: HashMap::new(),
             compose_services_table_state: TableState::default(),
             compose_selected_service: 0,
@@ -440,7 +457,14 @@ impl App {
     }
 
     /// Create a new application
-    pub async fn new(manager: ContainerManager) -> AppResult<Self> {
+    pub async fn new(manager: ContainerManager, workspace_dir: Option<&std::path::Path>) -> AppResult<Self> {
+        // Auto-discover local devcontainer.json configs before listing
+        if let Some(dir) = workspace_dir {
+            if let Err(e) = manager.auto_discover_configs(dir).await {
+                tracing::warn!("Auto-discovery failed: {}", e);
+            }
+        }
+
         let containers = manager.list().await?;
         let config = GlobalConfig::load().unwrap_or_default();
         let active_provider = manager.provider_type();
@@ -480,6 +504,8 @@ impl App {
         Ok(Self {
             manager: Arc::new(RwLock::new(manager)),
             config,
+            workspace_dir: workspace_dir.map(|p| p.to_path_buf()),
+            last_discovery: std::time::Instant::now(),
             tab: Tab::Containers,
             view: View::Main,
             active_provider,
@@ -525,6 +551,7 @@ impl App {
             active_shell_container: None,
             container_op: None,
             container_op_rx: None,
+            container_op_progress_rx: None,
             compose_services: HashMap::new(),
             compose_services_table_state: TableState::default(),
             compose_selected_service: 0,
@@ -618,6 +645,16 @@ impl App {
                         self.handle_operation_result(result).await?;
                     }
                 }
+                // Container operation progress updates (e.g. Up steps)
+                progress = Self::recv_op_progress(&mut self.container_op_progress_rx) => {
+                    if let Some(msg) = progress {
+                        if let Some(ref mut op) = self.container_op {
+                            if let ContainerOperation::Up { progress, .. } = op {
+                                *progress = msg;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -632,6 +669,14 @@ impl App {
 
     /// Helper to receive from optional channel
     async fn recv_progress(rx: &mut Option<mpsc::UnboundedReceiver<String>>) -> Option<String> {
+        match rx {
+            Some(ref mut receiver) => receiver.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Helper to receive container operation progress updates
+    async fn recv_op_progress(rx: &mut Option<mpsc::UnboundedReceiver<String>>) -> Option<String> {
         match rx {
             Some(ref mut receiver) => receiver.recv().await,
             None => std::future::pending().await,
@@ -2137,13 +2182,15 @@ impl App {
     async fn handle_operation_result(&mut self, result: ContainerOpResult) -> AppResult<()> {
         self.container_op = None;
         self.container_op_rx = None;
+        self.container_op_progress_rx = None;
 
         let affected_id = match &result {
             ContainerOpResult::Success(op) | ContainerOpResult::Failed(op, _) => {
                 match op {
                     ContainerOperation::Starting { id, .. }
                     | ContainerOperation::Stopping { id, .. }
-                    | ContainerOperation::Deleting { id, .. } => Some(id.clone()),
+                    | ContainerOperation::Deleting { id, .. }
+                    | ContainerOperation::Up { id, .. } => Some(id.clone()),
                 }
             }
         };
@@ -2154,6 +2201,7 @@ impl App {
                     ContainerOperation::Starting { name, .. } => format!("Started {}", name),
                     ContainerOperation::Stopping { name, .. } => format!("Stopped {}", name),
                     ContainerOperation::Deleting { name, .. } => format!("Deleted {}", name),
+                    ContainerOperation::Up { name, .. } => format!("Up completed for {}", name),
                 };
                 self.status_message = Some(msg);
             }
@@ -2162,6 +2210,7 @@ impl App {
                     ContainerOperation::Starting { name, .. } => format!("Start failed for {}: {}", name, err),
                     ContainerOperation::Stopping { name, .. } => format!("Stop failed for {}: {}", name, err),
                     ContainerOperation::Deleting { name, .. } => format!("Delete failed for {}: {}", name, err),
+                    ContainerOperation::Up { name, .. } => format!("Up failed for {}: {}", name, err),
                 };
                 self.status_message = Some(msg);
             }
@@ -2463,6 +2512,14 @@ impl App {
 
     /// Refresh container list
     async fn refresh_containers(&mut self) -> AppResult<()> {
+        // Re-run auto-discovery every 5 seconds to pick up new configs
+        if let Some(ref dir) = self.workspace_dir {
+            if self.last_discovery.elapsed() >= Duration::from_secs(5) {
+                let _ = self.manager.read().await.auto_discover_configs(dir).await;
+                self.last_discovery = std::time::Instant::now();
+            }
+        }
+
         self.containers = self.manager.read().await.list().await?;
 
         // Sync status for all containers
@@ -2553,31 +2610,37 @@ impl App {
 
     /// Run full up (build, create, start) for selected container
     async fn up_selected(&mut self) -> AppResult<()> {
-        if self.containers.is_empty() {
+        if self.containers.is_empty() || self.container_op.is_some() {
             return Ok(());
         }
 
         let container = &self.containers[self.selected];
-        self.status_message = Some(format!("Starting {}...", container.name));
+        let id = container.id.clone();
+        let name = container.name.clone();
+
+        let op = ContainerOperation::Up {
+            id: id.clone(),
+            name: name.clone(),
+            progress: format!("Starting up {}...", name),
+        };
+        self.container_op = Some(op.clone());
         self.loading = true;
-        self.view = View::BuildOutput;
-        self.build_output.clear();
-        self.build_output.push(format!("Starting container: {}", container.name));
+        self.spinner_frame = 0;
 
-        match self.manager.read().await.up(&container.id).await {
-            Ok(()) => {
-                self.build_output.push("Container is running".to_string());
-                self.status_message = Some(format!("{} is running", container.name));
-            }
-            Err(e) => {
-                self.build_output.push(format!("Failed: {}", e));
-                self.status_message = Some(format!("Failed: {}", e));
-            }
-        }
+        let (result_tx, result_rx) = mpsc::unbounded_channel();
+        self.container_op_rx = Some(result_rx);
 
-        self.build_complete = true;
-        self.loading = false;
-        self.refresh_containers().await?;
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        self.container_op_progress_rx = Some(progress_rx);
+
+        let manager = Arc::clone(&self.manager);
+        tokio::spawn(async move {
+            match manager.read().await.up_with_progress(&id, Some(&progress_tx)).await {
+                Ok(()) => { let _ = result_tx.send(ContainerOpResult::Success(op)); }
+                Err(e) => { let _ = result_tx.send(ContainerOpResult::Failed(op, e.to_string())); }
+            }
+        });
+
         Ok(())
     }
 

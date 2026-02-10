@@ -275,6 +275,61 @@ pub struct DotfilesConfig {
 }
 
 impl DevContainerConfig {
+    /// Load ALL devcontainer.json configs from a directory
+    ///
+    /// Returns all valid configs found in standard locations:
+    /// 1. `.devcontainer/devcontainer.json`
+    /// 2. `.devcontainer.json`
+    /// 3. `.devcontainer/<folder>/devcontainer.json` (all subdirs, sorted by name)
+    ///
+    /// Invalid configs are skipped with a warning. Returns an empty Vec if none found.
+    pub fn load_all_from_dir(dir: &Path) -> Vec<(Self, PathBuf)> {
+        let mut results = Vec::new();
+
+        // Check top-level candidates
+        let candidates = [
+            dir.join(".devcontainer/devcontainer.json"),
+            dir.join(".devcontainer.json"),
+        ];
+
+        for path in &candidates {
+            if path.exists() {
+                match Self::load_from(path) {
+                    Ok(config) => results.push((config, path.clone())),
+                    Err(e) => tracing::warn!("Skipping invalid config {}: {}", path.display(), e),
+                }
+            }
+        }
+
+        // Check subdirectories in .devcontainer (sorted for determinism)
+        let devcontainer_dir = dir.join(".devcontainer");
+        if devcontainer_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&devcontainer_dir) {
+                let mut subdirs: Vec<_> = entries
+                    .flatten()
+                    .filter(|e| e.path().is_dir())
+                    .collect();
+                subdirs.sort_by_key(|e| e.file_name());
+
+                for entry in subdirs {
+                    let config_path = entry.path().join("devcontainer.json");
+                    if config_path.exists() {
+                        match Self::load_from(&config_path) {
+                            Ok(config) => results.push((config, config_path)),
+                            Err(e) => tracing::warn!(
+                                "Skipping invalid config {}: {}",
+                                config_path.display(),
+                                e
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
     /// Load devcontainer.json from a directory
     ///
     /// Searches for configuration in standard locations:
@@ -961,5 +1016,81 @@ mod tests {
         assert!(config.post_create_command.is_some());
         assert!(config.post_start_command.is_some());
         assert!(config.post_attach_command.is_some());
+    }
+
+    #[test]
+    fn test_load_all_from_dir_multiple_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(dc.join("python")).unwrap();
+        std::fs::create_dir_all(dc.join("node")).unwrap();
+        std::fs::write(
+            dc.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dc.join("python/devcontainer.json"),
+            r#"{"image": "python:3.12"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dc.join("node/devcontainer.json"),
+            r#"{"image": "node:20"}"#,
+        )
+        .unwrap();
+
+        let results = DevContainerConfig::load_all_from_dir(tmp.path());
+        assert_eq!(results.len(), 3);
+        // First should be .devcontainer/devcontainer.json
+        assert!(results[0].1.ends_with(".devcontainer/devcontainer.json"));
+        // Subdirs should be sorted: node before python
+        assert!(results[1].1.ends_with("node/devcontainer.json"));
+        assert!(results[2].1.ends_with("python/devcontainer.json"));
+    }
+
+    #[test]
+    fn test_load_all_from_dir_single() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&dc).unwrap();
+        std::fs::write(
+            dc.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04"}"#,
+        )
+        .unwrap();
+
+        let results = DevContainerConfig::load_all_from_dir(tmp.path());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.image, Some("ubuntu:22.04".to_string()));
+    }
+
+    #[test]
+    fn test_load_all_from_dir_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let results = DevContainerConfig::load_all_from_dir(tmp.path());
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_load_all_from_dir_skips_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(dc.join("good")).unwrap();
+        std::fs::create_dir_all(dc.join("bad")).unwrap();
+        std::fs::write(
+            dc.join("good/devcontainer.json"),
+            r#"{"image": "ubuntu:22.04"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dc.join("bad/devcontainer.json"),
+            "not valid json {{{",
+        )
+        .unwrap();
+
+        let results = DevContainerConfig::load_all_from_dir(tmp.path());
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.ends_with("good/devcontainer.json"));
     }
 }

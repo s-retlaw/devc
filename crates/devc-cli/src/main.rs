@@ -224,7 +224,8 @@ async fn run() -> anyhow::Result<()> {
                     ContainerManager::disconnected(config, e.to_string())?
                 }
             };
-            devc_tui::run(manager).await?;
+            let workspace_dir = std::env::current_dir().ok();
+            devc_tui::run(manager, workspace_dir.as_deref()).await?;
         }
         Some(cmd) => {
             // CLI commands require a working provider

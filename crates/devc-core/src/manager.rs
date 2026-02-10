@@ -170,8 +170,8 @@ impl ContainerManager {
 
         let mut state = self.state.write().await;
 
-        // Check if already exists
-        if let Some(existing) = state.find_by_workspace(&container.workspace_path) {
+        // Check if already exists (by config path for multi-config support)
+        if let Some(existing) = state.find_by_config_path(&container.config_path) {
             return Err(CoreError::ContainerExists(existing.name.clone()));
         }
 
@@ -186,6 +186,61 @@ impl ContainerManager {
         state.save()?;
 
         Ok(container_state)
+    }
+
+    /// Initialize a new container from a specific config path.
+    /// Returns Ok(None) if the config is already registered (not an error).
+    pub async fn init_from_config(&self, config_path: &Path) -> Result<Option<ContainerState>> {
+        let provider_type = self
+            .provider_type()
+            .ok_or_else(|| CoreError::NotConnected("Cannot init: no provider available".to_string()))?;
+
+        let container = Container::from_config(config_path)?;
+
+        let mut state = self.state.write().await;
+
+        // Already registered — skip silently
+        if state.find_by_config_path(&container.config_path).is_some() {
+            return Ok(None);
+        }
+
+        let container_state = ContainerState::new(
+            container.name.clone(),
+            provider_type,
+            container.config_path.clone(),
+            container.workspace_path.clone(),
+        );
+
+        state.add(container_state.clone());
+        state.save()?;
+
+        Ok(Some(container_state))
+    }
+
+    /// Auto-discover all devcontainer.json configs in a workspace directory
+    /// and register any that aren't already tracked.
+    /// Returns the list of newly registered container states.
+    pub async fn auto_discover_configs(&self, workspace_dir: &Path) -> Result<Vec<ContainerState>> {
+        use devc_config::DevContainerConfig;
+
+        let all_configs = DevContainerConfig::load_all_from_dir(workspace_dir);
+        let mut newly_registered = Vec::new();
+
+        for (_config, config_path) in all_configs {
+            match self.init_from_config(&config_path).await {
+                Ok(Some(cs)) => newly_registered.push(cs),
+                Ok(None) => {} // already registered
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping config {}: {}",
+                        config_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(newly_registered)
     }
 
     /// Build a container image
@@ -2869,5 +2924,108 @@ mod tests {
         let cs = mgr.get(&id).await.unwrap().unwrap();
         assert!(cs.container_id.is_none());
         assert_eq!(cs.status, DevcContainerStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_init_from_config_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&dc).unwrap();
+        let config_path = dc.join("devcontainer.json");
+        std::fs::write(&config_path, r#"{"image": "ubuntu:22.04"}"#).unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+
+        let result = mgr.init_from_config(&config_path).await.unwrap();
+        assert!(result.is_some());
+        let cs = result.unwrap();
+        assert_eq!(cs.status, DevcContainerStatus::Configured);
+        assert_eq!(cs.config_path, config_path);
+    }
+
+    #[tokio::test]
+    async fn test_init_from_config_duplicate_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&dc).unwrap();
+        let config_path = dc.join("devcontainer.json");
+        std::fs::write(&config_path, r#"{"image": "ubuntu:22.04"}"#).unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+
+        // First call registers
+        let first = mgr.init_from_config(&config_path).await.unwrap();
+        assert!(first.is_some());
+
+        // Second call returns None (already registered)
+        let second = mgr.init_from_config(&config_path).await.unwrap();
+        assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_discover_registers_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(dc.join("python")).unwrap();
+        std::fs::create_dir_all(dc.join("node")).unwrap();
+        std::fs::write(
+            dc.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dc.join("python/devcontainer.json"),
+            r#"{"image": "python:3.12"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dc.join("node/devcontainer.json"),
+            r#"{"image": "node:20"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+
+        let newly = mgr.auto_discover_configs(tmp.path()).await.unwrap();
+        assert_eq!(newly.len(), 3);
+
+        // All three should be in the list
+        let all = mgr.list().await.unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_auto_discover_skips_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dc = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(dc.join("python")).unwrap();
+        std::fs::write(
+            dc.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dc.join("python/devcontainer.json"),
+            r#"{"image": "python:3.12"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+
+        // First discovery registers both
+        let first = mgr.auto_discover_configs(tmp.path()).await.unwrap();
+        assert_eq!(first.len(), 2);
+
+        // Second discovery registers none (already tracked)
+        let second = mgr.auto_discover_configs(tmp.path()).await.unwrap();
+        assert_eq!(second.len(), 0);
+
+        // Total should still be 2
+        let all = mgr.list().await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 }

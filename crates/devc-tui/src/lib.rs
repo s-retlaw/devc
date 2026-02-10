@@ -30,10 +30,11 @@ use crossterm::{
 use devc_core::ContainerManager;
 use ratatui::prelude::*;
 use std::io::{self, Write};
+use std::path::Path;
 use tracing_subscriber::layer::SubscriberExt;
 
 /// Run the TUI application
-pub async fn run(manager: ContainerManager) -> AppResult<()> {
+pub async fn run(manager: ContainerManager, workspace_dir: Option<&Path>) -> AppResult<()> {
     // Suppress tracing output during TUI (use a no-op subscriber to prevent logs from corrupting display)
     // The guard restores the previous subscriber when dropped
     let _guard = tracing::subscriber::set_default(
@@ -48,7 +49,7 @@ pub async fn run(manager: ContainerManager) -> AppResult<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run
-    let mut app = App::new(manager).await?;
+    let mut app = App::new(manager, workspace_dir).await?;
     let res = app.run(&mut terminal).await;
 
     // Restore terminal

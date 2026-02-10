@@ -8,7 +8,7 @@ use devc_config::GlobalConfig;
 use devc_provider::ProviderType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Container state stored on disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +173,11 @@ impl StateStore {
     /// Find a container by workspace path
     pub fn find_by_workspace(&self, path: &PathBuf) -> Option<&ContainerState> {
         self.containers.values().find(|c| &c.workspace_path == path)
+    }
+
+    /// Find a container by config path
+    pub fn find_by_config_path(&self, config_path: &Path) -> Option<&ContainerState> {
+        self.containers.values().find(|c| c.config_path == config_path)
     }
 
     /// Remove a container state
@@ -436,5 +441,23 @@ mod tests {
         let short = cs.short_id();
         assert_eq!(short.len(), 8);
         assert_eq!(short, &cs.id[..8]);
+    }
+
+    #[test]
+    fn test_find_by_config_path() {
+        let mut store = StateStore::new();
+        let mut cs1 = make_state("proj1", DevcContainerStatus::Configured);
+        cs1.config_path = PathBuf::from("/workspace/.devcontainer/devcontainer.json");
+        let mut cs2 = make_state("proj2", DevcContainerStatus::Configured);
+        cs2.config_path = PathBuf::from("/workspace/.devcontainer/python/devcontainer.json");
+        store.add(cs1);
+        store.add(cs2);
+
+        let found = store.find_by_config_path(Path::new("/workspace/.devcontainer/python/devcontainer.json"));
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "proj2");
+
+        let not_found = store.find_by_config_path(Path::new("/other/devcontainer.json"));
+        assert!(not_found.is_none());
     }
 }
