@@ -2,10 +2,10 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use devc_config::GlobalConfig;
-use devc_core::{ContainerManager, ContainerState, DevcContainerStatus};
+use devc_core::{Container, ContainerManager, ContainerState, DevcContainerStatus};
 
-/// Run a command in a container
-pub async fn run(manager: &ContainerManager, container: &str, cmd: Vec<String>) -> Result<()> {
+/// Execute a command in a container (raw docker/podman exec)
+pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>) -> Result<()> {
     let state = find_container(manager, container).await?;
 
     if state.status != DevcContainerStatus::Running {
@@ -16,17 +16,91 @@ pub async fn run(manager: &ContainerManager, container: &str, cmd: Vec<String>) 
         bail!("No command specified");
     }
 
-    let exit_code = manager.exec(&state.id, cmd.clone(), true).await?;
+    let container_id = state
+        .container_id
+        .as_ref()
+        .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
-    if exit_code != 0 {
-        std::process::exit(exit_code as i32);
+    // Load config for remoteEnv/user/workdir (fallback if config is missing)
+    let exec_config = match Container::from_config(&state.config_path) {
+        Ok(container) => {
+            let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+            container.exec_config(cmd, is_tty, true)
+        }
+        Err(_) => {
+            let mut env = std::collections::HashMap::new();
+            env.insert("TERM".to_string(), "xterm-256color".to_string());
+            env.insert("COLORTERM".to_string(), "truecolor".to_string());
+            env.insert("LANG".to_string(), "C.UTF-8".to_string());
+            env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
+            devc_provider::ExecConfig {
+                cmd,
+                env,
+                working_dir: None,
+                user: None,
+                tty: std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                stdin: true,
+                privileged: false,
+            }
+        }
+    };
+
+    // Build runtime args for direct spawn with inherited stdio
+    let runtime = match state.provider {
+        devc_provider::ProviderType::Docker => "docker",
+        devc_provider::ProviderType::Podman => "podman",
+    };
+
+    let mut args = vec!["exec".to_string()];
+
+    // TTY and stdin flags
+    if exec_config.tty {
+        args.push("-it".to_string());
+    } else {
+        args.push("-i".to_string());
+    }
+
+    if let Some(ref workdir) = exec_config.working_dir {
+        args.push("--workdir".to_string());
+        args.push(workdir.clone());
+    }
+
+    if let Some(ref user) = exec_config.user {
+        args.push("--user".to_string());
+        args.push(user.clone());
+    }
+
+    for (key, val) in &exec_config.env {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", key, val));
+    }
+
+    args.push(container_id.clone());
+    args.extend(exec_config.cmd);
+
+    let status = if is_in_toolbox() {
+        let mut fargs = vec!["--host".to_string(), "podman".to_string()];
+        fargs.extend(args);
+        std::process::Command::new("flatpak-spawn")
+            .args(&fargs)
+            .status()
+            .context("Failed to spawn command via flatpak-spawn")?
+    } else {
+        std::process::Command::new(runtime)
+            .args(&args)
+            .status()
+            .context("Failed to spawn command")?
+    };
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     Ok(())
 }
 
-/// Open an interactive shell in a container
-pub async fn shell(manager: &ContainerManager, container: &str) -> Result<()> {
+/// Open a shell in a container, optionally running a command
+pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>) -> Result<()> {
     let state = find_container(manager, container).await?;
 
     if state.status != DevcContainerStatus::Running {
@@ -36,17 +110,17 @@ pub async fn shell(manager: &ContainerManager, container: &str) -> Result<()> {
             manager.start(&state.id).await?;
             // Re-fetch state after starting
             let state = find_container(manager, container).await?;
-            return ssh_to_container(&state).await;
+            return ssh_to_container(&state, &cmd).await;
         } else {
             bail!("Container '{}' is not running (status: {})", state.name, state.status);
         }
     }
 
-    ssh_to_container(&state).await
+    ssh_to_container(&state, &cmd).await
 }
 
 /// Connect to container, preferring SSH over stdio when available
-async fn ssh_to_container(state: &ContainerState) -> Result<()> {
+async fn ssh_to_container(state: &ContainerState, cmd: &[String]) -> Result<()> {
     let container_id = state.container_id.as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
@@ -56,7 +130,7 @@ async fn ssh_to_container(state: &ContainerState) -> Result<()> {
         .unwrap_or(false);
 
     if ssh_available {
-        match ssh_via_dropbear(state).await {
+        match ssh_via_dropbear(state, cmd).await {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => {
                 // SSH exited with non-zero but we should still respect that
@@ -64,17 +138,19 @@ async fn ssh_to_container(state: &ContainerState) -> Result<()> {
             }
             Err(e) => {
                 eprintln!("Warning: SSH connection failed ({}), falling back to exec", e);
-                eprintln!("Note: Terminal resize will not work with exec fallback");
+                if cmd.is_empty() {
+                    eprintln!("Note: Terminal resize will not work with exec fallback");
+                }
             }
         }
     }
 
     // Fallback to podman/docker exec -it
-    exec_shell_fallback(state, container_id).await
+    exec_shell_fallback(state, container_id, cmd).await
 }
 
 /// Connect via SSH over stdio using dropbear in inetd mode
-async fn ssh_via_dropbear(state: &ContainerState) -> Result<std::process::ExitStatus> {
+async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String]) -> Result<std::process::ExitStatus> {
     let container_id = state.container_id.as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
@@ -118,18 +194,26 @@ async fn ssh_via_dropbear(state: &ContainerState) -> Result<std::process::ExitSt
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
     let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "truecolor".to_string());
 
+    let mut args = vec![
+        "-o".to_string(), format!("ProxyCommand={}", proxy_cmd),
+        "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+        "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+        "-o".to_string(), "LogLevel=ERROR".to_string(),
+        // Pass through terminal and locale settings for proper rendering
+        "-o".to_string(), format!("SetEnv=TERM={} COLORTERM={} LANG=C.UTF-8 LC_ALL=C.UTF-8", term, colorterm),
+        "-i".to_string(), key_path_str.to_string(),
+        "-t".to_string(),  // Force PTY allocation
+        format!("{}@localhost", user),
+    ];
+
+    // Append command if provided — SSH runs it in a login shell and exits
+    if !cmd.is_empty() {
+        args.push("--".to_string());
+        args.extend(cmd.iter().cloned());
+    }
+
     let status = std::process::Command::new("ssh")
-        .args([
-            "-o", &format!("ProxyCommand={}", proxy_cmd),
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            // Pass through terminal and locale settings for proper rendering
-            "-o", &format!("SetEnv=TERM={} COLORTERM={} LANG=C.UTF-8 LC_ALL=C.UTF-8", term, colorterm),
-            "-i", key_path_str,
-            "-t",  // Force PTY allocation
-            &format!("{}@localhost", user),
-        ])
+        .args(&args)
         .status()
         .context("Failed to spawn SSH")?;
 
@@ -137,27 +221,46 @@ async fn ssh_via_dropbear(state: &ContainerState) -> Result<std::process::ExitSt
 }
 
 /// Fallback to exec -it (doesn't support terminal resize)
-async fn exec_shell_fallback(state: &ContainerState, container_id: &str) -> Result<()> {
+async fn exec_shell_fallback(state: &ContainerState, container_id: &str, cmd: &[String]) -> Result<()> {
+    // Build the shell command: interactive shell, or `bash -lc "cmd"` for commands
+    let shell_args: Vec<String> = if cmd.is_empty() {
+        vec!["/bin/bash".to_string()]
+    } else {
+        // Use bash -lc to get login shell environment (sources profile, sets PATH)
+        vec![
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            shell_words::join(cmd),
+        ]
+    };
+
     let status = if is_in_toolbox() {
-        // In toolbox, use flatpak-spawn to reach host's podman
+        let mut args = vec![
+            "--host".to_string(), "podman".to_string(),
+            "exec".to_string(), "-it".to_string(), container_id.to_string(),
+        ];
+        args.extend(shell_args);
         std::process::Command::new("flatpak-spawn")
-            .args(["--host", "podman", "exec", "-it", container_id, "/bin/bash"])
+            .args(&args)
             .status()
             .context("Failed to spawn shell via flatpak-spawn")?
     } else {
-        // Direct podman/docker based on provider
         let runtime = match state.provider {
             devc_provider::ProviderType::Docker => "docker",
             devc_provider::ProviderType::Podman => "podman",
         };
+        let mut args = vec![
+            "exec".to_string(), "-it".to_string(), container_id.to_string(),
+        ];
+        args.extend(shell_args);
         std::process::Command::new(runtime)
-            .args(["exec", "-it", container_id, "/bin/bash"])
+            .args(&args)
             .status()
             .context("Failed to spawn shell")?
     };
 
     if !status.success() {
-        bail!("Shell exited with status: {}", status);
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     Ok(())

@@ -1431,6 +1431,12 @@ fi
 
     /// Execute a command in a container
     pub async fn exec(&self, id: &str, cmd: Vec<String>, tty: bool) -> Result<i64> {
+        let result = self.exec_inner(id, cmd, tty).await?;
+        Ok(result.exit_code)
+    }
+
+    /// Shared exec implementation
+    async fn exec_inner(&self, id: &str, cmd: Vec<String>, tty: bool) -> Result<devc_provider::ExecResult> {
         let provider = self.require_provider()?;
 
         let container_state = {
@@ -1448,9 +1454,29 @@ fi
         }
 
         let container_id = container_state.container_id.as_ref().unwrap();
-        let container = Container::from_config(&container_state.config_path)?;
 
-        let config = container.exec_config(cmd, tty, tty);
+        // Try loading config for remoteEnv/user/workdir; fall back to a basic config
+        // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
+        let config = match Container::from_config(&container_state.config_path) {
+            Ok(container) => container.exec_config(cmd, tty, tty),
+            Err(_) => {
+                let mut env = std::collections::HashMap::new();
+                env.insert("TERM".to_string(), "xterm-256color".to_string());
+                env.insert("COLORTERM".to_string(), "truecolor".to_string());
+                env.insert("LANG".to_string(), "C.UTF-8".to_string());
+                env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
+                devc_provider::ExecConfig {
+                    cmd,
+                    env,
+                    working_dir: None,
+                    user: None,
+                    tty,
+                    stdin: tty,
+                    privileged: false,
+                }
+            }
+        };
+
         let result = provider
             .exec(&ContainerId::new(container_id), &config)
             .await?;
@@ -1462,7 +1488,7 @@ fi
             state.save()?;
         }
 
-        Ok(result.exit_code)
+        Ok(result)
     }
 
     /// Execute a command interactively with PTY

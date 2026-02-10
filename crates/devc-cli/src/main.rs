@@ -37,19 +37,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a command in a container
-    Run {
+    /// Execute a command in a container (raw docker/podman exec)
+    Exec {
         /// Container name or ID (interactive selection if not specified)
         container: Option<String>,
-        /// Command to run
+        /// Command to execute
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
 
-    /// Open an interactive shell in a container
+    /// Open a shell in a container, optionally running a command
     Shell {
         /// Container name or ID (interactive selection if not specified)
         container: Option<String>,
+        /// Command to run in the shell (uses login shell PATH)
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
     },
 
     /// Build a container
@@ -236,17 +239,25 @@ async fn run() -> anyhow::Result<()> {
             let get_containers = || async { manager.list().await };
 
             match cmd {
-                Commands::Run { container, cmd } => {
+                Commands::Exec { container, cmd } => {
                     let name = match container {
                         Some(name) => name,
                         None => {
                             let containers = get_containers().await?;
-                            select_container(&containers, SelectionContext::Running, "Select container to run command in:")?
+                            select_container(&containers, SelectionContext::Running, "Select container to exec command in:")?
                         }
                     };
-                    commands::run(&manager, &name, cmd).await?;
+                    let cmd = if cmd.is_empty() {
+                        let input: String = dialoguer::Input::with_theme(&ColorfulTheme::default())
+                            .with_prompt("Command to execute")
+                            .interact_text()?;
+                        shell_words::split(&input)?
+                    } else {
+                        cmd
+                    };
+                    commands::exec(&manager, &name, cmd).await?;
                 }
-                Commands::Shell { container } => {
+                Commands::Shell { container, cmd } => {
                     let name = match container {
                         Some(name) => name,
                         None => {
@@ -254,7 +265,7 @@ async fn run() -> anyhow::Result<()> {
                             select_container(&containers, SelectionContext::Running, "Select container to connect to:")?
                         }
                     };
-                    commands::shell(&manager, &name).await?;
+                    commands::shell(&manager, &name, cmd).await?;
                 }
                 Commands::Build { container, no_cache } => {
                     commands::build(&manager, container, no_cache).await?;
