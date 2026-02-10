@@ -5,6 +5,7 @@ use devc_config::{DotfilesConfig, GlobalConfig};
 use devc_provider::{ContainerId, ContainerProvider, ExecConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tokio::process::Command as TokioCommand;
 
 /// POSIX shell-quote a string: wraps in single quotes, escaping embedded single quotes.
 fn shell_quote(s: &str) -> String {
@@ -117,7 +118,7 @@ impl DotfilesManager {
         match &self.config {
             DotfilesSource::Repository(url) => {
                 send_progress(progress, "Cloning dotfiles repository...");
-                self.inject_from_repo(provider, container_id, url, user)
+                self.inject_from_repo(provider, container_id, url, user, progress)
                     .await?;
             }
             DotfilesSource::Local(path) => {
@@ -146,13 +147,18 @@ impl DotfilesManager {
         Ok(())
     }
 
-    /// Clone dotfiles from a git repository
+    /// Clone dotfiles from a git repository.
+    ///
+    /// Tries cloning inside the container first. If that fails (e.g. no git
+    /// installed, auth issues), falls back to cloning on the host and copying
+    /// files into the container.
     async fn inject_from_repo(
         &self,
         provider: &dyn ContainerProvider,
         container_id: &ContainerId,
         url: &str,
         user: Option<&str>,
+        progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
         tracing::info!("Cloning dotfiles from {}", url);
 
@@ -175,13 +181,53 @@ impl DotfilesManager {
 
         let result = provider.exec(container_id, &config).await?;
         if result.exit_code != 0 {
-            return Err(CoreError::DotfilesError(format!(
-                "Failed to clone dotfiles: {}",
+            tracing::warn!(
+                "In-container git clone failed: {}. Falling back to host-side clone...",
                 result.output
-            )));
+            );
+            send_progress(progress, "Falling back to host-side clone...");
+            self.inject_from_repo_host(provider, container_id, url, user)
+                .await?;
         }
 
         Ok(())
+    }
+
+    /// Clone dotfiles on the host and copy into the container.
+    async fn inject_from_repo_host(
+        &self,
+        provider: &dyn ContainerProvider,
+        container_id: &ContainerId,
+        url: &str,
+        user: Option<&str>,
+    ) -> Result<()> {
+        tracing::info!("Cloning dotfiles on host from {}", url);
+
+        let temp_dir = tempfile::tempdir().map_err(|e| {
+            CoreError::DotfilesError(format!("Failed to create temp directory: {}", e))
+        })?;
+        let clone_path = temp_dir.path().join("dotfiles");
+
+        let output = TokioCommand::new("git")
+            .args(["clone", "--depth", "1", url])
+            .arg(&clone_path)
+            .output()
+            .await
+            .map_err(|e| {
+                CoreError::DotfilesError(format!("Failed to run git on host: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CoreError::DotfilesError(format!(
+                "Host-side git clone failed: {}",
+                stderr
+            )));
+        }
+
+        self.inject_from_local(provider, container_id, &clone_path, user)
+            .await
+        // temp_dir is dropped here, cleaning up the clone
     }
 
     /// Copy dotfiles from local directory
@@ -430,5 +476,180 @@ mod tests {
         assert!(matches!(manager.config, DotfilesSource::Repository(ref url) if url.contains("local/dots")));
         assert_eq!(manager.target_path, "~/.mydots");
         assert_eq!(manager.install_command.as_deref(), Some("./install.sh"));
+    }
+
+    #[tokio::test]
+    async fn test_inject_from_repo_host_bad_url() {
+        use crate::test_support::MockProvider;
+        use devc_provider::ProviderType;
+
+        let provider = MockProvider::new(ProviderType::Docker);
+        let container_id = ContainerId::new("test_container");
+
+        let manager = DotfilesManager {
+            config: DotfilesSource::Repository("https://invalid.example.com/no-such-repo.git".to_string()),
+            target_path: "~/.dotfiles".to_string(),
+            install_command: None,
+        };
+
+        let result = manager
+            .inject_from_repo_host(&provider, &container_id, "https://invalid.example.com/no-such-repo.git", None)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CoreError::DotfilesError(ref msg) if msg.contains("clone failed")),
+            "Expected DotfilesError about clone failure, got: {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inject_from_repo_host_copies_into_container() {
+        use crate::test_support::{MockCall, MockProvider};
+        use devc_provider::ProviderType;
+        use std::process::Command;
+
+        let provider = MockProvider::new(ProviderType::Docker);
+        let container_id = ContainerId::new("test_container");
+
+        // Create a local bare git repo to clone from
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare_path = bare_dir.path().join("dotfiles.git");
+        Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare_path)
+            .output()
+            .expect("git must be available to run tests");
+
+        // Create a temporary repo, add a file, and push to the bare repo
+        let work_dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["clone"])
+            .arg(&bare_path)
+            .arg(work_dir.path().join("work"))
+            .output()
+            .unwrap();
+        let work_path = work_dir.path().join("work");
+        std::fs::write(work_path.join(".bashrc"), "# test dotfile\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&work_path)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push"])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+
+        let url = bare_path.to_str().unwrap();
+
+        let manager = DotfilesManager {
+            config: DotfilesSource::Repository(url.to_string()),
+            target_path: "~/.dotfiles".to_string(),
+            install_command: None,
+        };
+
+        let result = manager
+            .inject_from_repo_host(&provider, &container_id, url, Some("alice"))
+            .await;
+
+        assert!(result.is_ok(), "inject_from_repo_host failed: {:?}", result);
+
+        let calls = provider.get_calls();
+        // Should have an Exec (mkdir) and a CopyInto call
+        assert!(
+            calls.iter().any(|c| matches!(c, MockCall::CopyInto { .. })),
+            "Expected CopyInto call, got: {:?}",
+            calls
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inject_from_repo_falls_back_on_container_failure() {
+        use crate::test_support::{MockCall, MockProvider};
+        use devc_provider::ProviderType;
+        use std::process::Command;
+
+        // Set up mock provider where in-container exec fails (exit code 127 = command not found)
+        let provider = MockProvider::new(ProviderType::Docker);
+        *provider.exec_exit_code.lock().unwrap() = 127;
+        *provider.exec_output.lock().unwrap() = "/bin/sh: git: not found".to_string();
+
+        let container_id = ContainerId::new("test_container");
+
+        // Create a local bare git repo
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare_path = bare_dir.path().join("dotfiles.git");
+        Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare_path)
+            .output()
+            .unwrap();
+
+        let work_dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["clone"])
+            .arg(&bare_path)
+            .arg(work_dir.path().join("work"))
+            .output()
+            .unwrap();
+        let work_path = work_dir.path().join("work");
+        std::fs::write(work_path.join(".zshrc"), "# zsh dotfile\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&work_path)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push"])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+
+        let url = bare_path.to_str().unwrap();
+
+        let result = DotfilesManager {
+            config: DotfilesSource::Repository(url.to_string()),
+            target_path: "~/.dotfiles".to_string(),
+            install_command: None,
+        }
+        .inject_from_repo(&provider, &container_id, url, Some("bob"), None)
+        .await;
+
+        assert!(result.is_ok(), "inject_from_repo should succeed via fallback: {:?}", result);
+
+        let calls = provider.get_calls();
+        // First call: the in-container exec (git clone) that failed
+        assert!(
+            calls.iter().any(|c| matches!(c, MockCall::Exec { .. })),
+            "Expected in-container Exec call"
+        );
+        // Then: CopyInto from the host-side fallback
+        assert!(
+            calls.iter().any(|c| matches!(c, MockCall::CopyInto { .. })),
+            "Expected CopyInto from host-side fallback, got: {:?}",
+            calls
+        );
     }
 }
