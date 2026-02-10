@@ -454,7 +454,9 @@ impl ContainerManager {
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
-        if !container_state.can_start() {
+        // Allow idempotent call when already running — skips provider.start()
+        // but still runs post-start phase (SSH daemon, postStartCommand)
+        if container_state.status != DevcContainerStatus::Running && !container_state.can_start() {
             return Err(CoreError::InvalidState(format!(
                 "Container cannot be started in {} state",
                 container_state.status
@@ -511,6 +513,25 @@ impl ContainerManager {
                 }
 
                 self.set_status(id, DevcContainerStatus::Running).await?;
+
+                // Ensure SSH daemon is running if SSH was set up
+                if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
+                    self.ensure_ssh_daemon_running(&svc.container_id).await?;
+                }
+
+                // Run post-start commands
+                if let Some(ref cmd) = container.devcontainer.post_start_command {
+                    run_lifecycle_command_with_env(
+                        provider,
+                        &svc.container_id,
+                        cmd,
+                        container.devcontainer.effective_user(),
+                        container.devcontainer.workspace_folder.as_deref(),
+                        container.devcontainer.remote_env.as_ref(),
+                    )
+                    .await?;
+                }
+
                 return Ok(());
             }
         }
@@ -519,7 +540,11 @@ impl ContainerManager {
             CoreError::InvalidState("Container not created yet".to_string())
         })?;
 
-        provider.start(&ContainerId::new(container_id)).await?;
+        // Only call provider.start() if the container is not already running
+        let details = provider.inspect(&ContainerId::new(container_id)).await?;
+        if details.status != ContainerStatus::Running {
+            provider.start(&ContainerId::new(container_id)).await?;
+        }
 
         // Update status
         self.set_status(id, DevcContainerStatus::Running).await?;
@@ -1239,23 +1264,9 @@ fi
             }
         }
 
-        // Start if not running
-        let details = provider.inspect(&container_id).await?;
-        if details.status != ContainerStatus::Running {
-            send_progress(progress, "Starting container...");
-            self.start(id).await?;
-        } else {
-            self.set_status(id, DevcContainerStatus::Running).await?;
-
-            // Ensure SSH daemon is running even if container was already up
-            let container_state = {
-                let state = self.state.read().await;
-                state.get(id).cloned().unwrap()
-            };
-            if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
-                self.ensure_ssh_daemon_running(&container_id).await?;
-            }
-        }
+        // Start container (idempotent) and run post-start phase
+        send_progress(progress, "Starting container...");
+        self.start(id).await?;
 
         Ok(())
     }
@@ -1379,6 +1390,41 @@ fi
                 remote_env,
             )
             .await?;
+        }
+
+        // Setup SSH if enabled
+        if self.global_config.defaults.ssh_enabled.unwrap_or(false) {
+            send_progress(progress, "Setting up SSH...");
+            let ssh_manager = SshManager::new()?;
+            ssh_manager.ensure_keys_exist()?;
+
+            match ssh_manager
+                .setup_container(provider, &container_id, user)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!("SSH setup completed for compose container");
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.metadata
+                            .insert("ssh_available".to_string(), "true".to_string());
+                        if let Some(u) = user {
+                            cs.metadata
+                                .insert("remote_user".to_string(), u.to_string());
+                        }
+                    }
+                    state.save()?;
+                }
+                Err(e) => {
+                    tracing::warn!("SSH setup failed (will use exec fallback): {}", e);
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.metadata
+                            .insert("ssh_available".to_string(), "false".to_string());
+                    }
+                    state.save()?;
+                }
+            }
         }
 
         if let Some(ref cmd) = container.devcontainer.post_start_command {
@@ -2225,6 +2271,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_start_idempotent_when_running() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running, // already running
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        // start() should succeed when already running (idempotent)
+        mgr.start(&id).await.unwrap();
+
+        // Should NOT have called provider.start() since container is already running
+        let recorded = calls.lock().unwrap();
+        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Start { .. })));
+    }
+
+    #[tokio::test]
     async fn test_start_invalid_state_fails() {
         let workspace = create_test_workspace();
         let mock = MockProvider::new(ProviderType::Docker);
@@ -2232,7 +2303,7 @@ mod tests {
         let mut state = StateStore::new();
         let cs = make_container_state(
             workspace.path(),
-            DevcContainerStatus::Running, // already running
+            DevcContainerStatus::Building, // can't start from Building
             Some("sha256:img"),
             Some("container123"),
         );
