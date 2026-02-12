@@ -346,12 +346,12 @@ async fn test_e2e_host_command() {
 
     // Test successful host command
     let cmd = Command::String(format!("touch {}", marker.display()));
-    run_host_command(&cmd, temp.path()).expect("host command should succeed");
+    run_host_command(&cmd, temp.path(), None).await.expect("host command should succeed");
     assert!(marker.exists(), "Marker file should exist on host");
 
     // Test failure case
     let fail_cmd = Command::String("false".to_string());
-    let result = run_host_command(&fail_cmd, temp.path());
+    let result = run_host_command(&fail_cmd, temp.path(), None).await;
     assert!(result.is_err(), "Command 'false' should fail");
 }
 

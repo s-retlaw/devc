@@ -280,6 +280,10 @@ pub struct App {
     pub container_op_rx: Option<mpsc::UnboundedReceiver<ContainerOpResult>>,
     /// Channel receiver for container operation progress updates (e.g. Up steps)
     pub container_op_progress_rx: Option<mpsc::UnboundedReceiver<String>>,
+    /// Captured output lines from initializeCommand (shown in spinner popup)
+    pub up_output: Vec<String>,
+    /// Channel receiver for initializeCommand output lines
+    pub up_output_rx: Option<mpsc::UnboundedReceiver<String>>,
 
     // Compose service visibility state
     /// Cached compose service info keyed by devc container ID
@@ -381,6 +385,8 @@ impl App {
             container_op: None,
             container_op_rx: None,
             container_op_progress_rx: None,
+            up_output: Vec::new(),
+            up_output_rx: None,
             compose_services: HashMap::new(),
             compose_services_table_state: TableState::default(),
             compose_selected_service: 0,
@@ -552,6 +558,8 @@ impl App {
             container_op: None,
             container_op_rx: None,
             container_op_progress_rx: None,
+            up_output: Vec::new(),
+            up_output_rx: None,
             compose_services: HashMap::new(),
             compose_services_table_state: TableState::default(),
             compose_selected_service: 0,
@@ -655,6 +663,12 @@ impl App {
                         }
                     }
                 }
+                // initializeCommand output lines
+                line = Self::recv_up_output(&mut self.up_output_rx) => {
+                    if let Some(line) = line {
+                        self.up_output.push(line);
+                    }
+                }
             }
         }
 
@@ -677,6 +691,14 @@ impl App {
 
     /// Helper to receive container operation progress updates
     async fn recv_op_progress(rx: &mut Option<mpsc::UnboundedReceiver<String>>) -> Option<String> {
+        match rx {
+            Some(ref mut receiver) => receiver.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Helper to receive initializeCommand output lines
+    async fn recv_up_output(rx: &mut Option<mpsc::UnboundedReceiver<String>>) -> Option<String> {
         match rx {
             Some(ref mut receiver) => receiver.recv().await,
             None => std::future::pending().await,
@@ -2183,6 +2205,8 @@ impl App {
         self.container_op = None;
         self.container_op_rx = None;
         self.container_op_progress_rx = None;
+        self.up_output_rx = None;
+        self.up_output.clear();
 
         let affected_id = match &result {
             ContainerOpResult::Success(op) | ContainerOpResult::Failed(op, _) => {
@@ -2633,9 +2657,13 @@ impl App {
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         self.container_op_progress_rx = Some(progress_rx);
 
+        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        self.up_output = Vec::new();
+        self.up_output_rx = Some(output_rx);
+
         let manager = Arc::clone(&self.manager);
         tokio::spawn(async move {
-            match manager.read().await.up_with_progress(&id, Some(&progress_tx)).await {
+            match manager.read().await.up_with_progress(&id, Some(&progress_tx), Some(&output_tx)).await {
                 Ok(()) => { let _ = result_tx.send(ContainerOpResult::Success(op)); }
                 Err(e) => { let _ = result_tx.send(ContainerOpResult::Failed(op, e.to_string())); }
             }

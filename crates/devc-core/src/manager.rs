@@ -967,7 +967,7 @@ fi
         self.build_with_progress(id, no_cache, progress.clone()).await?;
 
         // 4. Create and start container with progress (runs lifecycle commands, dotfiles, SSH setup)
-        self.up_with_progress(id, Some(&progress)).await?;
+        self.up_with_progress(id, Some(&progress), None).await?;
 
         let _ = progress.send("Rebuild complete!".to_string());
         Ok(())
@@ -1181,7 +1181,7 @@ fi
 
     /// Build, create, and start a container (full lifecycle)
     pub async fn up(&self, id: &str) -> Result<()> {
-        self.up_with_progress(id, None).await
+        self.up_with_progress(id, None, None).await
     }
 
     /// Build, create, and start a container with progress updates
@@ -1189,6 +1189,7 @@ fi
         &self,
         id: &str,
         progress: Option<&mpsc::UnboundedSender<String>>,
+        output: Option<&mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
         let provider = self.require_provider()?;
 
@@ -1205,7 +1206,7 @@ fi
         {
             if let Some(ref cmd) = container.devcontainer.initialize_command {
                 send_progress(progress, "Running initializeCommand on host...");
-                crate::run_host_command(cmd, &container.workspace_path)?;
+                crate::run_host_command(cmd, &container.workspace_path, output).await?;
             }
             if let Some(ref wait_for) = container.devcontainer.wait_for {
                 tracing::info!("waitFor is set to '{}' (async lifecycle deferral not yet implemented)", wait_for);

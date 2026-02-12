@@ -567,56 +567,125 @@ fn parse_mount_string(s: &str) -> Option<MountConfig> {
     })
 }
 
+/// Run a single host command, optionally capturing output to a channel
+async fn run_single_host_command(
+    program: &str,
+    args: &[&str],
+    working_dir: &Path,
+    label: &str,
+    output: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    if let Some(sender) = output {
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args)
+            .current_dir(working_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| {
+            CoreError::ExecFailed(format!("Failed to run host command: {}", e))
+        })?;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let sender_clone = sender.clone();
+
+        let stdout_handle = tokio::spawn(async move {
+            if let Some(stdout) = stdout {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = sender_clone.send(line);
+                }
+            }
+        });
+
+        let sender_clone2 = sender.clone();
+        let stderr_handle = tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = sender_clone2.send(line);
+                }
+            }
+        });
+
+        let status = child.wait().await.map_err(|e| {
+            CoreError::ExecFailed(format!("Failed to wait for host command: {}", e))
+        })?;
+
+        let _ = stdout_handle.await;
+        let _ = stderr_handle.await;
+
+        if !status.success() {
+            return Err(CoreError::ExecFailed(format!(
+                "Host command '{}' exited with code {}",
+                label,
+                status.code().unwrap_or(-1)
+            )));
+        }
+    } else {
+        let status = std::process::Command::new(program)
+            .args(args)
+            .current_dir(working_dir)
+            .status()
+            .map_err(|e| {
+                CoreError::ExecFailed(format!("Failed to run host command: {}", e))
+            })?;
+        if !status.success() {
+            return Err(CoreError::ExecFailed(format!(
+                "Host command '{}' exited with code {}",
+                label,
+                status.code().unwrap_or(-1)
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Run a lifecycle command on the host (for initializeCommand)
-pub fn run_host_command(command: &devc_config::Command, working_dir: &Path) -> Result<()> {
+///
+/// When `output` is `Some`, stdout/stderr are captured and sent line-by-line
+/// through the channel. When `None`, stdio is inherited (preserves CLI behavior).
+pub async fn run_host_command(
+    command: &devc_config::Command,
+    working_dir: &Path,
+    output: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<()> {
     match command {
         devc_config::Command::String(cmd) => {
-            let status = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(working_dir)
-                .status()
-                .map_err(|e| CoreError::ExecFailed(format!("Failed to run host command: {}", e)))?;
-            if !status.success() {
-                return Err(CoreError::ExecFailed(format!(
-                    "Host command '{}' exited with code {}",
-                    cmd,
-                    status.code().unwrap_or(-1)
-                )));
-            }
+            run_single_host_command("/bin/sh", &["-c", cmd], working_dir, cmd, output).await?;
         }
         devc_config::Command::Array(args) => {
             if args.is_empty() {
                 return Ok(());
             }
-            let status = std::process::Command::new(&args[0])
-                .args(&args[1..])
-                .current_dir(working_dir)
-                .status()
-                .map_err(|e| CoreError::ExecFailed(format!("Failed to run host command: {}", e)))?;
-            if !status.success() {
-                return Err(CoreError::ExecFailed(format!(
-                    "Host command {:?} exited with code {}",
-                    args,
-                    status.code().unwrap_or(-1)
-                )));
-            }
+            let str_args: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+            let label = format!("{:?}", args);
+            run_single_host_command(&args[0], &str_args, working_dir, &label, output).await?;
         }
         devc_config::Command::Object(commands) => {
             for (name, cmd) in commands {
                 tracing::info!("Running host command: {}", name);
+                if let Some(sender) = output {
+                    let _ = sender.send(format!("--- {} ---", name));
+                }
                 match cmd {
                     devc_config::StringOrArray::String(s) => {
-                        run_host_command(
-                            &devc_config::Command::String(s.clone()),
-                            working_dir,
-                        )?;
+                        run_single_host_command("/bin/sh", &["-c", s], working_dir, s, output)
+                            .await?;
                     }
                     devc_config::StringOrArray::Array(args) => {
-                        run_host_command(
-                            &devc_config::Command::Array(args.clone()),
-                            working_dir,
-                        )?;
+                        if !args.is_empty() {
+                            let str_args: Vec<&str> =
+                                args[1..].iter().map(|s| s.as_str()).collect();
+                            let label = format!("{:?}", args);
+                            run_single_host_command(
+                                &args[0], &str_args, working_dir, &label, output,
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
@@ -1026,39 +1095,84 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_run_host_command_string() {
+    #[tokio::test]
+    async fn test_run_host_command_string() {
         let dir = std::env::temp_dir();
         let cmd = devc_config::Command::String("echo hello".to_string());
-        let result = run_host_command(&cmd, &dir);
+        let result = run_host_command(&cmd, &dir, None).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_run_host_command_array() {
+    #[tokio::test]
+    async fn test_run_host_command_array() {
         let dir = std::env::temp_dir();
         let cmd = devc_config::Command::Array(vec!["echo".to_string(), "hello".to_string()]);
-        let result = run_host_command(&cmd, &dir);
+        let result = run_host_command(&cmd, &dir, None).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_run_host_command_failure() {
+    #[tokio::test]
+    async fn test_run_host_command_failure() {
         let dir = std::env::temp_dir();
         let cmd = devc_config::Command::String("false".to_string());
-        let result = run_host_command(&cmd, &dir);
+        let result = run_host_command(&cmd, &dir, None).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_run_host_command_object() {
+    #[tokio::test]
+    async fn test_run_host_command_object() {
         let dir = std::env::temp_dir();
         let mut commands = HashMap::new();
         commands.insert("first".to_string(), devc_config::StringOrArray::String("echo one".to_string()));
         commands.insert("second".to_string(), devc_config::StringOrArray::String("echo two".to_string()));
         let cmd = devc_config::Command::Object(commands);
-        let result = run_host_command(&cmd, &dir);
+        let result = run_host_command(&cmd, &dir, None).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_host_command_captures_stdout() {
+        let dir = std::env::temp_dir();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cmd = devc_config::Command::String("echo captured_line".to_string());
+        run_host_command(&cmd, &dir, Some(&tx)).await.unwrap();
+        drop(tx);
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+        assert!(lines.iter().any(|l| l.contains("captured_line")));
+    }
+
+    #[tokio::test]
+    async fn test_run_host_command_captures_stderr() {
+        let dir = std::env::temp_dir();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cmd = devc_config::Command::String("echo stderr_line >&2".to_string());
+        run_host_command(&cmd, &dir, Some(&tx)).await.unwrap();
+        drop(tx);
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+        assert!(lines.iter().any(|l| l.contains("stderr_line")));
+    }
+
+    #[tokio::test]
+    async fn test_run_host_command_object_separators() {
+        let dir = std::env::temp_dir();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut commands = HashMap::new();
+        commands.insert("mystep".to_string(), devc_config::StringOrArray::String("echo one".to_string()));
+        let cmd = devc_config::Command::Object(commands);
+        run_host_command(&cmd, &dir, Some(&tx)).await.unwrap();
+        drop(tx);
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+        assert!(lines.iter().any(|l| l.contains("--- mystep ---")));
+        assert!(lines.iter().any(|l| l.contains("one")));
     }
 
     #[test]

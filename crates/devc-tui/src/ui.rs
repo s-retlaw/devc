@@ -1438,14 +1438,44 @@ fn draw_operation_progress(frame: &mut Frame, app: &App, area: Rect) {
         ContainerOperation::Up { .. } => "Container Up",
     };
 
-    DialogBuilder::new(title)
-        .width(40)
+    let has_output = !app.up_output.is_empty();
+    let dialog_width: u16 = if has_output { 60 } else { 40 };
+    let max_output_lines: usize = 12;
+
+    let mut builder = DialogBuilder::new(title)
+        .width(dialog_width)
         .border_color(Color::Yellow)
         .empty_line()
         .styled_message(Line::from(vec![
             Span::styled(spinner, Style::default().fg(Color::Cyan)),
             Span::raw(format!(" {}", op.label())),
-        ]))
+        ]));
+
+    if has_output {
+        builder = builder.empty_line();
+        let total = app.up_output.len();
+        let skip = total.saturating_sub(max_output_lines);
+        if skip > 0 {
+            builder = builder.styled_message(Line::from(Span::styled(
+                format!("  ... ({} total lines)", total),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        let inner_width = (dialog_width - 4) as usize; // borders + padding
+        for line in app.up_output.iter().skip(skip) {
+            let truncated = if line.len() > inner_width {
+                format!("{}...", &line[..inner_width - 3])
+            } else {
+                line.clone()
+            };
+            builder = builder.styled_message(Line::from(Span::styled(
+                format!("  {}", truncated),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    builder
         .empty_line()
         .help("Esc to dismiss")
         .render(frame, area);
