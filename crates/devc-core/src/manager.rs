@@ -1,14 +1,17 @@
 //! Container manager - coordinates all container operations
 
 use crate::{
-    run_lifecycle_command_with_env, Container, ContainerState, CoreError, DevcContainerStatus,
-    DotfilesManager, EnhancedBuildContext, Result, SshManager, StateStore,
+    run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, ContainerState,
+    CoreError, DevcContainerStatus, DotfilesManager, EnhancedBuildContext, Result, SshManager,
+    StateStore,
 };
 use devc_config::{GlobalConfig, ImageSource};
 use devc_provider::{
     ContainerId, ContainerProvider, ContainerStatus, DiscoveredContainer, ExecStream, LogConfig,
     ProviderType,
 };
+use crate::features;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -275,16 +278,33 @@ impl ContainerManager {
         // Check if SSH injection is enabled
         let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(false);
 
+        // Resolve devcontainer features
+        let config_dir = container.config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let resolved_features = if let Some(ref feature_map) = container.devcontainer.features {
+            features::resolve_and_prepare_features(feature_map, &config_dir, &None).await?
+        } else {
+            vec![]
+        };
+        let has_features = !resolved_features.is_empty();
+        let feature_properties = features::merge_feature_properties(&resolved_features);
+        let remote_user = container.devcontainer.effective_user().unwrap_or("root").to_string();
+
         // Check if we need to build or pull
         let image_id = match container.devcontainer.image_source() {
             ImageSource::Image(image) => {
-                if inject_ssh {
-                    // Build an enhanced image with dropbear pre-installed
+                if has_features || inject_ssh {
+                    // Need a build: features and/or SSH injection
                     tracing::info!(
-                        "Building enhanced image from {} (with SSH support)",
-                        image
+                        "Building enhanced image from {} (features: {}, SSH: {})",
+                        image, has_features, inject_ssh
                     );
-                    let enhanced_ctx = EnhancedBuildContext::from_image(&image)?;
+                    let enhanced_ctx = if has_features {
+                        EnhancedBuildContext::from_image_with_features(
+                            &image, &resolved_features, inject_ssh, &remote_user,
+                        )?
+                    } else {
+                        EnhancedBuildContext::from_image(&image)?
+                    };
 
                     let build_config = devc_provider::BuildConfig {
                         context: enhanced_ctx.context_path().to_path_buf(),
@@ -313,7 +333,7 @@ impl ContainerManager {
                         }
                     }
                 } else {
-                    // Just pull the image directly (no SSH support)
+                    // Just pull the image directly (no features, no SSH)
                     tracing::info!("Pulling image: {}", image);
                     let result = provider.pull(&image).await;
                     match result {
@@ -329,17 +349,25 @@ impl ContainerManager {
                 let mut build_config = container.build_config()?;
                 build_config.no_cache = no_cache;
 
-                if inject_ssh {
-                    // Create enhanced build context with dropbear appended
+                if has_features || inject_ssh {
                     tracing::info!(
-                        "Building enhanced image: {} (with SSH support, no_cache: {})",
-                        build_config.tag,
-                        no_cache
+                        "Building enhanced image: {} (features: {}, SSH: {}, no_cache: {})",
+                        build_config.tag, has_features, inject_ssh, no_cache
                     );
-                    let enhanced_ctx = EnhancedBuildContext::from_dockerfile(
-                        &build_config.context,
-                        &build_config.dockerfile,
-                    )?;
+                    let enhanced_ctx = if has_features {
+                        EnhancedBuildContext::from_dockerfile_with_features(
+                            &build_config.context,
+                            &build_config.dockerfile,
+                            &resolved_features,
+                            inject_ssh,
+                            &remote_user,
+                        )?
+                    } else {
+                        EnhancedBuildContext::from_dockerfile(
+                            &build_config.context,
+                            &build_config.dockerfile,
+                        )?
+                    };
 
                     build_config.context = enhanced_ctx.context_path().to_path_buf();
                     build_config.dockerfile = enhanced_ctx.dockerfile_name().to_string();
@@ -377,6 +405,9 @@ impl ContainerManager {
                     if let Some(cs) = state.get_mut(id) {
                         cs.image_id = Some("compose".to_string());
                         cs.status = DevcContainerStatus::Built;
+                        if let Ok(props_json) = serde_json::to_string(&feature_properties) {
+                            cs.metadata.insert("feature_properties".to_string(), props_json);
+                        }
                     }
                     state.save()?;
                 }
@@ -390,12 +421,15 @@ impl ContainerManager {
             }
         };
 
-        // Update state with image ID
+        // Update state with image ID and feature properties
         {
             let mut state = self.state.write().await;
             if let Some(cs) = state.get_mut(id) {
                 cs.image_id = Some(image_id.clone());
                 cs.status = DevcContainerStatus::Built;
+                if let Ok(props_json) = serde_json::to_string(&feature_properties) {
+                    cs.metadata.insert("feature_properties".to_string(), props_json);
+                }
             }
             state.save()?;
         }
@@ -420,7 +454,17 @@ impl ContainerManager {
         })?;
 
         let container = Container::from_config(&container_state.config_path)?;
-        let create_config = container.create_config(image_id);
+
+        // Deserialize feature properties from build metadata (if any)
+        let feature_props = container_state
+            .metadata
+            .get("feature_properties")
+            .and_then(|json| serde_json::from_str::<features::MergedFeatureProperties>(json).ok());
+
+        let create_config = container.create_config_with_features(
+            image_id,
+            feature_props.as_ref(),
+        );
 
         // Clean up any orphaned container with the same name before creating
         // This handles cases where state has container_id=null but a container exists
@@ -519,7 +563,23 @@ impl ContainerManager {
                     self.ensure_ssh_daemon_running(&svc.container_id).await?;
                 }
 
-                // Run post-start commands
+                // Run post-start commands (feature commands first, then devcontainer.json)
+                let feature_props = get_feature_properties(&container_state);
+                let merged_env = merge_remote_env(
+                    container.devcontainer.remote_env.as_ref(),
+                    &feature_props.remote_env,
+                );
+                if !feature_props.post_start_commands.is_empty() {
+                    run_feature_lifecycle_commands(
+                        provider,
+                        &svc.container_id,
+                        &feature_props.post_start_commands,
+                        container.devcontainer.effective_user(),
+                        container.devcontainer.workspace_folder.as_deref(),
+                        merged_env.as_ref(),
+                    )
+                    .await?;
+                }
                 if let Some(ref cmd) = container.devcontainer.post_start_command {
                     run_lifecycle_command_with_env(
                         provider,
@@ -527,7 +587,7 @@ impl ContainerManager {
                         cmd,
                         container.devcontainer.effective_user(),
                         container.devcontainer.workspace_folder.as_deref(),
-                        container.devcontainer.remote_env.as_ref(),
+                        merged_env.as_ref(),
                     )
                     .await?;
                 }
@@ -554,16 +614,33 @@ impl ContainerManager {
             self.ensure_ssh_daemon_running(&ContainerId::new(container_id)).await?;
         }
 
-        // Run post-start commands
+        // Run post-start commands (feature commands first, then devcontainer.json)
         let container = Container::from_config(&container_state.config_path)?;
+        let feature_props = get_feature_properties(&container_state);
+        let merged_env = merge_remote_env(
+            container.devcontainer.remote_env.as_ref(),
+            &feature_props.remote_env,
+        );
+        let cid = ContainerId::new(container_id);
+        if !feature_props.post_start_commands.is_empty() {
+            run_feature_lifecycle_commands(
+                provider,
+                &cid,
+                &feature_props.post_start_commands,
+                container.devcontainer.effective_user(),
+                container.devcontainer.workspace_folder.as_deref(),
+                merged_env.as_ref(),
+            )
+            .await?;
+        }
         if let Some(ref cmd) = container.devcontainer.post_start_command {
             run_lifecycle_command_with_env(
                 provider,
-                &ContainerId::new(container_id),
+                &cid,
                 cmd,
                 container.devcontainer.effective_user(),
                 container.devcontainer.workspace_folder.as_deref(),
-                container.devcontainer.remote_env.as_ref(),
+                merged_env.as_ref(),
             )
             .await?;
         }
@@ -935,15 +1012,37 @@ fi
             let _ = progress.send("SSH support: Disabled (not injecting dropbear)".to_string());
         }
 
+        // Resolve devcontainer features
+        let config_dir = container.config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let progress_opt = Some(progress.clone());
+        let resolved_features = if let Some(ref feature_map) = container.devcontainer.features {
+            features::resolve_and_prepare_features(feature_map, &config_dir, &progress_opt).await?
+        } else {
+            vec![]
+        };
+        let has_features = !resolved_features.is_empty();
+        let feature_properties = features::merge_feature_properties(&resolved_features);
+        let remote_user = container.devcontainer.effective_user().unwrap_or("root").to_string();
+
+        if has_features {
+            let _ = progress.send(format!("Installing {} devcontainer feature(s)...", resolved_features.len()));
+        }
+
         // Check if we need to build or pull
         let image_id = match container.devcontainer.image_source() {
             ImageSource::Image(image) => {
-                if inject_ssh {
+                if has_features || inject_ssh {
                     let _ = progress.send(format!(
-                        "Building enhanced image from {} (with SSH support)",
-                        image
+                        "Building enhanced image from {} (features: {}, SSH: {})",
+                        image, has_features, inject_ssh
                     ));
-                    let enhanced_ctx = EnhancedBuildContext::from_image(&image)?;
+                    let enhanced_ctx = if has_features {
+                        EnhancedBuildContext::from_image_with_features(
+                            &image, &resolved_features, inject_ssh, &remote_user,
+                        )?
+                    } else {
+                        EnhancedBuildContext::from_image(&image)?
+                    };
 
                     let build_config = devc_provider::BuildConfig {
                         context: enhanced_ctx.context_path().to_path_buf(),
@@ -989,15 +1088,25 @@ fi
                 let mut build_config = container.build_config()?;
                 build_config.no_cache = no_cache;
 
-                if inject_ssh {
+                if has_features || inject_ssh {
                     let _ = progress.send(format!(
-                        "Building enhanced image: {} (with SSH support, no_cache: {})",
-                        build_config.tag, no_cache
+                        "Building enhanced image: {} (features: {}, SSH: {}, no_cache: {})",
+                        build_config.tag, has_features, inject_ssh, no_cache
                     ));
-                    let enhanced_ctx = EnhancedBuildContext::from_dockerfile(
-                        &build_config.context,
-                        &build_config.dockerfile,
-                    )?;
+                    let enhanced_ctx = if has_features {
+                        EnhancedBuildContext::from_dockerfile_with_features(
+                            &build_config.context,
+                            &build_config.dockerfile,
+                            &resolved_features,
+                            inject_ssh,
+                            &remote_user,
+                        )?
+                    } else {
+                        EnhancedBuildContext::from_dockerfile(
+                            &build_config.context,
+                            &build_config.dockerfile,
+                        )?
+                    };
 
                     build_config.context = enhanced_ctx.context_path().to_path_buf();
                     build_config.dockerfile = enhanced_ctx.dockerfile_name().to_string();
@@ -1038,6 +1147,9 @@ fi
                     if let Some(cs) = state.get_mut(id) {
                         cs.image_id = Some("compose".to_string());
                         cs.status = DevcContainerStatus::Built;
+                        if let Ok(props_json) = serde_json::to_string(&feature_properties) {
+                            cs.metadata.insert("feature_properties".to_string(), props_json);
+                        }
                     }
                     state.save()?;
                 }
@@ -1051,12 +1163,15 @@ fi
             }
         };
 
-        // Update state with image ID
+        // Update state with image ID and feature properties
         {
             let mut state = self.state.write().await;
             if let Some(cs) = state.get_mut(id) {
                 cs.image_id = Some(image_id.clone());
                 cs.status = DevcContainerStatus::Built;
+                if let Ok(props_json) = serde_json::to_string(&feature_properties) {
+                    cs.metadata.insert("feature_properties".to_string(), props_json);
+                }
             }
             state.save()?;
         }
@@ -1146,20 +1261,36 @@ fi
 
         // Run onCreate command if this is first create
         if container_state.status == DevcContainerStatus::Created {
+            let feature_props = get_feature_properties(&container_state);
+            let user = container.devcontainer.effective_user();
+            let workspace_folder = container.devcontainer.workspace_folder.as_deref();
+            let merged_env = merge_remote_env(
+                container.devcontainer.remote_env.as_ref(),
+                &feature_props.remote_env,
+            );
+            let remote_env = merged_env.as_ref();
+
+            // Feature onCreateCommands run first (per spec)
+            if !feature_props.on_create_commands.is_empty() {
+                send_progress(progress, "Running feature onCreateCommand(s)...");
+                provider.start(&container_id).await?;
+                run_feature_lifecycle_commands(
+                    provider, &container_id, &feature_props.on_create_commands,
+                    user, workspace_folder, remote_env,
+                ).await?;
+            }
+
             if let Some(ref cmd) = container.devcontainer.on_create_command {
                 send_progress(progress, "Running onCreate command...");
                 // Start the container first for onCreate
-                provider.start(&container_id).await?;
+                let details = provider.inspect(&container_id).await?;
+                if details.status != ContainerStatus::Running {
+                    provider.start(&container_id).await?;
+                }
 
                 run_lifecycle_command_with_env(
-                    provider,
-                    &container_id,
-                    cmd,
-                    container.devcontainer.effective_user(),
-                    container.devcontainer.workspace_folder.as_deref(),
-                    container.devcontainer.remote_env.as_ref(),
-                )
-                .await?;
+                    provider, &container_id, cmd, user, workspace_folder, remote_env,
+                ).await?;
             }
 
             // Run updateContentCommand (between onCreate and postCreate per spec)
@@ -1171,14 +1302,21 @@ fi
                 }
 
                 run_lifecycle_command_with_env(
-                    provider,
-                    &container_id,
-                    cmd,
-                    container.devcontainer.effective_user(),
-                    container.devcontainer.workspace_folder.as_deref(),
-                    container.devcontainer.remote_env.as_ref(),
-                )
-                .await?;
+                    provider, &container_id, cmd, user, workspace_folder, remote_env,
+                ).await?;
+            }
+
+            // Feature postCreateCommands run first (per spec)
+            if !feature_props.post_create_commands.is_empty() {
+                send_progress(progress, "Running feature postCreateCommand(s)...");
+                let details = provider.inspect(&container_id).await?;
+                if details.status != ContainerStatus::Running {
+                    provider.start(&container_id).await?;
+                }
+                run_feature_lifecycle_commands(
+                    provider, &container_id, &feature_props.post_create_commands,
+                    user, workspace_folder, remote_env,
+                ).await?;
             }
 
             // Run postCreateCommand
@@ -1191,14 +1329,8 @@ fi
                 }
 
                 run_lifecycle_command_with_env(
-                    provider,
-                    &container_id,
-                    cmd,
-                    container.devcontainer.effective_user(),
-                    container.devcontainer.workspace_folder.as_deref(),
-                    container.devcontainer.remote_env.as_ref(),
-                )
-                .await?;
+                    provider, &container_id, cmd, user, workspace_folder, remote_env,
+                ).await?;
             }
 
             // Setup SSH if enabled (for proper TTY/resize support)
@@ -1292,7 +1424,39 @@ fi
         })?;
         let project_name = container.compose_project_name();
 
-        let owned = compose_file_strs(&compose_files);
+        let mut owned = compose_file_strs(&compose_files);
+
+        // Resolve devcontainer features for compose override + exec-based install
+        let config_dir = container.config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let progress_opt: Option<mpsc::UnboundedSender<String>> = progress.map(|p| p.clone());
+        let resolved_features = if let Some(ref feature_map) = container.devcontainer.features {
+            features::resolve_and_prepare_features(feature_map, &config_dir, &progress_opt).await?
+        } else {
+            vec![]
+        };
+        let feature_props = features::merge_feature_properties(&resolved_features);
+
+        // Generate compose override file if features declare container properties
+        let override_file = if feature_props.has_container_properties() {
+            let yaml = features::compose_override::generate_compose_override(
+                service_name, &feature_props,
+            );
+            if let Some(yaml) = yaml {
+                let path = container.workspace_path.join(".devc-compose-override.yml");
+                std::fs::write(&path, &yaml)?;
+                Some(path)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Add override file to compose files list
+        if let Some(ref override_path) = override_file {
+            owned.push(override_path.to_string_lossy().to_string());
+        }
+
         let compose_file_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
 
         // 1. Run compose up
@@ -1317,10 +1481,18 @@ fi
             )
             .await?;
 
+        // Clean up override file
+        if let Some(ref path) = override_file {
+            let _ = std::fs::remove_file(path);
+        }
+
         // 2. Find the dev service container ID
         send_progress(progress, "Finding service container...");
+        // Use original compose files (without override) for ps
+        let original_owned = compose_file_strs(&compose_files);
+        let original_refs: Vec<&str> = original_owned.iter().map(|s| s.as_str()).collect();
         let services = provider
-            .compose_ps(&compose_file_refs, &project_name, &container.workspace_path)
+            .compose_ps(&original_refs, &project_name, &container.workspace_path)
             .await?;
 
         let dev_service = services
@@ -1335,7 +1507,16 @@ fi
 
         let container_id = dev_service.container_id.clone();
 
-        // 3. Store compose metadata in state
+        // 3. Install features via exec if any were resolved
+        if !resolved_features.is_empty() {
+            send_progress(progress, "Installing features...");
+            let remote_user = container.devcontainer.effective_user().unwrap_or("root");
+            features::install::install_features_via_exec(
+                provider, &container_id, &resolved_features, remote_user, progress,
+            ).await?;
+        }
+
+        // 4. Store compose metadata in state
         {
             let mut state = self.state.write().await;
             if let Some(cs) = state.get_mut(id) {
@@ -1348,48 +1529,51 @@ fi
             state.save()?;
         }
 
-        // 4. Run lifecycle commands targeting the dev service container
+        // 5. Run lifecycle commands targeting the dev service container
+        //    Feature lifecycle commands run BEFORE devcontainer.json commands (per spec)
         let user = container.devcontainer.effective_user();
         let workspace_folder = container.devcontainer.workspace_folder.as_deref();
-        let remote_env = container.devcontainer.remote_env.as_ref();
+        let merged_env = merge_remote_env(
+            container.devcontainer.remote_env.as_ref(),
+            &feature_props.remote_env,
+        );
+        let remote_env = merged_env.as_ref();
+
+        if !feature_props.on_create_commands.is_empty() {
+            send_progress(progress, "Running feature onCreateCommand(s)...");
+            run_feature_lifecycle_commands(
+                provider, &container_id, &feature_props.on_create_commands,
+                user, workspace_folder, remote_env,
+            ).await?;
+        }
 
         if let Some(ref cmd) = container.devcontainer.on_create_command {
             send_progress(progress, "Running onCreate command...");
             run_lifecycle_command_with_env(
-                provider,
-                &container_id,
-                cmd,
-                user,
-                workspace_folder,
-                remote_env,
-            )
-            .await?;
+                provider, &container_id, cmd, user, workspace_folder, remote_env,
+            ).await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.update_content_command {
             send_progress(progress, "Running updateContentCommand...");
             run_lifecycle_command_with_env(
-                provider,
-                &container_id,
-                cmd,
-                user,
-                workspace_folder,
-                remote_env,
-            )
-            .await?;
+                provider, &container_id, cmd, user, workspace_folder, remote_env,
+            ).await?;
+        }
+
+        if !feature_props.post_create_commands.is_empty() {
+            send_progress(progress, "Running feature postCreateCommand(s)...");
+            run_feature_lifecycle_commands(
+                provider, &container_id, &feature_props.post_create_commands,
+                user, workspace_folder, remote_env,
+            ).await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.post_create_command {
             send_progress(progress, "Running postCreateCommand...");
             run_lifecycle_command_with_env(
-                provider,
-                &container_id,
-                cmd,
-                user,
-                workspace_folder,
-                remote_env,
-            )
-            .await?;
+                provider, &container_id, cmd, user, workspace_folder, remote_env,
+            ).await?;
         }
 
         // Setup SSH if enabled
@@ -1427,17 +1611,19 @@ fi
             }
         }
 
+        if !feature_props.post_start_commands.is_empty() {
+            send_progress(progress, "Running feature postStartCommand(s)...");
+            run_feature_lifecycle_commands(
+                provider, &container_id, &feature_props.post_start_commands,
+                user, workspace_folder, remote_env,
+            ).await?;
+        }
+
         if let Some(ref cmd) = container.devcontainer.post_start_command {
             send_progress(progress, "Running postStartCommand...");
             run_lifecycle_command_with_env(
-                provider,
-                &container_id,
-                cmd,
-                user,
-                workspace_folder,
-                remote_env,
-            )
-            .await?;
+                provider, &container_id, cmd, user, workspace_folder, remote_env,
+            ).await?;
         }
 
         send_progress(progress, "Compose project started!");
@@ -1457,17 +1643,37 @@ fi
         };
 
         let container = Container::from_config(&container_state.config_path)?;
+        let container_id_str = container_state.container_id.as_ref().ok_or_else(|| {
+            CoreError::InvalidState("Container not created yet".to_string())
+        })?;
+        let cid = ContainerId::new(container_id_str);
+
+        // Feature postAttachCommands run first (per spec)
+        let feature_props = get_feature_properties(&container_state);
+        let merged_env = merge_remote_env(
+            container.devcontainer.remote_env.as_ref(),
+            &feature_props.remote_env,
+        );
+        if !feature_props.post_attach_commands.is_empty() {
+            run_feature_lifecycle_commands(
+                provider,
+                &cid,
+                &feature_props.post_attach_commands,
+                container.devcontainer.effective_user(),
+                container.devcontainer.workspace_folder.as_deref(),
+                merged_env.as_ref(),
+            )
+            .await?;
+        }
+
         if let Some(ref cmd) = container.devcontainer.post_attach_command {
-            let container_id = container_state.container_id.as_ref().ok_or_else(|| {
-                CoreError::InvalidState("Container not created yet".to_string())
-            })?;
             run_lifecycle_command_with_env(
                 provider,
-                &ContainerId::new(container_id),
+                &cid,
                 cmd,
                 container.devcontainer.effective_user(),
                 container.devcontainer.workspace_folder.as_deref(),
-                container.devcontainer.remote_env.as_ref(),
+                merged_env.as_ref(),
             )
             .await?;
         }
@@ -1503,8 +1709,16 @@ fi
 
         // Try loading config for remoteEnv/user/workdir; fall back to a basic config
         // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
+        let feature_props = get_feature_properties(&container_state);
         let config = match Container::from_config(&container_state.config_path) {
-            Ok(container) => container.exec_config(cmd, tty, tty),
+            Ok(container) => {
+                let feat_env = if feature_props.remote_env.is_empty() {
+                    None
+                } else {
+                    Some(&feature_props.remote_env)
+                };
+                container.exec_config_with_feature_env(cmd, tty, tty, feat_env)
+            }
             Err(_) => {
                 let mut env = std::collections::HashMap::new();
                 env.insert("TERM".to_string(), "xterm-256color".to_string());
@@ -1557,8 +1771,14 @@ fi
 
         let container_id = container_state.container_id.as_ref().unwrap();
         let container = Container::from_config(&container_state.config_path)?;
+        let feature_props = get_feature_properties(&container_state);
+        let feat_env = if feature_props.remote_env.is_empty() {
+            None
+        } else {
+            Some(&feature_props.remote_env)
+        };
 
-        let config = container.exec_config(cmd, true, true);
+        let config = container.exec_config_with_feature_env(cmd, true, true, feat_env);
         let stream = provider
             .exec_interactive(&ContainerId::new(container_id), &config)
             .await?;
@@ -1593,8 +1813,14 @@ fi
 
         let container_id = container_state.container_id.as_ref().unwrap();
         let container = Container::from_config(&container_state.config_path)?;
+        let feature_props = get_feature_properties(&container_state);
+        let feat_env = if feature_props.remote_env.is_empty() {
+            None
+        } else {
+            Some(&feature_props.remote_env)
+        };
 
-        let config = container.shell_config();
+        let config = container.shell_config_with_feature_env(feat_env);
         let stream = provider
             .exec_interactive(&ContainerId::new(container_id), &config)
             .await?;
@@ -1841,6 +2067,31 @@ fn compose_file_strs(files: &[std::path::PathBuf]) -> Vec<String> {
 }
 
 /// Helper to send progress messages
+/// Extract merged feature properties from container state metadata.
+fn get_feature_properties(state: &ContainerState) -> features::MergedFeatureProperties {
+    state
+        .metadata
+        .get("feature_properties")
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default()
+}
+
+/// Merge feature remoteEnv with devcontainer.json remoteEnv.
+/// Feature env provides a base; devcontainer.json wins on conflict.
+fn merge_remote_env(
+    devcontainer_env: Option<&HashMap<String, String>>,
+    feature_env: &HashMap<String, String>,
+) -> Option<HashMap<String, String>> {
+    if feature_env.is_empty() && devcontainer_env.is_none() {
+        return None;
+    }
+    let mut merged = feature_env.clone();
+    if let Some(dc_env) = devcontainer_env {
+        merged.extend(dc_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    Some(merged)
+}
+
 fn send_progress(progress: Option<&mpsc::UnboundedSender<String>>, msg: &str) {
     if let Some(tx) = progress {
         let _ = tx.send(msg.to_string());
@@ -3124,5 +3375,46 @@ mod tests {
         // Total should still be 2
         let all = mgr.list().await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_remote_env_both_empty() {
+        let feature_env = HashMap::new();
+        let result = merge_remote_env(None, &feature_env);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_remote_env_feature_only() {
+        let mut feature_env = HashMap::new();
+        feature_env.insert("FOO".to_string(), "bar".to_string());
+        let result = merge_remote_env(None, &feature_env).unwrap();
+        assert_eq!(result.get("FOO").unwrap(), "bar");
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_remote_env_devcontainer_only() {
+        let feature_env = HashMap::new();
+        let mut dc_env = HashMap::new();
+        dc_env.insert("EDITOR".to_string(), "vim".to_string());
+        let result = merge_remote_env(Some(&dc_env), &feature_env).unwrap();
+        assert_eq!(result.get("EDITOR").unwrap(), "vim");
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_remote_env_devcontainer_wins() {
+        let mut feature_env = HashMap::new();
+        feature_env.insert("EDITOR".to_string(), "nano".to_string());
+        feature_env.insert("FEATURE_VAR".to_string(), "hello".to_string());
+        let mut dc_env = HashMap::new();
+        dc_env.insert("EDITOR".to_string(), "vim".to_string());
+        dc_env.insert("DC_VAR".to_string(), "world".to_string());
+        let result = merge_remote_env(Some(&dc_env), &feature_env).unwrap();
+        assert_eq!(result.get("EDITOR").unwrap(), "vim", "devcontainer.json should win");
+        assert_eq!(result.get("FEATURE_VAR").unwrap(), "hello");
+        assert_eq!(result.get("DC_VAR").unwrap(), "world");
+        assert_eq!(result.len(), 3);
     }
 }

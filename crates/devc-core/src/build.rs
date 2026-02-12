@@ -3,6 +3,8 @@
 //! This module handles injecting SSH support (dropbear) into container images
 //! at build time, so container startup is fast.
 
+use crate::features::dockerfile::generate_all_feature_layers;
+use crate::features::resolve::ResolvedFeature;
 use crate::Result;
 use std::path::{Path, PathBuf};
 
@@ -111,6 +113,109 @@ impl EnhancedBuildContext {
         })
     }
 
+    /// Create an enhanced build context from a base image with features.
+    ///
+    /// Generates a Dockerfile with FROM, feature COPY+RUN layers, and optional SSH.
+    pub fn from_image_with_features(
+        base_image: &str,
+        features: &[ResolvedFeature],
+        inject_ssh: bool,
+        remote_user: &str,
+    ) -> Result<Self> {
+        let temp_dir = tempfile::tempdir()?;
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+
+        // Copy feature directories into build context
+        copy_features_to_context(features, temp_dir.path())?;
+
+        let feature_layers =
+            generate_all_feature_layers(features, "feature", remote_user);
+
+        let ssh_section = if inject_ssh {
+            DROPBEAR_INSTALL_SCRIPT.to_string()
+        } else {
+            String::new()
+        };
+
+        let dockerfile_content = format!(
+            "FROM {}\nUSER root\n\n{}\n{}",
+            base_image, feature_layers, ssh_section
+        );
+
+        // If remote_user is not root, restore it at the end
+        let dockerfile_content = if remote_user != "root" {
+            format!("{}\nUSER {}\n", dockerfile_content.trim_end(), remote_user)
+        } else {
+            dockerfile_content
+        };
+
+        std::fs::write(&dockerfile_path, dockerfile_content)?;
+
+        Ok(Self {
+            temp_dir,
+            dockerfile_path,
+        })
+    }
+
+    /// Create an enhanced build context from a Dockerfile with features.
+    ///
+    /// Copies original context, appends feature layers and optional SSH,
+    /// then restores the original USER.
+    pub fn from_dockerfile_with_features(
+        original_context: &Path,
+        dockerfile_name: &str,
+        features: &[ResolvedFeature],
+        inject_ssh: bool,
+        remote_user: &str,
+    ) -> Result<Self> {
+        let temp_dir = tempfile::tempdir()?;
+
+        // Copy the entire build context to temp directory
+        copy_dir_recursive(original_context, temp_dir.path())?;
+
+        // Copy feature directories into build context
+        copy_features_to_context(features, temp_dir.path())?;
+
+        let dockerfile_path = temp_dir.path().join(dockerfile_name);
+        let original_content = std::fs::read_to_string(&dockerfile_path)?;
+
+        // Find the last USER instruction to restore after features + SSH
+        let last_user = original_content
+            .lines()
+            .rev()
+            .find(|line| {
+                let trimmed = line.trim();
+                trimmed.to_uppercase().starts_with("USER ")
+                    && !trimmed.starts_with('#')
+            })
+            .map(|line| line.trim().to_string());
+
+        let feature_layers =
+            generate_all_feature_layers(features, "feature", remote_user);
+
+        let ssh_section = if inject_ssh {
+            format!("\n# Added by devc for SSH support{}", DROPBEAR_INSTALL_SCRIPT)
+        } else {
+            String::new()
+        };
+
+        let user_restore = last_user
+            .map(|u| format!("\n# Restore original user\n{}", u))
+            .unwrap_or_default();
+
+        let enhanced_content = format!(
+            "{}\n\nUSER root\n# Install devcontainer features\n{}{}{}",
+            original_content, feature_layers, ssh_section, user_restore
+        );
+
+        std::fs::write(&dockerfile_path, enhanced_content)?;
+
+        Ok(Self {
+            temp_dir,
+            dockerfile_path,
+        })
+    }
+
     /// Get the path to the build context directory
     pub fn context_path(&self) -> &Path {
         self.temp_dir.path()
@@ -143,6 +248,22 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Copy feature directories into the build context so they can be COPY'd in the Dockerfile.
+fn copy_features_to_context(features: &[ResolvedFeature], context_dir: &Path) -> Result<()> {
+    for (i, feature) in features.iter().enumerate() {
+        let short_name = feature
+            .id
+            .rsplit_once('/')
+            .map(|(_, n)| n)
+            .unwrap_or(&feature.id)
+            .replace(':', "-");
+        let dir_name = format!("feature-{}-{}", i, short_name);
+        let dst = context_dir.join(&dir_name);
+        copy_dir_recursive(&feature.dir, &dst)?;
+    }
     Ok(())
 }
 
@@ -303,5 +424,157 @@ RUN dnf install -y bash
         assert!(enhanced.contains("dropbear"));
         // Should NOT have "Restore original user" since there was no USER instruction
         assert!(!enhanced.contains("Restore original user"));
+    }
+
+    // ==================== Feature-aware build context tests ====================
+
+    fn make_test_features() -> (tempfile::TempDir, Vec<ResolvedFeature>) {
+        use crate::features::resolve::FeatureMetadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a fake feature directory with install.sh
+        let feature_dir = tmp.path().join("node-feature");
+        std::fs::create_dir_all(&feature_dir).unwrap();
+        std::fs::write(feature_dir.join("install.sh"), "#!/bin/bash\necho installing node").unwrap();
+        std::fs::write(
+            feature_dir.join("devcontainer-feature.json"),
+            r#"{"id": "node"}"#,
+        )
+        .unwrap();
+
+        let mut options = std::collections::HashMap::new();
+        options.insert("version".to_string(), "20".to_string());
+
+        let features = vec![ResolvedFeature {
+            id: "ghcr.io/devcontainers/features/node:1".to_string(),
+            dir: feature_dir,
+            options,
+            metadata: FeatureMetadata {
+                id: Some("node".to_string()),
+                ..Default::default()
+            },
+        }];
+
+        (tmp, features)
+    }
+
+    #[test]
+    fn test_from_image_with_features() {
+        let (_tmp, features) = make_test_features();
+
+        let ctx = EnhancedBuildContext::from_image_with_features(
+            "ubuntu:22.04",
+            &features,
+            false,
+            "vscode",
+        )
+        .unwrap();
+
+        let dockerfile = std::fs::read_to_string(ctx.context_path().join("Dockerfile")).unwrap();
+
+        // Should have FROM
+        assert!(dockerfile.starts_with("FROM ubuntu:22.04"));
+        // Should have feature COPY+RUN
+        assert!(dockerfile.contains("COPY feature-0-node-1/ /tmp/dev-container-feature/"));
+        assert!(dockerfile.contains("VERSION=20"));
+        assert!(dockerfile.contains("_REMOTE_USER=vscode"));
+        assert!(dockerfile.contains("install.sh"));
+        // Should NOT have dropbear (inject_ssh=false)
+        assert!(!dockerfile.contains("dropbear"));
+        // Should restore user at end
+        assert!(dockerfile.contains("USER vscode"));
+
+        // Feature files should be copied into context
+        assert!(ctx
+            .context_path()
+            .join("feature-0-node-1/install.sh")
+            .exists());
+    }
+
+    #[test]
+    fn test_from_image_with_features_and_ssh() {
+        let (_tmp, features) = make_test_features();
+
+        let ctx = EnhancedBuildContext::from_image_with_features(
+            "ubuntu:22.04",
+            &features,
+            true,
+            "vscode",
+        )
+        .unwrap();
+
+        let dockerfile = std::fs::read_to_string(ctx.context_path().join("Dockerfile")).unwrap();
+
+        // Should have both features and SSH
+        assert!(dockerfile.contains("COPY feature-0-node-1/"));
+        assert!(dockerfile.contains("dropbear"));
+        assert!(dockerfile.contains("USER vscode"));
+    }
+
+    #[test]
+    fn test_from_dockerfile_with_features() {
+        let (_tmp, features) = make_test_features();
+
+        let ctx_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ctx_dir.path().join("Dockerfile"),
+            "FROM python:3.12\nUSER developer\n",
+        )
+        .unwrap();
+
+        let ctx = EnhancedBuildContext::from_dockerfile_with_features(
+            ctx_dir.path(),
+            "Dockerfile",
+            &features,
+            false,
+            "developer",
+        )
+        .unwrap();
+
+        let dockerfile = std::fs::read_to_string(ctx.context_path().join("Dockerfile")).unwrap();
+
+        // Should have original content
+        assert!(dockerfile.contains("FROM python:3.12"));
+        // Should have feature layers
+        assert!(dockerfile.contains("COPY feature-0-node-1/"));
+        assert!(dockerfile.contains("VERSION=20"));
+        // Should NOT have SSH
+        assert!(!dockerfile.contains("dropbear"));
+        // Should restore original user
+        assert!(dockerfile.contains("Restore original user"));
+        // Last USER line should be the restored user
+        let last_user_line = dockerfile.lines().rev()
+            .find(|l| l.trim().to_uppercase().starts_with("USER "))
+            .unwrap();
+        assert!(last_user_line.contains("developer"));
+    }
+
+    #[test]
+    fn test_from_dockerfile_with_features_and_ssh() {
+        let (_tmp, features) = make_test_features();
+
+        let ctx_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            ctx_dir.path().join("Dockerfile"),
+            "FROM python:3.12\nUSER developer\n",
+        )
+        .unwrap();
+
+        let ctx = EnhancedBuildContext::from_dockerfile_with_features(
+            ctx_dir.path(),
+            "Dockerfile",
+            &features,
+            true,
+            "developer",
+        )
+        .unwrap();
+
+        let dockerfile = std::fs::read_to_string(ctx.context_path().join("Dockerfile")).unwrap();
+
+        // Should have features + SSH + user restore
+        assert!(dockerfile.contains("COPY feature-0-node-1/"));
+        assert!(dockerfile.contains("dropbear"));
+        assert!(dockerfile.contains("Restore original user"));
     }
 }

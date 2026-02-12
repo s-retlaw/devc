@@ -21,3 +21,6 @@ futures = { workspace = true }
 shellexpand = { workspace = true }
 base64 = { workspace = true }
 tempfile = { workspace = true }
+reqwest = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }

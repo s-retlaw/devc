@@ -34,6 +34,9 @@ pub enum CoreError {
     #[error("SSH key generation failed: {0}")]
     SshKeygenError(String),
 
+    #[error("Feature download failed for {feature}: {reason}")]
+    FeatureDownloadFailed { feature: String, reason: String },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

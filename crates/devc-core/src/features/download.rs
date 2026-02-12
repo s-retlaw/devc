@@ -1,0 +1,627 @@
+//! Feature download: OCI registry and local path handling
+
+use super::resolve::{FeatureMetadata, FeatureSource};
+use crate::{CoreError, Result};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
+
+/// Download or prepare a feature, returning the path to its directory.
+///
+/// For OCI features, downloads from the registry and caches locally.
+/// For local features, validates the path and returns it directly.
+/// For tarball URL features, downloads and extracts the tarball.
+pub async fn download_feature(
+    source: &FeatureSource,
+    config_dir: &Path,
+    cache_dir: &Path,
+    progress: &Option<mpsc::UnboundedSender<String>>,
+) -> Result<PathBuf> {
+    match source {
+        FeatureSource::Oci {
+            registry,
+            namespace,
+            name,
+            tag,
+        } => {
+            download_oci_feature(registry, namespace, name, tag, cache_dir, progress).await
+        }
+        FeatureSource::Local { path } => {
+            let resolved = if path.is_relative() {
+                config_dir.join(path)
+            } else {
+                path.clone()
+            };
+
+            if !resolved.join("install.sh").exists() {
+                return Err(CoreError::FeatureDownloadFailed {
+                    feature: path.display().to_string(),
+                    reason: format!(
+                        "Local feature directory missing install.sh: {}",
+                        resolved.display()
+                    ),
+                });
+            }
+
+            Ok(resolved)
+        }
+        FeatureSource::TarballUrl { url } => {
+            download_tarball_feature(url, cache_dir, progress).await
+        }
+    }
+}
+
+/// Download an OCI feature artifact from a registry.
+async fn download_oci_feature(
+    registry: &str,
+    namespace: &str,
+    name: &str,
+    tag: &str,
+    cache_dir: &Path,
+    progress: &Option<mpsc::UnboundedSender<String>>,
+) -> Result<PathBuf> {
+    let feature_cache = cache_dir.join(registry).join(namespace).join(name).join(tag);
+
+    // Check cache
+    if feature_cache.join("install.sh").exists() {
+        send_progress(progress, &format!("Feature {}/{}: cached", namespace, name));
+        return Ok(feature_cache);
+    }
+
+    send_progress(
+        progress,
+        &format!("Downloading feature {}/{}:{}...", namespace, name, tag),
+    );
+
+    let base_url = format!("https://{}", registry);
+    let repo = format!("{}/{}", namespace, name);
+
+    let client = reqwest::Client::new();
+
+    // Step 1: Get auth token
+    let token = get_auth_token(&client, &base_url, &repo, registry).await.map_err(|e| {
+        CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}/{}:{}", registry, namespace, name, tag),
+            reason: format!("Auth failed: {}", e),
+        }
+    })?;
+
+    // Step 2: Get manifest
+    let manifest_url = format!("{}/v2/{}/manifests/{}", base_url, repo, tag);
+    let manifest_resp = client
+        .get(&manifest_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header(
+            "Accept",
+            "application/vnd.oci.image.manifest.v1+json",
+        )
+        .send()
+        .await
+        .map_err(|e| CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: format!("Manifest request failed: {}", e),
+        })?;
+
+    if !manifest_resp.status().is_success() {
+        return Err(CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: format!("Manifest fetch returned {}", manifest_resp.status()),
+        });
+    }
+
+    let manifest: OciManifest = manifest_resp.json().await.map_err(|e| {
+        CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: format!("Failed to parse manifest: {}", e),
+        }
+    })?;
+
+    // Step 3: Find the feature layer
+    let layer = manifest
+        .layers
+        .iter()
+        .find(|l| l.media_type == "application/vnd.devcontainers.layer.v1+tar")
+        .ok_or_else(|| CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: "No feature layer found in manifest".to_string(),
+        })?;
+
+    // Step 4: Download the layer blob
+    let blob_url = format!("{}/v2/{}/blobs/{}", base_url, repo, layer.digest);
+    let blob_resp = client
+        .get(&blob_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: format!("Blob download failed: {}", e),
+        })?;
+
+    if !blob_resp.status().is_success() {
+        return Err(CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: format!("Blob download returned {}", blob_resp.status()),
+        });
+    }
+
+    let blob_bytes = blob_resp.bytes().await.map_err(|e| {
+        CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: format!("Failed to read blob: {}", e),
+        }
+    })?;
+
+    // Step 5: Extract tarball to cache directory
+    std::fs::create_dir_all(&feature_cache)?;
+
+    let cursor = std::io::Cursor::new(&blob_bytes);
+    let mut archive = tar::Archive::new(cursor);
+    archive.unpack(&feature_cache).map_err(|e| {
+        // Clean up on failure
+        let _ = std::fs::remove_dir_all(&feature_cache);
+        CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: format!("Failed to extract tarball: {}", e),
+        }
+    })?;
+
+    if !feature_cache.join("install.sh").exists() {
+        let _ = std::fs::remove_dir_all(&feature_cache);
+        return Err(CoreError::FeatureDownloadFailed {
+            feature: format!("{}/{}:{}", namespace, name, tag),
+            reason: "Extracted tarball does not contain install.sh".to_string(),
+        });
+    }
+
+    send_progress(
+        progress,
+        &format!("Feature {}/{}: downloaded", namespace, name),
+    );
+
+    Ok(feature_cache)
+}
+
+/// Compute a deterministic cache key for a tarball URL.
+///
+/// Uses `DefaultHasher` (SipHash) for a u64 hash of the URL, formatted as hex.
+/// This is sufficient for cache keying — collisions are vanishingly unlikely for URLs.
+fn tarball_cache_key(url: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Returns true if the given bytes start with the gzip magic number (0x1f 0x8b).
+fn is_gzip(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+}
+
+/// Download a feature from an HTTP/HTTPS tarball URL.
+///
+/// Caches extracted features under `{cache_dir}/urls/{hash}/`.
+/// Automatically detects gzip compression via magic bytes.
+async fn download_tarball_feature(
+    url: &str,
+    cache_dir: &Path,
+    progress: &Option<mpsc::UnboundedSender<String>>,
+) -> Result<PathBuf> {
+    let hash = tarball_cache_key(url);
+    let feature_cache = cache_dir.join("urls").join(&hash);
+
+    // Check cache
+    if feature_cache.join("install.sh").exists() {
+        send_progress(progress, &format!("Feature {}: cached", url));
+        return Ok(feature_cache);
+    }
+
+    send_progress(progress, &format!("Downloading feature {}...", url));
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| CoreError::FeatureDownloadFailed {
+            feature: url.to_string(),
+            reason: format!("HTTP request failed: {}", e),
+        })?;
+
+    if !resp.status().is_success() {
+        return Err(CoreError::FeatureDownloadFailed {
+            feature: url.to_string(),
+            reason: format!("HTTP {} from {}", resp.status(), url),
+        });
+    }
+
+    let bytes = resp.bytes().await.map_err(|e| CoreError::FeatureDownloadFailed {
+        feature: url.to_string(),
+        reason: format!("Failed to read response body: {}", e),
+    })?;
+
+    // Extract tarball (auto-detect gzip)
+    std::fs::create_dir_all(&feature_cache)?;
+
+    let extract_result = if is_gzip(&bytes) {
+        let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(&bytes));
+        let mut archive = tar::Archive::new(decoder);
+        archive.unpack(&feature_cache)
+    } else {
+        let mut archive = tar::Archive::new(std::io::Cursor::new(&bytes));
+        archive.unpack(&feature_cache)
+    };
+
+    extract_result.map_err(|e| {
+        let _ = std::fs::remove_dir_all(&feature_cache);
+        CoreError::FeatureDownloadFailed {
+            feature: url.to_string(),
+            reason: format!("Failed to extract tarball: {}", e),
+        }
+    })?;
+
+    if !feature_cache.join("install.sh").exists() {
+        let _ = std::fs::remove_dir_all(&feature_cache);
+        return Err(CoreError::FeatureDownloadFailed {
+            feature: url.to_string(),
+            reason: "Extracted tarball does not contain install.sh".to_string(),
+        });
+    }
+
+    send_progress(progress, &format!("Feature {}: downloaded", url));
+
+    Ok(feature_cache)
+}
+
+/// Read feature metadata from devcontainer-feature.json in the feature directory.
+pub fn read_feature_metadata(feature_dir: &Path) -> FeatureMetadata {
+    let metadata_path = feature_dir.join("devcontainer-feature.json");
+    if metadata_path.exists() {
+        match std::fs::read_to_string(&metadata_path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => FeatureMetadata::default(),
+        }
+    } else {
+        FeatureMetadata::default()
+    }
+}
+
+/// Get an authentication token from the OCI registry.
+///
+/// Follows the Docker v2 token auth flow:
+/// 1. GET /v2/ → 401 with WWW-Authenticate header
+/// 2. Parse realm, service from WWW-Authenticate
+/// 3. GET <realm>?service=<service>&scope=repository:<repo>:pull
+async fn get_auth_token(
+    client: &reqwest::Client,
+    base_url: &str,
+    repo: &str,
+    registry: &str,
+) -> std::result::Result<String, String> {
+    // Try to get the WWW-Authenticate header
+    let v2_url = format!("{}/v2/", base_url);
+    let resp = client
+        .get(&v2_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach registry: {}", e))?;
+
+    if resp.status() == 200 {
+        // No auth needed (unusual but possible)
+        return Ok(String::new());
+    }
+
+    let www_auth = resp
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| "No WWW-Authenticate header in 401 response".to_string())?
+        .to_string();
+
+    let (realm, service) = parse_www_authenticate(&www_auth)?;
+
+    // Try to get credentials from docker config for private registries
+    let creds = read_docker_credentials(registry);
+
+    let scope = format!("repository:{}:pull", repo);
+    let mut token_req = client.get(&realm).query(&[("service", &service), ("scope", &scope)]);
+
+    if let Some((user, pass)) = creds {
+        token_req = token_req.basic_auth(user, Some(pass));
+    }
+
+    let token_resp = token_req
+        .send()
+        .await
+        .map_err(|e| format!("Token request failed: {}", e))?;
+
+    if !token_resp.status().is_success() {
+        return Err(format!(
+            "Token endpoint returned {}",
+            token_resp.status()
+        ));
+    }
+
+    let token_json: serde_json::Value = token_resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    token_json
+        .get("token")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No token field in response".to_string())
+}
+
+/// Parse the WWW-Authenticate header to extract realm and service.
+///
+/// Format: `Bearer realm="<url>",service="<svc>",...`
+fn parse_www_authenticate(header: &str) -> std::result::Result<(String, String), String> {
+    let params = header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| format!("Unexpected auth scheme: {}", header))?;
+
+    let parsed: HashMap<String, String> = params
+        .split(',')
+        .filter_map(|part| {
+            let (key, value) = part.trim().split_once('=')?;
+            Some((
+                key.trim().to_string(),
+                value.trim().trim_matches('"').to_string(),
+            ))
+        })
+        .collect();
+
+    let realm = parsed
+        .get("realm")
+        .ok_or("Missing realm in WWW-Authenticate")?
+        .clone();
+    let service = parsed
+        .get("service")
+        .ok_or("Missing service in WWW-Authenticate")?
+        .clone();
+
+    Ok((realm, service))
+}
+
+/// Read credentials from ~/.docker/config.json for a given registry.
+fn read_docker_credentials(registry: &str) -> Option<(String, String)> {
+    let home = dirs_for_docker_config()?;
+    let config_path = home.join(".docker/config.json");
+
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let auth_str = config
+        .get("auths")?
+        .get(registry)?
+        .get("auth")?
+        .as_str()?;
+
+    let decoded = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        auth_str,
+    )
+    .ok()?;
+    let decoded_str = String::from_utf8(decoded).ok()?;
+    let (user, pass) = decoded_str.split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
+}
+
+fn dirs_for_docker_config() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
+}
+
+fn send_progress(progress: &Option<mpsc::UnboundedSender<String>>, msg: &str) {
+    if let Some(ref tx) = progress {
+        let _ = tx.send(msg.to_string());
+    }
+}
+
+/// OCI manifest types (minimal, just what we need)
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OciManifest {
+    #[allow(dead_code)]
+    schema_version: Option<u32>,
+    layers: Vec<OciLayer>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OciLayer {
+    media_type: String,
+    digest: String,
+    #[allow(dead_code)]
+    size: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_www_authenticate() {
+        let header =
+            r#"Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:devcontainers/features/node:pull""#;
+        let (realm, service) = parse_www_authenticate(header).unwrap();
+        assert_eq!(realm, "https://ghcr.io/token");
+        assert_eq!(service, "ghcr.io");
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_bad_scheme() {
+        let result = parse_www_authenticate("Basic realm=\"foo\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_feature_metadata_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let meta = read_feature_metadata(tmp.path());
+        assert!(meta.id.is_none());
+    }
+
+    #[test]
+    fn test_read_feature_metadata_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let meta_json = r#"{
+            "id": "node",
+            "version": "1.2.3",
+            "name": "Node.js",
+            "installsAfter": ["common-utils"]
+        }"#;
+        std::fs::write(tmp.path().join("devcontainer-feature.json"), meta_json).unwrap();
+
+        let meta = read_feature_metadata(tmp.path());
+        assert_eq!(meta.id.as_deref(), Some("node"));
+        assert_eq!(meta.version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            meta.install_after,
+            Some(vec!["common-utils".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_local_feature_validation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let feature_dir = tmp.path().join("my-feature");
+        std::fs::create_dir_all(&feature_dir).unwrap();
+        std::fs::write(feature_dir.join("install.sh"), "#!/bin/bash\necho hi").unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(download_feature(
+            &FeatureSource::Local {
+                path: PathBuf::from("./my-feature"),
+            },
+            tmp.path(),
+            tmp.path(),
+            &None,
+        ));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), tmp.path().join("./my-feature"));
+    }
+
+    #[test]
+    fn test_local_feature_missing_install_sh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let feature_dir = tmp.path().join("bad-feature");
+        std::fs::create_dir_all(&feature_dir).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(download_feature(
+            &FeatureSource::Local {
+                path: PathBuf::from("./bad-feature"),
+            },
+            tmp.path(),
+            tmp.path(),
+            &None,
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tarball_cache_key_deterministic() {
+        let url = "https://example.com/feature.tar.gz";
+        let key1 = tarball_cache_key(url);
+        let key2 = tarball_cache_key(url);
+        assert_eq!(key1, key2, "Same URL should produce same cache key");
+        assert_eq!(key1.len(), 16, "Cache key should be 16 hex chars");
+    }
+
+    #[test]
+    fn test_tarball_cache_key_different_urls() {
+        let key1 = tarball_cache_key("https://example.com/feature-a.tar.gz");
+        let key2 = tarball_cache_key("https://example.com/feature-b.tar.gz");
+        assert_ne!(key1, key2, "Different URLs should produce different cache keys");
+    }
+
+    #[test]
+    fn test_detect_gzip() {
+        // Gzip magic bytes
+        assert!(is_gzip(&[0x1f, 0x8b, 0x08, 0x00]));
+        // Plain tar (starts with filename bytes, not gzip magic)
+        assert!(!is_gzip(&[0x66, 0x65, 0x61, 0x74]));
+        // Too short
+        assert!(!is_gzip(&[0x1f]));
+        // Empty
+        assert!(!is_gzip(&[]));
+    }
+
+    #[tokio::test]
+    async fn test_tarball_download_and_extract() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tokio::io::AsyncWriteExt;
+
+        // Create a tar.gz in memory with install.sh and devcontainer-feature.json
+        let tar_bytes = {
+            let buf = Vec::new();
+            let encoder = GzEncoder::new(buf, Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+
+            let install_sh = b"#!/bin/bash\necho hello\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(install_sh.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "install.sh", &install_sh[..])
+                .unwrap();
+
+            let metadata = br#"{"id": "test-tarball", "version": "1.0.0"}"#;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(metadata.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(
+                    &mut header,
+                    "devcontainer-feature.json",
+                    &metadata[..],
+                )
+                .unwrap();
+
+            archive.into_inner().unwrap().finish().unwrap()
+        };
+
+        // Start a local HTTP server
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}/feature.tar.gz", addr.port());
+
+        let tar_bytes_clone = tar_bytes.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Read the HTTP request (drain it)
+            let mut buf = vec![0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            // Write HTTP response
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/gzip\r\n\r\n",
+                tar_bytes_clone.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(&tar_bytes_clone).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+
+        let cache_dir = tempfile::tempdir().unwrap();
+        let result = download_tarball_feature(&url, cache_dir.path(), &None).await;
+
+        server.await.unwrap();
+
+        let feature_dir = result.expect("download should succeed");
+        assert!(feature_dir.join("install.sh").exists());
+        assert!(feature_dir.join("devcontainer-feature.json").exists());
+
+        let metadata = read_feature_metadata(&feature_dir);
+        assert_eq!(metadata.id.as_deref(), Some("test-tarball"));
+
+        // Verify caching: second call should return cached path
+        // (server is gone so it would fail if it tried to download again)
+        let result2 = download_tarball_feature(&url, cache_dir.path(), &None).await;
+        assert_eq!(result2.unwrap(), feature_dir);
+    }
+}

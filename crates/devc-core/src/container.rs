@@ -1,5 +1,6 @@
 //! Container configuration and operations
 
+use crate::features::MergedFeatureProperties;
 use crate::{CoreError, Result};
 use devc_config::{DevContainerConfig, GlobalConfig, ImageSource, SubstitutionContext};
 use devc_provider::{
@@ -237,8 +238,21 @@ impl Container {
         })
     }
 
-    /// Get the container creation configuration
+    /// Get the container creation configuration.
+    ///
+    /// If `feature_props` is provided, feature-declared container properties
+    /// (capAdd, securityOpt, init, privileged) are merged with devcontainer.json values.
+    /// devcontainer.json values take precedence; feature values are additive.
     pub fn create_config(&self, image: &str) -> CreateContainerConfig {
+        self.create_config_with_features(image, None)
+    }
+
+    /// Get the container creation configuration with optional feature properties.
+    pub fn create_config_with_features(
+        &self,
+        image: &str,
+        feature_props: Option<&MergedFeatureProperties>,
+    ) -> CreateContainerConfig {
         let _workspace_mount = format!(
             "{}:/workspace",
             self.workspace_path.to_string_lossy()
@@ -258,6 +272,32 @@ impl Container {
         // Add configured mounts
         if let Some(ref configured_mounts) = self.devcontainer.mounts {
             for mount in configured_mounts {
+                match mount {
+                    devc_config::Mount::String(s) => {
+                        if let Some(config) = parse_mount_string(s) {
+                            mounts.push(config);
+                        }
+                    }
+                    devc_config::Mount::Object(obj) => {
+                        let mount_type = match obj.mount_type.as_deref() {
+                            Some("volume") => MountType::Volume,
+                            Some("tmpfs") => MountType::Tmpfs,
+                            _ => MountType::Bind,
+                        };
+                        mounts.push(MountConfig {
+                            mount_type,
+                            source: obj.source.clone().unwrap_or_default(),
+                            target: obj.target.clone(),
+                            read_only: obj.read_only.unwrap_or(false),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Add feature mounts (additive to devcontainer.json mounts)
+        if let Some(props) = feature_props {
+            for mount in &props.mounts {
                 match mount {
                     devc_config::Mount::String(s) => {
                         if let Some(config) = parse_mount_string(s) {
@@ -359,22 +399,61 @@ impl Container {
             tty: true,
             stdin_open: true,
             network_mode: None,
-            privileged: self.devcontainer.privileged.unwrap_or(false),
-            cap_add: self.devcontainer.cap_add.clone().unwrap_or_default(),
+            privileged: self.devcontainer.privileged.unwrap_or(false)
+                || feature_props.map_or(false, |p| p.privileged),
+            cap_add: {
+                let mut caps = self.devcontainer.cap_add.clone().unwrap_or_default();
+                if let Some(props) = feature_props {
+                    for cap in &props.cap_add {
+                        if !caps.contains(cap) {
+                            caps.push(cap.clone());
+                        }
+                    }
+                }
+                caps
+            },
             cap_drop: Vec::new(),
-            security_opt: self.devcontainer.security_opt.clone().unwrap_or_default(),
-            init: self.devcontainer.init.unwrap_or(false),
+            security_opt: {
+                let mut opts = self.devcontainer.security_opt.clone().unwrap_or_default();
+                if let Some(props) = feature_props {
+                    for opt in &props.security_opt {
+                        if !opts.contains(opt) {
+                            opts.push(opt.clone());
+                        }
+                    }
+                }
+                opts
+            },
+            init: self.devcontainer.init.unwrap_or(false)
+                || feature_props.map_or(false, |p| p.init),
             extra_args: self.devcontainer.run_args.clone().unwrap_or_default(),
         }
     }
 
     /// Get exec configuration for running a command
     pub fn exec_config(&self, cmd: Vec<String>, tty: bool, stdin: bool) -> ExecConfig {
+        self.exec_config_with_feature_env(cmd, tty, stdin, None)
+    }
+
+    /// Get exec configuration with optional feature remoteEnv merged in.
+    /// Feature env provides a base; devcontainer.json remoteEnv wins on conflict.
+    pub fn exec_config_with_feature_env(
+        &self,
+        cmd: Vec<String>,
+        tty: bool,
+        stdin: bool,
+        feature_remote_env: Option<&HashMap<String, String>>,
+    ) -> ExecConfig {
         let mut env = HashMap::new();
         if let Some(ref container_env) = self.devcontainer.container_env {
             env.extend(container_env.clone());
         }
+        // Feature remoteEnv first (lower priority)
+        if let Some(feat_env) = feature_remote_env {
+            env.extend(feat_env.clone());
+        }
         // Per spec: remoteEnv applies to tool processes (exec/shell), not container creation
+        // devcontainer.json remoteEnv wins over feature remoteEnv
         if let Some(ref remote_env) = self.devcontainer.remote_env {
             env.extend(remote_env.clone());
         }
@@ -400,6 +479,15 @@ impl Container {
     pub fn shell_config(&self) -> ExecConfig {
         let shell = self.global_config.defaults.shell.clone();
         self.exec_config(vec![shell], true, true)
+    }
+
+    /// Get shell exec configuration with feature remoteEnv
+    pub fn shell_config_with_feature_env(
+        &self,
+        feature_remote_env: Option<&HashMap<String, String>>,
+    ) -> ExecConfig {
+        let shell = self.global_config.defaults.shell.clone();
+        self.exec_config_with_feature_env(vec![shell], true, true, feature_remote_env)
     }
 
     /// Check if this container uses Docker Compose
@@ -647,6 +735,25 @@ pub async fn run_lifecycle_command_with_env(
         }
     }
 
+    Ok(())
+}
+
+/// Run a sequence of feature lifecycle commands in order.
+///
+/// Each command in the list represents a single feature's lifecycle command.
+/// Per the devcontainer spec, feature lifecycle commands run BEFORE the
+/// corresponding devcontainer.json commands.
+pub async fn run_feature_lifecycle_commands(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    commands: &[devc_config::Command],
+    user: Option<&str>,
+    working_dir: Option<&str>,
+    env: Option<&HashMap<String, String>>,
+) -> Result<()> {
+    for cmd in commands {
+        run_lifecycle_command_with_env(provider, container_id, cmd, user, working_dir, env).await?;
+    }
     Ok(())
 }
 
@@ -1011,5 +1118,201 @@ mod tests {
         let container = Container::from_config(&config_path).unwrap();
         // Explicit name takes precedence
         assert_eq!(container.name, "my-app");
+    }
+
+    #[test]
+    fn test_create_config_with_feature_properties() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            cap_add: Some(vec!["NET_RAW".to_string()]),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let feature_props = MergedFeatureProperties {
+            cap_add: vec!["SYS_PTRACE".to_string(), "NET_RAW".to_string()],
+            security_opt: vec!["seccomp=unconfined".to_string()],
+            init: true,
+            privileged: false,
+            ..Default::default()
+        };
+
+        let create = container.create_config_with_features("ubuntu:22.04", Some(&feature_props));
+
+        // cap_add: union of devcontainer.json [NET_RAW] + features [SYS_PTRACE, NET_RAW]
+        assert!(create.cap_add.contains(&"NET_RAW".to_string()));
+        assert!(create.cap_add.contains(&"SYS_PTRACE".to_string()));
+        assert_eq!(create.cap_add.len(), 2, "NET_RAW should be deduplicated");
+
+        // security_opt: from features only (devcontainer.json has none)
+        assert_eq!(create.security_opt, vec!["seccomp=unconfined"]);
+
+        // init: feature says true, devcontainer.json has no opinion → true
+        assert!(create.init);
+
+        // privileged: both false → false
+        assert!(!create.privileged);
+    }
+
+    #[test]
+    fn test_create_config_without_feature_properties() {
+        // create_config() (no features) should behave identically to before
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            cap_add: Some(vec!["SYS_PTRACE".to_string()]),
+            init: Some(true),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let create = container.create_config("ubuntu:22.04");
+        assert_eq!(create.cap_add, vec!["SYS_PTRACE"]);
+        assert!(create.init);
+        assert!(!create.privileged);
+        assert!(create.security_opt.is_empty());
+    }
+
+    #[test]
+    fn test_create_config_devcontainer_privileged_overrides_features() {
+        // If devcontainer.json sets privileged=true, it should be true
+        // even if no feature requests it
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            privileged: Some(true),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let feature_props = MergedFeatureProperties::default();
+        let create = container.create_config_with_features("ubuntu:22.04", Some(&feature_props));
+        assert!(create.privileged);
+    }
+
+    #[test]
+    fn test_create_config_with_feature_mounts() {
+        use devc_config::Mount;
+
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            mounts: Some(vec![Mount::String(
+                "type=bind,source=/host/data,target=/container/data".to_string(),
+            )]),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let feature_props = MergedFeatureProperties {
+            mounts: vec![
+                Mount::String("type=volume,source=feat-vol,target=/feat-data".to_string()),
+            ],
+            ..Default::default()
+        };
+
+        let create = container.create_config_with_features("ubuntu:22.04", Some(&feature_props));
+
+        // Should have: workspace mount + devcontainer mount + feature mount = 3
+        assert_eq!(
+            create.mounts.len(),
+            3,
+            "Should have workspace + devcontainer + feature mounts, got: {:?}",
+            create.mounts
+        );
+
+        // Feature mount should be the last one
+        let feat_mount = &create.mounts[2];
+        assert_eq!(feat_mount.target, "/feat-data");
+        assert!(matches!(feat_mount.mount_type, MountType::Volume));
+        assert_eq!(feat_mount.source, "feat-vol");
+    }
+
+    #[test]
+    fn test_exec_config_with_feature_remote_env() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            remote_env: Some({
+                let mut m = HashMap::new();
+                m.insert("EDITOR".to_string(), "vim".to_string());
+                m
+            }),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let mut feature_env = HashMap::new();
+        feature_env.insert("EDITOR".to_string(), "nano".to_string());
+        feature_env.insert("FEATURE_VAR".to_string(), "hello".to_string());
+
+        let exec = container.exec_config_with_feature_env(
+            vec!["echo".to_string()],
+            false,
+            false,
+            Some(&feature_env),
+        );
+        // devcontainer.json remoteEnv should override feature remoteEnv
+        assert_eq!(exec.env.get("EDITOR").unwrap(), "vim");
+        // Feature-only var should be present
+        assert_eq!(exec.env.get("FEATURE_VAR").unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_exec_config_feature_env_only() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            ..Default::default()
+        };
+
+        let container = Container {
+            name: "test".to_string(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+        };
+
+        let mut feature_env = HashMap::new();
+        feature_env.insert("MY_VAR".to_string(), "value".to_string());
+
+        let exec = container.exec_config_with_feature_env(
+            vec!["echo".to_string()],
+            false,
+            false,
+            Some(&feature_env),
+        );
+        assert_eq!(exec.env.get("MY_VAR").unwrap(), "value");
     }
 }

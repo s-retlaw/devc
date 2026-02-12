@@ -12,6 +12,7 @@ mod build;
 mod container;
 mod dotfiles;
 mod error;
+pub mod features;
 mod manager;
 mod ssh;
 mod state;

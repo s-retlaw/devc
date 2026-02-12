@@ -161,7 +161,7 @@ pub struct BuildConfig {
 }
 
 /// Mount configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Mount {
     /// String format: "type=bind,source=/path,target=/path"
@@ -171,7 +171,7 @@ pub enum Mount {
 }
 
 /// Mount object configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MountObject {
     /// Mount type (bind, volume, tmpfs)
@@ -206,7 +206,7 @@ pub struct PortObject {
 }
 
 /// Command can be a string, array, or object with parallel commands
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Command {
     /// Single command string
@@ -218,7 +218,7 @@ pub enum Command {
 }
 
 /// String or array of strings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StringOrArray {
     String(String),
