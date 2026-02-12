@@ -127,8 +127,18 @@ async fn download_oci_feature(
         })?;
 
     // Step 4: Download the layer blob
+    //
+    // Use a no-redirect client because ghcr.io returns a 307 redirect to Azure Blob Storage
+    // for blob downloads. If reqwest follows the redirect automatically, it forwards the
+    // Authorization header, which Azure rejects (401/403) since it didn't issue that token.
+    // We manually follow the redirect without the auth header.
     let blob_url = format!("{}/v2/{}/blobs/{}", base_url, repo, layer.digest);
-    let blob_resp = client
+    let no_redirect_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let blob_resp = no_redirect_client
         .get(&blob_url)
         .header("Authorization", format!("Bearer {}", token))
         .send()
@@ -137,6 +147,30 @@ async fn download_oci_feature(
             feature: format!("{}/{}:{}", namespace, name, tag),
             reason: format!("Blob download failed: {}", e),
         })?;
+
+    let blob_resp = if blob_resp.status().is_redirection() {
+        // Follow redirect WITHOUT auth header — blob storage doesn't need/want it
+        let redirect_url = blob_resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| CoreError::FeatureDownloadFailed {
+                feature: format!("{}/{}:{}", namespace, name, tag),
+                reason: "Blob redirect missing Location header".to_string(),
+            })?
+            .to_string();
+
+        reqwest::Client::new()
+            .get(&redirect_url)
+            .send()
+            .await
+            .map_err(|e| CoreError::FeatureDownloadFailed {
+                feature: format!("{}/{}:{}", namespace, name, tag),
+                reason: format!("Blob redirect download failed: {}", e),
+            })?
+    } else {
+        blob_resp
+    };
 
     if !blob_resp.status().is_success() {
         return Err(CoreError::FeatureDownloadFailed {

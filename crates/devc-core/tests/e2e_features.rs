@@ -1011,6 +1011,174 @@ services:
 }
 
 // ==========================================================================
+// E2E: Docker-in-Docker feature install (OCI download + privileged mode)
+// ==========================================================================
+
+#[tokio::test]
+#[ignore] // Requires container runtime + network
+async fn test_e2e_docker_in_docker_feature_install() {
+    let provider = match get_test_provider().await {
+        Some(p) => p,
+        None => {
+            eprintln!("Skipping test: no container runtime available");
+            return;
+        }
+    };
+
+    // Create workspace with docker-in-docker feature + privileged mode
+    let workspace = create_test_workspace(
+        r#"{
+            "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+            "features": {
+                "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+            },
+            "privileged": true,
+            "remoteUser": "vscode"
+        }"#,
+    );
+
+    let container =
+        Container::from_workspace(workspace.path()).expect("should load container config");
+
+    // Resolve and prepare features — exercises full OCI auth + manifest + blob download
+    let config_dir = container
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress = Some(progress_tx);
+
+    let resolved = features::resolve_and_prepare_features(
+        container.devcontainer.features.as_ref().unwrap(),
+        &config_dir,
+        &progress,
+    )
+    .await
+    .expect("feature resolution should succeed");
+
+    // Drain progress messages
+    let mut progress_msgs = Vec::new();
+    while let Ok(msg) = progress_rx.try_recv() {
+        progress_msgs.push(msg);
+    }
+    assert!(
+        !progress_msgs.is_empty(),
+        "Should have received progress messages"
+    );
+
+    assert_eq!(resolved.len(), 1, "Should resolve 1 feature");
+    assert!(
+        resolved[0].dir.join("install.sh").exists(),
+        "docker-in-docker feature should have install.sh"
+    );
+
+    // Verify privileged comes through from feature metadata
+    let feature_props = merge_feature_properties(&resolved);
+    eprintln!("Merged feature properties: {:?}", feature_props);
+    // The docker-in-docker feature declares privileged: true in its metadata
+    assert!(
+        feature_props.privileged,
+        "docker-in-docker feature should request privileged mode, got: {:?}",
+        feature_props
+    );
+
+    // Build the enhanced image with the feature
+    let remote_user = container
+        .devcontainer
+        .effective_user()
+        .unwrap_or("root");
+    let enhanced_ctx = EnhancedBuildContext::from_image_with_features(
+        "mcr.microsoft.com/devcontainers/base:ubuntu",
+        &resolved,
+        false,
+        remote_user,
+    )
+    .expect("enhanced build context should succeed");
+
+    let image_tag = "devc/test-dind-e2e:latest".to_string();
+    let build_config = BuildConfig {
+        context: enhanced_ctx.context_path().to_path_buf(),
+        dockerfile: enhanced_ctx.dockerfile_name().to_string(),
+        tag: image_tag.clone(),
+        build_args: HashMap::new(),
+        target: None,
+        cache_from: Vec::new(),
+        labels: HashMap::new(),
+        no_cache: true,
+        pull: true,
+    };
+
+    eprintln!("Building image with docker-in-docker feature (this may take a while)...");
+    let image_id = provider
+        .build(&build_config)
+        .await
+        .expect("build should succeed");
+    eprintln!("Build succeeded: {}", image_id.0);
+
+    // Create and start a container with privileged mode from feature props
+    let container_name = "devc-test-dind-e2e";
+    let _ = provider.remove_by_name(container_name).await;
+
+    let mut create_config =
+        container.create_config_with_features(&image_tag, Some(&feature_props));
+    create_config.name = Some(container_name.to_string());
+    create_config.cmd = Some(vec![
+        "bash".to_string(),
+        "-c".to_string(),
+        "sleep infinity".to_string(),
+    ]);
+
+    // Verify privileged is set on the create config
+    assert!(
+        create_config.privileged,
+        "Container create config should have privileged=true"
+    );
+
+    let cid = provider
+        .create(&create_config)
+        .await
+        .expect("create should succeed");
+    provider.start(&cid).await.expect("start should succeed");
+
+    // Verify docker CLI is installed inside the container
+    let docker_result = provider
+        .exec(
+            &cid,
+            &ExecConfig {
+                cmd: vec!["docker".into(), "--version".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("docker exec should work");
+    eprintln!("docker --version: {}", docker_result.output.trim());
+    assert!(
+        docker_result.output.contains("Docker version"),
+        "docker-in-docker should install docker CLI, got: {}",
+        docker_result.output.trim()
+    );
+
+    // Cleanup
+    let _ = provider.remove(&cid, true).await;
+    let runtime = if std::process::Command::new("podman")
+        .arg("version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        "podman"
+    } else {
+        "docker"
+    };
+    let _ = std::process::Command::new(runtime)
+        .args(["rmi", &image_tag])
+        .output();
+    eprintln!("E2E docker-in-docker feature install test passed!");
+}
+
+// ==========================================================================
 // Helper: create a tar.gz in memory containing install.sh + metadata
 // ==========================================================================
 

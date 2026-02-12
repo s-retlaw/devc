@@ -5,6 +5,7 @@
 //! - `${containerWorkspaceFolder}` — container workspace path
 //! - `${localWorkspaceFolderBasename}` — last segment of host workspace path
 //! - `${containerWorkspaceFolderBasename}` — last segment of container workspace path
+//! - `${devcontainerId}` — unique, persistent ID for the dev container
 //! - `${localEnv:VAR}` — host environment variable
 //! - `${localEnv:VAR:default}` — host environment variable with fallback
 //! - `${containerEnv:VAR}` — left as-is (resolved at runtime)
@@ -17,6 +18,7 @@ use std::path::Path;
 pub struct SubstitutionContext {
     pub local_workspace_folder: String,
     pub container_workspace_folder: String,
+    pub devcontainer_id: Option<String>,
 }
 
 impl SubstitutionContext {
@@ -24,8 +26,26 @@ impl SubstitutionContext {
         Self {
             local_workspace_folder: local_workspace_folder.into(),
             container_workspace_folder: container_workspace_folder.into(),
+            devcontainer_id: None,
         }
     }
+
+    pub fn with_devcontainer_id(mut self, id: String) -> Self {
+        self.devcontainer_id = Some(id);
+        self
+    }
+}
+
+/// Generate a devcontainer ID from a workspace path.
+///
+/// Per the devcontainer spec, `${devcontainerId}` is a unique, persistent ID
+/// for the dev container, stable for the lifetime of the container and unique
+/// per workspace/config. We use a hash of the workspace folder path.
+pub fn generate_devcontainer_id(workspace_path: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    workspace_path.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Substitute variables in a string
@@ -66,6 +86,10 @@ fn resolve_variable(var: &str, ctx: &SubstitutionContext) -> String {
         "containerWorkspaceFolder" => ctx.container_workspace_folder.clone(),
         "localWorkspaceFolderBasename" => basename(&ctx.local_workspace_folder),
         "containerWorkspaceFolderBasename" => basename(&ctx.container_workspace_folder),
+        "devcontainerId" => ctx
+            .devcontainer_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
         _ if var.starts_with("localEnv:") => {
             let rest = &var["localEnv:".len()..];
             if let Some((name, default)) = rest.split_once(':') {
@@ -192,5 +216,39 @@ mod tests {
         input.insert("key".to_string(), "${containerWorkspaceFolder}/bin".to_string());
         let result = substitute_map(&input, &ctx);
         assert_eq!(result.get("key").unwrap(), "/workspace/bin");
+    }
+
+    #[test]
+    fn test_devcontainer_id_substitution() {
+        let ctx = test_ctx().with_devcontainer_id("abc123".to_string());
+        assert_eq!(
+            substitute("vol-${devcontainerId}", &ctx),
+            "vol-abc123"
+        );
+    }
+
+    #[test]
+    fn test_devcontainer_id_not_set() {
+        let ctx = test_ctx();
+        assert_eq!(
+            substitute("vol-${devcontainerId}", &ctx),
+            "vol-unknown"
+        );
+    }
+
+    #[test]
+    fn test_generate_devcontainer_id_deterministic() {
+        let path = Path::new("/home/user/project");
+        let id1 = generate_devcontainer_id(path);
+        let id2 = generate_devcontainer_id(path);
+        assert_eq!(id1, id2);
+        assert_eq!(id1.len(), 16);
+    }
+
+    #[test]
+    fn test_generate_devcontainer_id_unique() {
+        let id1 = generate_devcontainer_id(Path::new("/home/user/project-a"));
+        let id2 = generate_devcontainer_id(Path::new("/home/user/project-b"));
+        assert_ne!(id1, id2);
     }
 }

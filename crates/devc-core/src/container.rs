@@ -67,6 +67,8 @@ pub struct Container {
     pub config_path: PathBuf,
     /// Global configuration
     pub global_config: GlobalConfig,
+    /// Unique, persistent ID for the dev container (hash of workspace path)
+    pub devcontainer_id: String,
 }
 
 impl Container {
@@ -79,10 +81,12 @@ impl Container {
             .workspace_folder
             .clone()
             .unwrap_or_else(|| "/workspace".to_string());
+        let devcontainer_id = devc_config::generate_devcontainer_id(workspace_path);
         let ctx = SubstitutionContext::new(
             workspace_path.to_string_lossy().to_string(),
             container_workspace,
-        );
+        )
+        .with_devcontainer_id(devcontainer_id.clone());
         devcontainer.substitute_variables(&ctx);
 
         let raw_name = devcontainer
@@ -101,6 +105,7 @@ impl Container {
             devcontainer,
             config_path,
             global_config,
+            devcontainer_id,
         })
     }
 
@@ -124,10 +129,12 @@ impl Container {
             .workspace_folder
             .clone()
             .unwrap_or_else(|| "/workspace".to_string());
+        let devcontainer_id = devc_config::generate_devcontainer_id(&workspace_path);
         let ctx = SubstitutionContext::new(
             workspace_path.to_string_lossy().to_string(),
             container_workspace,
-        );
+        )
+        .with_devcontainer_id(devcontainer_id.clone());
         devcontainer.substitute_variables(&ctx);
 
         let raw_name = devcontainer
@@ -164,6 +171,7 @@ impl Container {
             devcontainer,
             config_path: config_path.to_path_buf(),
             global_config,
+            devcontainer_id,
         })
     }
 
@@ -295,12 +303,22 @@ impl Container {
             }
         }
 
-        // Add feature mounts (additive to devcontainer.json mounts)
+        // Add feature mounts (additive to devcontainer.json mounts).
+        // Feature mount sources may contain ${devcontainerId} which needs substitution.
         if let Some(props) = feature_props {
+            use devc_config::substitute as subst_var;
+
+            let sub_ctx = SubstitutionContext::new(
+                self.workspace_path.to_string_lossy().to_string(),
+                self.devcontainer.workspace_folder.clone().unwrap_or_else(|| "/workspace".to_string()),
+            )
+            .with_devcontainer_id(self.devcontainer_id.clone());
+
             for mount in &props.mounts {
                 match mount {
                     devc_config::Mount::String(s) => {
-                        if let Some(config) = parse_mount_string(s) {
+                        let substituted = subst_var(s, &sub_ctx);
+                        if let Some(config) = parse_mount_string(&substituted) {
                             mounts.push(config);
                         }
                     }
@@ -310,10 +328,13 @@ impl Container {
                             Some("tmpfs") => MountType::Tmpfs,
                             _ => MountType::Bind,
                         };
+                        let source = obj.source.as_deref()
+                            .map(|s| subst_var(s, &sub_ctx))
+                            .unwrap_or_default();
                         mounts.push(MountConfig {
                             mount_type,
-                            source: obj.source.clone().unwrap_or_default(),
-                            target: obj.target.clone(),
+                            source,
+                            target: subst_var(&obj.target, &sub_ctx),
                             read_only: obj.read_only.unwrap_or(false),
                         });
                     }
@@ -855,6 +876,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let name = container.container_name();
@@ -881,6 +903,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let create = container.create_config("ubuntu:22.04");
@@ -905,6 +928,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let create = container.create_config("ubuntu:22.04");
@@ -929,6 +953,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let exec = container.exec_config(vec!["echo".to_string()], false, false);
@@ -953,6 +978,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let create = container.create_config("ubuntu:22.04");
@@ -1011,6 +1037,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let create = container.create_config("ubuntu:22.04");
@@ -1037,6 +1064,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         assert!(container.is_compose());
@@ -1057,6 +1085,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         assert!(!container.is_compose());
@@ -1081,6 +1110,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let files = container.compose_files().unwrap();
@@ -1248,6 +1278,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let feature_props = MergedFeatureProperties {
@@ -1291,6 +1322,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let create = container.create_config("ubuntu:22.04");
@@ -1316,6 +1348,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let feature_props = MergedFeatureProperties::default();
@@ -1341,6 +1374,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let feature_props = MergedFeatureProperties {
@@ -1385,6 +1419,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let mut feature_env = HashMap::new();
@@ -1416,6 +1451,7 @@ mod tests {
             devcontainer: config,
             config_path: PathBuf::from("/tmp/test/.devcontainer/devcontainer.json"),
             global_config: GlobalConfig::default(),
+            devcontainer_id: "test".to_string(),
         };
 
         let mut feature_env = HashMap::new();
