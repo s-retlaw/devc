@@ -1031,10 +1031,16 @@ fi
             );
         }
 
-        // 3. Rebuild image
+        // 3. Run initializeCommand on host before build (per spec)
+        let container = Container::from_config(&container_state.config_path)?;
+        if let Some(ref cmd) = container.devcontainer.initialize_command {
+            crate::run_host_command(cmd, &container.workspace_path, None).await?;
+        }
+
+        // 4. Rebuild image
         self.build_with_options(id, no_cache).await?;
 
-        // 4. Create and start container
+        // 5. Create and start container
         self.up(id).await?;
 
         Ok(())
@@ -1086,13 +1092,20 @@ fi
             state.save()?;
         }
 
-        // 3. Rebuild image with progress
+        // 3. Run initializeCommand on host before build (per spec)
+        let container = Container::from_config(&container_state.config_path)?;
+        if let Some(ref cmd) = container.devcontainer.initialize_command {
+            let _ = progress.send("Running initializeCommand on host...".to_string());
+            crate::run_host_command(cmd, &container.workspace_path, Some(&progress)).await?;
+        }
+
+        // 4. Rebuild image with progress
         self.build_with_progress(id, no_cache, progress.clone()).await?;
 
-        // 4. Create and start container with progress (runs lifecycle commands, dotfiles, SSH setup)
-        self.up_with_progress(id, Some(&progress), None).await?;
+        // 5. Create and start container with progress (runs lifecycle commands, dotfiles, SSH setup)
+        self.up_with_progress(id, Some(&progress), Some(&progress)).await?;
 
-        let _ = progress.send("Rebuild complete!".to_string());
+        let _ = progress.send("Build complete.".to_string());
         Ok(())
     }
 
@@ -3530,5 +3543,402 @@ mod tests {
         assert_eq!(result.get("FEATURE_VAR").unwrap(), "hello");
         assert_eq!(result.get("DC_VAR").unwrap(), "world");
         assert_eq!(result.len(), 3);
+    }
+
+    // ==================== Lifecycle Event Ordering ====================
+
+    /// Create a workspace with all lifecycle commands configured.
+    /// Returns (tempdir, marker_file_path) where marker_file_path is the
+    /// file that initializeCommand will `touch` on the host.
+    fn create_lifecycle_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("init_marker");
+        let devcontainer_dir = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        let config = format!(
+            r#"{{
+                "image": "ubuntu:22.04",
+                "initializeCommand": "touch {}",
+                "onCreateCommand": "echo on-create",
+                "updateContentCommand": "echo update-content",
+                "postCreateCommand": "echo post-create",
+                "postStartCommand": "echo post-start",
+                "postAttachCommand": "echo post-attach"
+            }}"#,
+            marker.display()
+        );
+        std::fs::write(devcontainer_dir.join("devcontainer.json"), config).unwrap();
+        (tmp, marker)
+    }
+
+    /// Build a manager with credentials and SSH disabled to keep lifecycle tests focused.
+    fn test_manager_no_creds(mock: MockProvider, state: StateStore) -> ContainerManager {
+        let mut global_config = GlobalConfig::default();
+        global_config.credentials.docker = false;
+        global_config.credentials.git = false;
+        ContainerManager::new_for_testing(Box::new(mock), global_config, state)
+    }
+
+    /// Filter mock calls to only Exec calls, returning just the command vectors.
+    fn exec_commands(calls: &[MockCall]) -> Vec<Vec<String>> {
+        calls
+            .iter()
+            .filter_map(|c| {
+                if let MockCall::Exec { cmd, .. } = c {
+                    Some(cmd.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Extract the shell command string from an Exec call like ["/bin/sh", "-c", "echo foo"]
+    fn shell_cmd(cmd: &[String]) -> &str {
+        assert_eq!(cmd.len(), 3);
+        assert_eq!(cmd[0], "/bin/sh");
+        assert_eq!(cmd[1], "-c");
+        &cmd[2]
+    }
+
+    #[tokio::test]
+    async fn test_up_lifecycle_event_order() {
+        let (workspace, marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        mgr.up(&id).await.unwrap();
+
+        // initializeCommand ran on host
+        assert!(marker.exists(), "initializeCommand marker file should exist");
+
+        let recorded = calls.lock().unwrap();
+
+        // initializeCommand ran before any provider call (marker file exists and
+        // first provider call is Pull, confirming host command ran first)
+        assert!(
+            matches!(&recorded[0], MockCall::Pull { image } if image == "ubuntu:22.04"),
+            "First provider call should be Pull; got {:?}",
+            &recorded[0]
+        );
+
+        // Verify the provider call order: Pull → RemoveByName → Create → lifecycle execs → start phase
+        let call_types: Vec<&str> = recorded
+            .iter()
+            .map(|c| match c {
+                MockCall::Pull { .. } => "Pull",
+                MockCall::Create { .. } => "Create",
+                MockCall::Start { .. } => "Start",
+                MockCall::Inspect { .. } => "Inspect",
+                MockCall::Exec { .. } => "Exec",
+                MockCall::RemoveByName { .. } => "RemoveByName",
+                _ => "Other",
+            })
+            .collect();
+
+        // Pull must come before Create
+        let pull_idx = call_types.iter().position(|&t| t == "Pull").unwrap();
+        let create_idx = call_types.iter().position(|&t| t == "Create").unwrap();
+        assert!(pull_idx < create_idx, "Pull must come before Create");
+
+        // Verify exec commands run in the correct lifecycle order
+        let execs = exec_commands(&recorded);
+        assert!(execs.len() >= 4, "Expected at least 4 exec calls (onCreate, updateContent, postCreate, postStart), got {}", execs.len());
+
+        let lifecycle_cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
+        let on_create_idx = lifecycle_cmds.iter().position(|&c| c == "echo on-create")
+            .expect("onCreateCommand should have run");
+        let update_content_idx = lifecycle_cmds.iter().position(|&c| c == "echo update-content")
+            .expect("updateContentCommand should have run");
+        let post_create_idx = lifecycle_cmds.iter().position(|&c| c == "echo post-create")
+            .expect("postCreateCommand should have run");
+        let post_start_idx = lifecycle_cmds.iter().position(|&c| c == "echo post-start")
+            .expect("postStartCommand should have run");
+
+        assert!(on_create_idx < update_content_idx,
+            "onCreateCommand must run before updateContentCommand");
+        assert!(update_content_idx < post_create_idx,
+            "updateContentCommand must run before postCreateCommand");
+        assert!(post_create_idx < post_start_idx,
+            "postCreateCommand must run before postStartCommand");
+
+        // All execs happen after Create
+        let first_exec_overall = recorded.iter().position(|c| matches!(c, MockCall::Exec { .. })).unwrap();
+        assert!(create_idx < first_exec_overall, "Create must come before any Exec");
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_runs_initialize_before_build() {
+        let (workspace, marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:old_image"),
+            Some("old_container_123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        mgr.rebuild(&id, false).await.unwrap();
+
+        // initializeCommand marker must exist
+        assert!(marker.exists(), "initializeCommand marker file should exist");
+
+        let recorded = calls.lock().unwrap();
+
+        // Down phase (Stop + Remove) must come before Pull (build)
+        let stop_idx = recorded.iter().position(|c| matches!(c, MockCall::Stop { .. })).unwrap();
+        let remove_idx = recorded.iter().position(|c| matches!(c, MockCall::Remove { .. })).unwrap();
+        let pull_idx = recorded.iter().position(|c| matches!(c, MockCall::Pull { .. })).unwrap();
+
+        assert!(stop_idx < pull_idx, "Stop must come before Pull (build)");
+        assert!(remove_idx < pull_idx, "Remove must come before Pull (build)");
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_with_progress_runs_initialize_before_build() {
+        let (workspace, marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:old_image"),
+            Some("old_container_123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        mgr.rebuild_with_progress(&id, false, tx).await.unwrap();
+
+        // initializeCommand marker must exist
+        assert!(marker.exists(), "initializeCommand marker file should exist");
+
+        let recorded = calls.lock().unwrap();
+
+        // Down phase (Stop + Remove) must come before Pull (build)
+        let stop_idx = recorded.iter().position(|c| matches!(c, MockCall::Stop { .. })).unwrap();
+        let remove_idx = recorded.iter().position(|c| matches!(c, MockCall::Remove { .. })).unwrap();
+        let pull_idx = recorded.iter().position(|c| matches!(c, MockCall::Pull { .. })).unwrap();
+
+        assert!(stop_idx < pull_idx, "Stop must come before Pull (build)");
+        assert!(remove_idx < pull_idx, "Remove must come before Pull (build)");
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_full_lifecycle_order() {
+        let (workspace, marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:old_image"),
+            Some("old_container_123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        mgr.rebuild(&id, false).await.unwrap();
+
+        assert!(marker.exists(), "initializeCommand marker file should exist");
+
+        let recorded = calls.lock().unwrap();
+
+        // Phase 1: Down
+        let stop_idx = recorded.iter().position(|c| matches!(c, MockCall::Stop { .. })).unwrap();
+        let remove_idx = recorded.iter().position(|c| matches!(c, MockCall::Remove { .. })).unwrap();
+
+        // Phase 2: Build (Pull)
+        let pull_idx = recorded.iter().position(|c| matches!(c, MockCall::Pull { .. })).unwrap();
+
+        // Phase 3: Create
+        let create_idx = recorded.iter().position(|c| matches!(c, MockCall::Create { .. })).unwrap();
+
+        // Verify overall phase ordering: Down → Build → Create → lifecycle execs
+        assert!(stop_idx < remove_idx, "Stop before Remove");
+        assert!(remove_idx < pull_idx, "Remove before Pull");
+        assert!(pull_idx < create_idx, "Pull before Create");
+
+        // Verify exec commands run in correct lifecycle order
+        let execs = exec_commands(&recorded);
+        let lifecycle_cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
+
+        let on_create_idx = lifecycle_cmds.iter().position(|&c| c == "echo on-create")
+            .expect("onCreateCommand should have run");
+        let update_content_idx = lifecycle_cmds.iter().position(|&c| c == "echo update-content")
+            .expect("updateContentCommand should have run");
+        let post_create_idx = lifecycle_cmds.iter().position(|&c| c == "echo post-create")
+            .expect("postCreateCommand should have run");
+        let post_start_idx = lifecycle_cmds.iter().position(|&c| c == "echo post-start")
+            .expect("postStartCommand should have run");
+
+        assert!(on_create_idx < update_content_idx, "onCreate before updateContent");
+        assert!(update_content_idx < post_create_idx, "updateContent before postCreate");
+        assert!(post_create_idx < post_start_idx, "postCreate before postStart");
+
+        // All execs must come after Create
+        let first_exec_overall = recorded.iter().position(|c| matches!(c, MockCall::Exec { .. })).unwrap();
+        assert!(create_idx < first_exec_overall, "Create must come before any Exec");
+    }
+
+    #[tokio::test]
+    async fn test_start_runs_post_start_not_on_create() {
+        let (workspace, _marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        // Stopped container — already existed, not freshly Created
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Stopped,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        mgr.start(&id).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+        let execs = exec_commands(&recorded);
+        let lifecycle_cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
+
+        // postStartCommand should run
+        assert!(
+            lifecycle_cmds.contains(&"echo post-start"),
+            "postStartCommand should run on start; got {:?}",
+            lifecycle_cmds
+        );
+
+        // onCreateCommand should NOT run (container was Stopped, not Created)
+        assert!(
+            !lifecycle_cmds.contains(&"echo on-create"),
+            "onCreateCommand should NOT run on start of existing container"
+        );
+
+        // updateContentCommand and postCreateCommand should NOT run either
+        assert!(
+            !lifecycle_cmds.contains(&"echo update-content"),
+            "updateContentCommand should NOT run on start"
+        );
+        assert!(
+            !lifecycle_cmds.contains(&"echo post-create"),
+            "postCreateCommand should NOT run on start"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_attach_command_runs() {
+        let (workspace, _marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        mgr.run_post_attach_command(&id).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+        let execs = exec_commands(&recorded);
+        let lifecycle_cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
+
+        assert!(
+            lifecycle_cmds.contains(&"echo post-attach"),
+            "postAttachCommand should have run; got {:?}",
+            lifecycle_cmds
+        );
+
+        // No other lifecycle commands should run
+        assert!(!lifecycle_cmds.contains(&"echo on-create"));
+        assert!(!lifecycle_cmds.contains(&"echo post-start"));
+    }
+
+    #[tokio::test]
+    async fn test_up_on_create_only_on_first_create() {
+        let (workspace, _marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        // Start as Configured with no image/container — will go through full up flow
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+
+        // First up: full lifecycle including onCreate
+        mgr.up(&id).await.unwrap();
+
+        let recorded_after_up = calls.lock().unwrap().clone();
+        let execs_after_up = exec_commands(&recorded_after_up);
+        let cmds_after_up: Vec<&str> = execs_after_up.iter().map(|cmd| shell_cmd(cmd)).collect();
+
+        assert!(cmds_after_up.contains(&"echo on-create"), "onCreate should run on first up");
+        assert!(cmds_after_up.contains(&"echo post-create"), "postCreate should run on first up");
+
+        let on_create_count = cmds_after_up.iter().filter(|&&c| c == "echo on-create").count();
+        assert_eq!(on_create_count, 1, "onCreateCommand should run exactly once during up");
+
+        // Now call start — should NOT re-run onCreate/postCreate
+        calls.lock().unwrap().clear();
+        mgr.start(&id).await.unwrap();
+
+        let recorded_after_start = calls.lock().unwrap().clone();
+        let execs_after_start = exec_commands(&recorded_after_start);
+        let cmds_after_start: Vec<&str> = execs_after_start.iter().map(|cmd| shell_cmd(cmd)).collect();
+
+        assert!(
+            !cmds_after_start.contains(&"echo on-create"),
+            "onCreateCommand should NOT run on subsequent start"
+        );
+        assert!(
+            !cmds_after_start.contains(&"echo post-create"),
+            "postCreateCommand should NOT run on subsequent start"
+        );
+        // postStartCommand should still run
+        assert!(
+            cmds_after_start.contains(&"echo post-start"),
+            "postStartCommand should run on start"
+        );
     }
 }
