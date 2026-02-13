@@ -37,6 +37,9 @@ pub enum CoreError {
     #[error("Feature download failed for {feature}: {reason}")]
     FeatureDownloadFailed { feature: String, reason: String },
 
+    #[error("Feature dependency cycle detected: {0}")]
+    FeatureDependencyCycle(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

@@ -1,5 +1,6 @@
 //! Feature reference parsing, option conversion, and ordering
 
+use crate::CoreError;
 use devc_config::{Command, FeatureConfig, Mount};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -59,13 +60,8 @@ pub struct FeatureMetadata {
     pub update_content_command: Option<Command>,
     /// Entrypoint to use for the container (e.g. dockerd-entrypoint.sh for docker-in-docker)
     pub entrypoint: Option<String>,
-    // TODO: Implement transitive dependency resolution for dependsOn.
-    // Currently we only resolve features explicitly listed in devcontainer.json.
-    // Full support requires: for each resolved feature, check its depends_on,
-    // download each dependency's metadata, recurse until the full graph is resolved,
-    // then topologically sort respecting both dependsOn (hard) and installsAfter
-    // (soft) edges. See devcontainer spec: https://containers.dev/implementors/features/
-    /// Hard dependencies on other features (feature ID → config)
+    /// Hard dependencies on other features (feature ID → config).
+    /// Transitive deps are automatically resolved and pulled in.
     pub depends_on: Option<HashMap<String, serde_json::Value>>,
 }
 
@@ -312,41 +308,97 @@ pub fn feature_options(config: &FeatureConfig) -> Option<HashMap<String, String>
     }
 }
 
-/// Order resolved features respecting `installsAfter` constraints.
+/// Convert a `dependsOn` entry value into an options map.
 ///
-/// Features with `installsAfter` are placed after the features they depend on.
-/// Otherwise, declaration order is preserved.
-pub fn order_features(features: Vec<ResolvedFeature>) -> Vec<ResolvedFeature> {
+/// Returns `None` if the dependency is disabled (`false`).
+/// Returns `Some(empty map)` for `true` or `{}`.
+/// Returns `Some(map)` for `{"version": "3"}` etc.
+pub fn parse_depends_on_value(value: &serde_json::Value) -> Option<HashMap<String, String>> {
+    match value {
+        serde_json::Value::Bool(false) => None,
+        serde_json::Value::Bool(true) => Some(HashMap::new()),
+        serde_json::Value::Object(map) => {
+            let m = map
+                .iter()
+                .map(|(k, v)| {
+                    let val = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    (k.clone(), val)
+                })
+                .collect();
+            Some(m)
+        }
+        // Treat anything else (null, string, etc.) as enabled with no options
+        _ => Some(HashMap::new()),
+    }
+}
+
+/// Order resolved features respecting `dependsOn` (hard) and `installsAfter` (soft) constraints.
+///
+/// Hard dependencies (`dependsOn`) must be satisfied — cycles among them produce an error.
+/// Soft dependencies (`installsAfter`) are best-effort — cycles are broken by falling back
+/// to declaration order.
+pub fn order_features(features: Vec<ResolvedFeature>) -> crate::Result<Vec<ResolvedFeature>> {
     if features.len() <= 1 {
-        return features;
+        return Ok(features);
     }
 
-    // Build an index from feature id (last segment) to position
-    let id_to_idx: HashMap<String, usize> = features
-        .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            let short_id = extract_feature_short_id(&f.id);
-            (short_id, i)
-        })
-        .collect();
-
-    // Build adjacency: feature i must come after feature j
     let n = features.len();
+
+    // Build indices: both short-id and full-id map to position
+    let mut id_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, f) in features.iter().enumerate() {
+        let short_id = extract_feature_short_id(&f.id);
+        id_to_idx.insert(short_id, i);
+        id_to_idx.insert(f.id.clone(), i);
+    }
+
+    // Track which edges are hard (dependsOn) vs soft (installsAfter)
+    let mut is_hard_edge: Vec<Vec<bool>> = vec![vec![]; n]; // is_hard_edge[j] parallel to dependents[j]
     let mut after_count = vec![0usize; n];
     let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
 
+    // Helper to find a feature index by reference id
+    let find_idx = |dep_id: &str, self_idx: usize| -> Option<usize> {
+        // Try exact match first, then short-id
+        if let Some(&j) = id_to_idx.get(dep_id) {
+            if j != self_idx { return Some(j); }
+        }
+        let short = extract_feature_short_id(dep_id);
+        if let Some(&j) = id_to_idx.get(&short) {
+            if j != self_idx { return Some(j); }
+        }
+        None
+    };
+
+    // Build edges from dependsOn (hard)
+    for (i, f) in features.iter().enumerate() {
+        if let Some(ref deps) = f.metadata.depends_on {
+            for dep_id in deps.keys() {
+                if let Some(j) = find_idx(dep_id, i) {
+                    dependents[j].push(i);
+                    is_hard_edge[j].push(true);
+                    after_count[i] += 1;
+                }
+            }
+        }
+    }
+
+    // Build edges from installsAfter (soft)
     for (i, f) in features.iter().enumerate() {
         if let Some(ref install_after) = f.metadata.install_after {
             for dep_id in install_after {
-                let dep_short = extract_feature_short_id(dep_id);
-                if let Some(&j) = id_to_idx.get(&dep_short) {
-                    if j != i {
+                if let Some(j) = find_idx(dep_id, i) {
+                    // Avoid duplicate edge if already added via dependsOn
+                    if !dependents[j].contains(&i) {
                         dependents[j].push(i);
+                        is_hard_edge[j].push(false);
                         after_count[i] += 1;
                     }
                 }
-                // Unknown dependencies are silently ignored (soft constraint)
+                // Unknown soft dependencies are silently ignored
             }
         }
     }
@@ -359,39 +411,69 @@ pub fn order_features(features: Vec<ResolvedFeature>) -> Vec<ResolvedFeature> {
         queue.remove(0);
         result_indices.push(idx);
 
-        // Process dependents in declaration order
-        let mut deps = dependents[idx].clone();
-        deps.sort();
-        for &dep in &deps {
+        let mut deps: Vec<(usize, bool)> = dependents[idx]
+            .iter()
+            .zip(is_hard_edge[idx].iter())
+            .map(|(&dep, &hard)| (dep, hard))
+            .collect();
+        deps.sort_by_key(|&(dep, _)| dep);
+
+        for &(dep, _) in &deps {
             after_count[dep] -= 1;
             if after_count[dep] == 0 {
-                // Insert in sorted position to maintain declaration order
                 let pos = queue.partition_point(|&x| x < dep);
                 queue.insert(pos, dep);
             }
         }
     }
 
-    // Any remaining features (cycles) get appended in declaration order
+    // Handle remaining features (cycles)
     if result_indices.len() < n {
-        for i in 0..n {
-            if !result_indices.contains(&i) {
-                result_indices.push(i);
+        // Check if any stuck feature has an unsatisfied hard dependency
+        let stuck: Vec<usize> = (0..n)
+            .filter(|i| !result_indices.contains(i))
+            .collect();
+
+        // Check for hard cycles: does any stuck feature have a hard edge from another stuck feature?
+        let stuck_set: std::collections::HashSet<usize> = stuck.iter().copied().collect();
+        let mut has_hard_cycle = false;
+        let mut cycle_features = Vec::new();
+
+        for &j in &stuck {
+            for (idx, &dep) in dependents[j].iter().enumerate() {
+                if stuck_set.contains(&dep) && is_hard_edge[j][idx] {
+                    has_hard_cycle = true;
+                    // Collect feature IDs involved
+                    if !cycle_features.contains(&features[j].id) {
+                        cycle_features.push(features[j].id.clone());
+                    }
+                    if !cycle_features.contains(&features[dep].id) {
+                        cycle_features.push(features[dep].id.clone());
+                    }
+                }
             }
+        }
+
+        if has_hard_cycle {
+            return Err(CoreError::FeatureDependencyCycle(cycle_features.join(" -> ")));
+        }
+
+        // Only soft cycles — break by appending in declaration order
+        for i in stuck {
+            result_indices.push(i);
         }
     }
 
     // Reorder
     let mut features = features;
     let mut ordered = Vec::with_capacity(n);
-    // Create a vec of Options so we can take items out of order
     let mut slots: Vec<Option<ResolvedFeature>> = features.drain(..).map(Some).collect();
     for idx in result_indices {
         if let Some(f) = slots[idx].take() {
             ordered.push(f);
         }
     }
-    ordered
+    Ok(ordered)
 }
 
 /// Extract the short feature ID (last path segment, no tag) for matching installsAfter
@@ -536,7 +618,7 @@ mod tests {
             make_test_feature("b", None),
             make_test_feature("c", None),
         ];
-        let ordered = order_features(features);
+        let ordered = order_features(features).unwrap();
         let ids: Vec<&str> = ordered.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
     }
@@ -550,7 +632,7 @@ mod tests {
             ),
             make_test_feature("ghcr.io/devcontainers/features/common-utils:1", None),
         ];
-        let ordered = order_features(features);
+        let ordered = order_features(features).unwrap();
         let ids: Vec<&str> = ordered.iter().map(|f| f.id.as_str()).collect();
         // common-utils should come first because node depends on it
         assert_eq!(
@@ -568,7 +650,7 @@ mod tests {
             make_test_feature("a", Some(vec!["unknown".to_string()])),
             make_test_feature("b", None),
         ];
-        let ordered = order_features(features);
+        let ordered = order_features(features).unwrap();
         let ids: Vec<&str> = ordered.iter().map(|f| f.id.as_str()).collect();
         // Unknown dep is ignored, original order preserved
         assert_eq!(ids, vec!["a", "b"]);
@@ -1156,5 +1238,159 @@ mod tests {
         let features = vec![make_test_feature("a", None)];
         let result = merge_feature_properties(&features);
         assert!(result.remote_env.is_empty());
+    }
+
+    // --- dependsOn tests ---
+
+    fn make_test_feature_with_depends_on(
+        id: &str,
+        install_after: Option<Vec<String>>,
+        depends_on: Option<HashMap<String, serde_json::Value>>,
+    ) -> ResolvedFeature {
+        ResolvedFeature {
+            id: id.to_string(),
+            dir: PathBuf::from(format!("/tmp/features/{}", id)),
+            options: HashMap::new(),
+            metadata: FeatureMetadata {
+                id: Some(id.to_string()),
+                install_after,
+                depends_on,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn test_parse_depends_on_value_empty_object() {
+        let val = serde_json::json!({});
+        let result = parse_depends_on_value(&val);
+        assert_eq!(result, Some(HashMap::new()));
+    }
+
+    #[test]
+    fn test_parse_depends_on_value_with_options() {
+        let val = serde_json::json!({"version": "3", "extra": true});
+        let result = parse_depends_on_value(&val).unwrap();
+        assert_eq!(result.get("version").unwrap(), "3");
+        assert_eq!(result.get("extra").unwrap(), "true");
+    }
+
+    #[test]
+    fn test_parse_depends_on_value_false_disabled() {
+        let val = serde_json::json!(false);
+        assert!(parse_depends_on_value(&val).is_none());
+    }
+
+    #[test]
+    fn test_parse_depends_on_value_true() {
+        let val = serde_json::json!(true);
+        assert_eq!(parse_depends_on_value(&val), Some(HashMap::new()));
+    }
+
+    #[test]
+    fn test_feature_metadata_deserialize_depends_on() {
+        let json = r#"{
+            "id": "my-feature",
+            "dependsOn": {
+                "ghcr.io/devcontainers/features/common-utils:2": {},
+                "./local-dep": {"magicNumber": "42"}
+            }
+        }"#;
+        let metadata: FeatureMetadata = serde_json::from_str(json).unwrap();
+        let deps = metadata.depends_on.unwrap();
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps.get("ghcr.io/devcontainers/features/common-utils:2").unwrap(), &serde_json::json!({}));
+        assert_eq!(deps.get("./local-dep").unwrap(), &serde_json::json!({"magicNumber": "42"}));
+    }
+
+    #[test]
+    fn test_order_features_with_depends_on() {
+        // Diamond graph: B depends on C and D, C depends on A and E, A depends on E
+        let mut b_deps = HashMap::new();
+        b_deps.insert("C".to_string(), serde_json::json!({}));
+        b_deps.insert("D".to_string(), serde_json::json!({}));
+        let mut c_deps = HashMap::new();
+        c_deps.insert("A".to_string(), serde_json::json!({}));
+        c_deps.insert("E".to_string(), serde_json::json!({}));
+        let mut a_deps = HashMap::new();
+        a_deps.insert("E".to_string(), serde_json::json!({}));
+
+        let features = vec![
+            make_test_feature_with_depends_on("B", None, Some(b_deps)),
+            make_test_feature_with_depends_on("C", None, Some(c_deps)),
+            make_test_feature_with_depends_on("A", None, Some(a_deps)),
+            make_test_feature_with_depends_on("D", None, None),
+            make_test_feature_with_depends_on("E", None, None),
+        ];
+
+        let ordered = order_features(features).unwrap();
+        let ids: Vec<&str> = ordered.iter().map(|f| f.id.as_str()).collect();
+
+        // Verify topological constraints: each feature appears after its deps
+        let pos = |id: &str| ids.iter().position(|&x| x == id).unwrap();
+        assert!(pos("E") < pos("A"), "E must come before A");
+        assert!(pos("E") < pos("C"), "E must come before C");
+        assert!(pos("A") < pos("C"), "A must come before C");
+        assert!(pos("C") < pos("B"), "C must come before B");
+        assert!(pos("D") < pos("B"), "D must come before B");
+    }
+
+    #[test]
+    fn test_order_features_hard_cycle_detected() {
+        // A depends on B, B depends on A → hard cycle
+        let mut a_deps = HashMap::new();
+        a_deps.insert("B".to_string(), serde_json::json!({}));
+        let mut b_deps = HashMap::new();
+        b_deps.insert("A".to_string(), serde_json::json!({}));
+
+        let features = vec![
+            make_test_feature_with_depends_on("A", None, Some(a_deps)),
+            make_test_feature_with_depends_on("B", None, Some(b_deps)),
+        ];
+
+        let result = order_features(features);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            CoreError::FeatureDependencyCycle(msg) => {
+                assert!(msg.contains("A"), "error should mention A: {}", msg);
+                assert!(msg.contains("B"), "error should mention B: {}", msg);
+            }
+            other => panic!("Expected FeatureDependencyCycle, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_order_features_soft_cycle_broken() {
+        // A installsAfter B, B installsAfter A → soft cycle, should not error
+        let features = vec![
+            make_test_feature("A", Some(vec!["B".to_string()])),
+            make_test_feature("B", Some(vec!["A".to_string()])),
+        ];
+
+        let result = order_features(features);
+        assert!(result.is_ok(), "soft cycle should not error");
+        let ordered = result.unwrap();
+        assert_eq!(ordered.len(), 2);
+    }
+
+    #[test]
+    fn test_order_features_mixed_hard_soft() {
+        // A has dependsOn B (hard), C has installsAfter A (soft)
+        let mut a_deps = HashMap::new();
+        a_deps.insert("B".to_string(), serde_json::json!({}));
+
+        let features = vec![
+            make_test_feature_with_depends_on("A", None, Some(a_deps)),
+            make_test_feature_with_depends_on("B", None, None),
+            make_test_feature("C", Some(vec!["A".to_string()])),
+        ];
+
+        let ordered = order_features(features).unwrap();
+        let ids: Vec<&str> = ordered.iter().map(|f| f.id.as_str()).collect();
+
+        let pos = |id: &str| ids.iter().position(|&x| x == id).unwrap();
+        assert!(pos("B") < pos("A"), "B must come before A (hard dep)");
+        assert!(pos("A") < pos("C"), "A must come before C (soft dep)");
     }
 }
