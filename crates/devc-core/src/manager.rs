@@ -182,6 +182,7 @@ impl ContainerManager {
             &cid,
             &self.global_config,
             user.as_deref(),
+            &container_state.workspace_path,
         )
         .await
     }
@@ -1465,6 +1466,19 @@ fi
         send_progress(progress, "Starting container...");
         self.start(id).await?;
 
+        // Set up credential forwarding so it's ready for shell access
+        if let Err(e) = crate::credentials::setup_credentials(
+            provider,
+            &container_id,
+            &self.global_config,
+            container.devcontainer.effective_user(),
+            &container_state.workspace_path,
+        )
+        .await
+        {
+            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+        }
+
         Ok(())
     }
 
@@ -1818,6 +1832,7 @@ fi
             &cid,
             &self.global_config,
             user_for_creds.as_deref(),
+            &container_state.workspace_path,
         )
         .await
         {
@@ -1880,6 +1895,7 @@ fi
             &cid,
             &self.global_config,
             container.devcontainer.effective_user(),
+            &container_state.workspace_path,
         )
         .await
         {
@@ -1943,6 +1959,7 @@ fi
             &cid,
             &self.global_config,
             container.devcontainer.effective_user(),
+            &container_state.workspace_path,
         )
         .await
         {

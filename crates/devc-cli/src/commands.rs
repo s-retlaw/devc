@@ -901,19 +901,27 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
         }
     }
 
-    // Git credentials
+    // Git credentials — discover hosts from workspace remotes
     println!("\nGit credentials:");
-    let git_hosts = [
-        ("https", "github.com"),
-        ("https", "gitlab.com"),
-        ("https", "bitbucket.org"),
-        ("https", "dev.azure.com"),
-    ];
-
-    for (protocol, host_name) in &git_hosts {
-        match host::resolve_git_credential(protocol, host_name).await {
-            Some(cred) => println!("  - {}: found (user: {})", host_name, cred.username),
-            None => println!("  - {}: not configured", host_name),
+    let workspace_path = if let Some(ref container_name) = container {
+        // If a container is specified, use its workspace path
+        find_container(manager, container_name)
+            .await
+            .ok()
+            .map(|s| s.workspace_path.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    } else {
+        std::env::current_dir().unwrap_or_default()
+    };
+    let git_hosts = host::discover_git_hosts(&workspace_path);
+    if git_hosts.is_empty() {
+        println!("  (no HTTPS git remotes found in workspace)");
+    } else {
+        for (protocol, host_name) in &git_hosts {
+            match host::resolve_git_credential(protocol, host_name).await {
+                Some(cred) => println!("  - {}: found (user: {})", host_name, cred.username),
+                None => println!("  - {}: not configured", host_name),
+            }
         }
     }
 

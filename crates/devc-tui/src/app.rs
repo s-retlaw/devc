@@ -2286,6 +2286,14 @@ impl App {
             self.shell_sessions.remove(&container_id);
         }
 
+        // Set up credential forwarding before spawning shell
+        {
+            let manager = self.manager.read().await;
+            if let Err(e) = manager.setup_credentials_for_container(&container.id).await {
+                tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+            }
+        }
+
         // Create a new session (PTY will be spawned in run_shell_session)
         self.shell_sessions.insert(
             container_id.clone(),

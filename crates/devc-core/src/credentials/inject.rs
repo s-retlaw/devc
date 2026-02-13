@@ -8,6 +8,7 @@ use crate::{CoreError, Result};
 use devc_config::GlobalConfig;
 use devc_provider::{ContainerId, ContainerProvider, ExecConfig};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// The tmpfs mount path inside the container for credential cache
 pub const CREDS_TMPFS_PATH: &str = "/run/devc-creds";
@@ -130,6 +131,7 @@ pub async fn setup_credentials(
     container_id: &ContainerId,
     global_config: &GlobalConfig,
     user: Option<&str>,
+    workspace_path: &Path,
 ) -> Result<CredentialStatus> {
     if !global_config.credentials.docker && !global_config.credentials.git {
         return Ok(CredentialStatus::default());
@@ -145,7 +147,7 @@ pub async fn setup_credentials(
 
     // Refresh credential cache in tmpfs
     let (docker_registries, git_hosts) =
-        refresh_credentials(provider, container_id, global_config).await?;
+        refresh_credentials(provider, container_id, global_config, workspace_path).await?;
 
     Ok(CredentialStatus {
         docker_registries,
@@ -251,6 +253,7 @@ async fn refresh_credentials(
     provider: &dyn ContainerProvider,
     container_id: &ContainerId,
     global_config: &GlobalConfig,
+    workspace_path: &Path,
 ) -> Result<(usize, usize)> {
     // Ensure the tmpfs directory exists (it should from the mount, but just in case)
     exec_script(
@@ -289,7 +292,8 @@ async fn refresh_credentials(
 
     // Resolve and write Git credentials
     if global_config.credentials.git {
-        let git_creds = host::resolve_git_credentials().await;
+        let git_hosts = host::discover_git_hosts(workspace_path);
+        let git_creds = host::resolve_git_credentials(&git_hosts).await;
         if git_creds.is_empty() {
             tracing::debug!("No Git credentials found on host, skipping");
         } else {
@@ -616,7 +620,8 @@ mod tests {
         config.credentials.docker = false;
         config.credentials.git = false;
 
-        let result = setup_credentials(&provider, &container_id, &config, None).await;
+        let tmp = std::env::temp_dir();
+        let result = setup_credentials(&provider, &container_id, &config, None, &tmp).await;
         assert!(result.is_ok());
         let status = result.unwrap();
         assert_eq!(status.docker_registries, 0);
@@ -639,7 +644,8 @@ mod tests {
         let container_id = ContainerId::new("test-container");
         let config = GlobalConfig::default();
 
-        let result = setup_credentials(&provider, &container_id, &config, None).await;
+        let tmp = std::env::temp_dir();
+        let result = setup_credentials(&provider, &container_id, &config, None, &tmp).await;
         assert!(result.is_ok());
         let status = result.unwrap();
         // helpers_injected should be false since they were already there

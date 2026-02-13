@@ -319,6 +319,7 @@ pub async fn resolve_git_credential(
     let result = tokio::time::timeout(HELPER_TIMEOUT, async {
         let mut child = Command::new("git")
             .args(["credential", "fill"])
+            .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -377,22 +378,62 @@ fn parse_git_credential_output(
     })
 }
 
-/// Resolve Git credentials for well-known hosts
-pub async fn resolve_git_credentials() -> Vec<GitCredential> {
-    let hosts = [
-        ("https", "github.com"),
-        ("https", "gitlab.com"),
-        ("https", "bitbucket.org"),
-        ("https", "dev.azure.com"),
-    ];
+/// Discover git hosts that need credential forwarding from workspace remotes.
+///
+/// Parses `git remote -v` output and returns HTTPS hosts only (SSH uses keys,
+/// not credential helpers).
+pub fn discover_git_hosts(workspace_path: &Path) -> Vec<(String, String)> {
+    let output = std::process::Command::new("git")
+        .args(["-C", &workspace_path.to_string_lossy(), "remote", "-v"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok();
 
-    let mut credentials = Vec::new();
-    for (protocol, host) in &hosts {
-        if let Some(cred) = resolve_git_credential(protocol, host).await {
-            credentials.push(cred);
+    let stdout = match output {
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return Vec::new(),
+    };
+
+    let mut hosts = std::collections::HashSet::new();
+    for line in stdout.lines() {
+        // Format: "origin\thttps://github.com/user/repo.git (fetch)"
+        if let Some(url) = line.split_whitespace().nth(1) {
+            if let Some(host) = extract_https_host(url) {
+                hosts.insert(("https".to_string(), host));
+            }
         }
     }
-    credentials
+    hosts.into_iter().collect()
+}
+
+/// Extract the host from an HTTPS URL.
+///
+/// Returns None for SSH URLs, git:// URLs, or malformed input.
+fn extract_https_host(url: &str) -> Option<String> {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = without_scheme.split('/').next()?;
+    if host.is_empty() {
+        return None;
+    }
+    // Strip any userinfo (user@host or user:pass@host)
+    let host = host.rsplit('@').next().unwrap_or(host);
+    Some(host.to_string())
+}
+
+/// Resolve Git credentials for the given hosts in parallel.
+pub async fn resolve_git_credentials(hosts: &[(String, String)]) -> Vec<GitCredential> {
+    let futures: Vec<_> = hosts
+        .iter()
+        .map(|(protocol, host)| resolve_git_credential(protocol, host))
+        .collect();
+    futures::future::join_all(futures)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Format git credentials as a git-credentials store file
@@ -587,6 +628,39 @@ mod tests {
         assert_eq!(urlencoded("pass#word"), "pass%23word");
         assert_eq!(urlencoded("a?b&c=d+e"), "a%3Fb%26c%3Dd%2Be");
         assert_eq!(urlencoded("line\nnew"), "line%0Anew");
+    }
+
+    #[test]
+    fn test_extract_https_host() {
+        assert_eq!(
+            extract_https_host("https://github.com/user/repo.git"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_https_host("https://gitlab.example.com/group/repo.git"),
+            Some("gitlab.example.com".to_string())
+        );
+        assert_eq!(
+            extract_https_host("http://git.internal:8080/repo.git"),
+            Some("git.internal:8080".to_string())
+        );
+        // SSH URLs should return None
+        assert_eq!(extract_https_host("git@github.com:user/repo.git"), None);
+        assert_eq!(extract_https_host("ssh://git@github.com/user/repo.git"), None);
+        // With userinfo in URL
+        assert_eq!(
+            extract_https_host("https://token@github.com/user/repo.git"),
+            Some("github.com".to_string())
+        );
+        // Empty/malformed
+        assert_eq!(extract_https_host("https://"), None);
+        assert_eq!(extract_https_host(""), None);
+    }
+
+    #[test]
+    fn test_discover_git_hosts_nonexistent_path() {
+        let hosts = discover_git_hosts(std::path::Path::new("/nonexistent/path"));
+        assert!(hosts.is_empty());
     }
 
     #[test]
