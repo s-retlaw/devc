@@ -110,13 +110,33 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
             manager.start(&state.id).await?;
             // Re-fetch state after starting
             let state = find_container(manager, container).await?;
+            print_credential_status(manager, &state).await;
             return ssh_to_container(&state, &cmd).await;
         } else {
             bail!("Container '{}' is not running (status: {})", state.name, state.status);
         }
     }
 
+    print_credential_status(manager, &state).await;
     ssh_to_container(&state, &cmd).await
+}
+
+/// Set up credential forwarding and print a one-line status
+async fn print_credential_status(manager: &ContainerManager, state: &ContainerState) {
+    match manager.setup_credentials_for_container(&state.id).await {
+        Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
+            eprintln!(
+                "Forwarding credentials: {} Docker registries, {} Git hosts",
+                status.docker_registries, status.git_hosts
+            );
+        }
+        Ok(_) => {
+            eprintln!("No host credentials found (run 'docker login' to store Docker credentials)");
+        }
+        Err(e) => {
+            eprintln!("Warning: credential forwarding failed: {}", e);
+        }
+    }
 }
 
 /// Connect to container, preferring SSH over stdio when available
@@ -763,6 +783,248 @@ async fn find_container_in_cwd(manager: &ContainerManager) -> Result<ContainerSt
         .into_iter()
         .find(|c| c.workspace_path == cwd)
         .ok_or_else(|| anyhow!("No container found for current directory"))
+}
+
+/// Execute a shell script in a container and return stdout
+async fn exec_check(
+    provider: &dyn devc_provider::ContainerProvider,
+    cid: &devc_provider::ContainerId,
+    script: &str,
+    user: Option<&str>,
+) -> Option<String> {
+    let result = provider.exec(cid, &devc_provider::ExecConfig {
+        cmd: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        env: std::collections::HashMap::new(),
+        working_dir: None,
+        user: user.map(|s| s.to_string()),
+        tty: false,
+        stdin: false,
+        privileged: false,
+    }).await.ok()?;
+    if result.exit_code != 0 || result.output.trim().is_empty() {
+        return None;
+    }
+    Some(result.output)
+}
+
+/// Show credential forwarding diagnostics
+pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Result<()> {
+    use devc_core::credentials::host;
+
+    println!("Host Credential Status");
+    println!("======================\n");
+
+    // Docker config
+    let home = directories::BaseDirs::new()
+        .map(|b| b.home_dir().to_path_buf());
+    if let Some(ref home) = home {
+        let config_path = host::docker_config_path(home);
+        if config_path.exists() {
+            println!("Docker config: {} (found)", config_path.display());
+        } else {
+            println!("Docker config: {} (not found)", config_path.display());
+        }
+    } else {
+        println!("Docker config: (could not determine home directory)");
+    }
+
+    // Docker credential helper detection
+    let config = host::read_docker_cred_config().unwrap_or_default();
+    let explicit_store = config.creds_store.as_deref().filter(|s| !s.is_empty());
+
+    if let Some(store) = explicit_store {
+        let binary = format!("docker-credential-{}", store);
+        let found = host::which_exists(&binary);
+        println!(
+            "Configured credsStore: {} ({})",
+            store,
+            if found { "found in PATH" } else { "NOT found in PATH" }
+        );
+    } else {
+        println!("Configured credsStore: (none)");
+    }
+
+    // Platform default detection
+    let default_store = host::detect_default_creds_store();
+    match (&explicit_store, &default_store) {
+        (None, Some(store)) => {
+            println!("Detected default helper: docker-credential-{}", store);
+        }
+        (None, None) => {
+            println!("Detected default helper: (none found)");
+        }
+        _ => {} // explicit store takes precedence, already shown
+    }
+
+    // Resolve Docker credentials
+    let effective_store = explicit_store
+        .map(|s| s.to_string())
+        .or(default_store);
+
+    println!();
+    if let Some(ref store) = effective_store {
+        let registries = host::list_credential_helper_registries(store).await;
+        if registries.is_empty() {
+            println!("Docker registries: (none found via docker-credential-{})", store);
+        } else {
+            println!("Docker registries ({} via docker-credential-{}):", registries.len(), store);
+            for reg in &registries {
+                println!("  - {}", reg);
+            }
+        }
+    }
+
+    // Inline auths
+    if !config.auths.is_empty() {
+        let with_auth: Vec<_> = config.auths.iter()
+            .filter(|(_, entry)| entry.auth.as_ref().map_or(false, |a| !a.is_empty()))
+            .collect();
+        if !with_auth.is_empty() {
+            println!("Inline auths ({}):", with_auth.len());
+            for (reg, _) in &with_auth {
+                println!("  - {}", reg);
+            }
+        }
+    }
+
+    // Per-registry credHelpers
+    if !config.cred_helpers.is_empty() {
+        println!("Per-registry credHelpers ({}):", config.cred_helpers.len());
+        for (reg, helper) in &config.cred_helpers {
+            let binary = format!("docker-credential-{}", helper);
+            let found = host::which_exists(&binary);
+            println!(
+                "  - {} -> {} ({})",
+                reg, helper,
+                if found { "found" } else { "NOT found" }
+            );
+        }
+    }
+
+    // Git credentials
+    println!("\nGit credentials:");
+    let git_hosts = [
+        ("https", "github.com"),
+        ("https", "gitlab.com"),
+        ("https", "bitbucket.org"),
+        ("https", "dev.azure.com"),
+    ];
+
+    for (protocol, host_name) in &git_hosts {
+        match host::resolve_git_credential(protocol, host_name).await {
+            Some(cred) => println!("  - {}: found (user: {})", host_name, cred.username),
+            None => println!("  - {}: not configured", host_name),
+        }
+    }
+
+    // Container-side diagnostics (if container specified)
+    if let Some(container_name) = container {
+        println!("\nContainer Status ({})", container_name);
+        println!("===============================\n");
+
+        let state = find_container(manager, &container_name).await?;
+
+        if state.status != DevcContainerStatus::Running {
+            println!("Container is not running (status: {})", state.status);
+            println!("Start the container to check credential forwarding status.");
+            return Ok(());
+        }
+
+        let container_id = state.container_id.as_ref()
+            .ok_or_else(|| anyhow!("Container has no container ID"))?;
+
+        let provider = manager.provider()
+            .ok_or_else(|| anyhow!("Not connected to a container provider"))?;
+        let cid = devc_provider::ContainerId::new(container_id);
+
+        let user = state.metadata.get("remote_user").map(|s| s.as_str()).unwrap_or("root");
+
+        // Check tmpfs mount
+        let output = exec_check(provider, &cid, "test -d /run/devc-creds && echo yes || echo no", None).await;
+        if output.as_deref().map(str::trim) == Some("yes") {
+            println!("  tmpfs mount: /run/devc-creds (present)");
+        } else {
+            println!("  tmpfs mount: /run/devc-creds (MISSING)");
+        }
+
+        // Check cached config.json
+        let output = exec_check(
+            provider, &cid,
+            "if [ -f /run/devc-creds/config.json ]; then cat /run/devc-creds/config.json; fi",
+            None,
+        ).await;
+        if let Some(ref json) = output {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) {
+                let count = parsed.get("auths")
+                    .and_then(|a| a.as_object())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                println!("  cached credentials: {} registries", count);
+            } else {
+                println!("  cached credentials: present (could not parse)");
+            }
+        } else {
+            println!("  cached credentials: (none)");
+        }
+
+        // Check credsStore in container's Docker config
+        // Use $(whoami) instead of interpolating user to avoid shell injection
+        let output = exec_check(
+            provider, &cid,
+            r#"if [ -z "$HOME" ]; then HOME=$(getent passwd "$(whoami)" 2>/dev/null | cut -d: -f6 || echo "/root"); fi; cat "$HOME/.docker/config.json" 2>/dev/null"#,
+            Some(user),
+        ).await;
+        if let Some(ref json) = output {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) {
+                let store = parsed.get("credsStore")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(not set)");
+                println!("  credsStore: {}", store);
+            } else {
+                println!("  Docker config: present (could not parse)");
+            }
+        } else {
+            println!("  Docker config: (not found)");
+        }
+
+        // Check helper scripts
+        let output = exec_check(provider, &cid, "test -x /usr/local/bin/docker-credential-devc && echo yes || echo no", None).await;
+        if output.as_deref().map(str::trim) == Some("yes") {
+            println!("  docker-credential-devc: installed");
+        } else {
+            println!("  docker-credential-devc: NOT installed");
+        }
+
+        let output = exec_check(provider, &cid, "test -x /usr/local/bin/git-credential-devc && echo yes || echo no", None).await;
+        if output.as_deref().map(str::trim) == Some("yes") {
+            println!("  git-credential-devc: installed");
+        } else {
+            println!("  git-credential-devc: NOT installed");
+        }
+
+        // Check git-credentials file
+        let output = exec_check(
+            provider, &cid,
+            "if [ -f /run/devc-creds/git-credentials ]; then wc -l < /run/devc-creds/git-credentials; else echo 0; fi",
+            None,
+        ).await;
+        let count: usize = output.as_deref().map(str::trim).and_then(|s| s.parse().ok()).unwrap_or(0);
+        if count > 0 {
+            println!("  cached git credentials: {} hosts", count);
+        } else {
+            println!("  cached git credentials: (none)");
+        }
+    } else {
+        // No container specified - print guidance
+        println!("\nTip: Run 'devc creds <container>' to also check container-side status.");
+        if effective_store.is_none() && config.auths.is_empty() {
+            println!("\nNo Docker credentials found on this host.");
+            println!("Run 'docker login' to store credentials for Docker Hub.");
+            println!("Run 'docker login <registry>' for other registries.");
+        }
+    }
+
+    Ok(())
 }
 
 /// Adopt an existing devcontainer into devc management

@@ -12,9 +12,19 @@ use std::collections::HashMap;
 /// The tmpfs mount path inside the container for credential cache
 pub const CREDS_TMPFS_PATH: &str = "/run/devc-creds";
 
+/// Result of credential setup, for user-visible reporting
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CredentialStatus {
+    pub docker_registries: usize,
+    pub git_hosts: usize,
+    /// True if helper scripts were injected (first-time setup)
+    pub helpers_injected: bool,
+}
+
 /// Docker credential helper script template.
 ///
 /// `{{original}}` is replaced with the original credsStore value (or empty).
+/// Uses `jq` for JSON parsing if available, otherwise falls back to pure shell.
 const DOCKER_CREDENTIAL_HELPER: &str = r#"#!/bin/sh
 ACTION="$1"
 if [ "$ACTION" != "get" ]; then
@@ -39,28 +49,26 @@ fi
 CONFIG="/run/devc-creds/config.json"
 [ -f "$CONFIG" ] || exit 1
 
-# Extract auth for this registry. Pass registry via env var to avoid injection.
-AUTH=$(DEVC_REGISTRY="$REGISTRY" python3 -c "
-import sys, json, os
-registry = os.environ['DEVC_REGISTRY']
-try:
-    config = json.load(sys.stdin)
-    auth = config.get('auths', {}).get(registry, {}).get('auth', '')
-    if not auth:
-        sys.exit(1)
-    import base64
-    decoded = base64.b64decode(auth).decode()
-    user, secret = decoded.split(':', 1)
-    json.dump({'ServerURL': registry, 'Username': user, 'Secret': secret}, sys.stdout)
-except:
-    sys.exit(1)
-" < "$CONFIG" 2>/dev/null)
-
-if [ $? -eq 0 ] && [ -n "$AUTH" ]; then
-    echo "$AUTH"
-    exit 0
+# Extract auth for this registry using jq or shell fallback
+if command -v jq >/dev/null 2>&1; then
+    AUTH_B64=$(jq -r --arg reg "$REGISTRY" '.auths[$reg].auth // empty' "$CONFIG" 2>/dev/null)
+else
+    AUTH_B64=$(grep -F -A3 "\"$REGISTRY\"" "$CONFIG" | grep '"auth"' | sed 's/.*"auth"[[:space:]]*:[[:space:]]*"//;s/".*//')
 fi
-exit 1
+
+[ -z "$AUTH_B64" ] && exit 1
+
+DECODED=$(echo "$AUTH_B64" | base64 -d 2>/dev/null)
+[ -z "$DECODED" ] && exit 1
+
+USER="${DECODED%%:*}"
+SECRET="${DECODED#*:}"
+
+# Escape double quotes for safe JSON output
+USER=$(printf '%s' "$USER" | sed 's/"/\\"/g')
+SECRET=$(printf '%s' "$SECRET" | sed 's/"/\\"/g')
+
+printf '{"ServerURL":"%s","Username":"%s","Secret":"%s"}\n' "$REGISTRY" "$USER" "$SECRET"
 "#;
 
 /// Git credential helper script template.
@@ -115,15 +123,16 @@ printf 'protocol=%s\nhost=%s\nusername=%s\npassword=%s\n' "$PROTO" "$HOST" "$USE
 
 /// Entry point: inject credential helpers (idempotent) and refresh credentials.
 ///
-/// Call this before every shell/exec.
+/// Call this before every shell/exec. Returns a status summary for user-visible
+/// reporting (number of registries/hosts forwarded).
 pub async fn setup_credentials(
     provider: &dyn ContainerProvider,
     container_id: &ContainerId,
     global_config: &GlobalConfig,
     user: Option<&str>,
-) -> Result<()> {
+) -> Result<CredentialStatus> {
     if !global_config.credentials.docker && !global_config.credentials.git {
-        return Ok(());
+        return Ok(CredentialStatus::default());
     }
 
     tracing::info!(
@@ -132,12 +141,17 @@ pub async fn setup_credentials(
     );
 
     // Inject helpers (idempotent — skips if already injected)
-    inject_helpers(provider, container_id, user).await?;
+    let helpers_injected = inject_helpers(provider, container_id, user).await?;
 
     // Refresh credential cache in tmpfs
-    refresh_credentials(provider, container_id, global_config).await?;
+    let (docker_registries, git_hosts) =
+        refresh_credentials(provider, container_id, global_config).await?;
 
-    Ok(())
+    Ok(CredentialStatus {
+        docker_registries,
+        git_hosts,
+        helpers_injected,
+    })
 }
 
 /// Sanitize a Docker credential helper name.
@@ -164,17 +178,19 @@ fn shell_escape_single_quotes(s: &str) -> String {
 /// Idempotent: if `credsStore` is already `"devc"`, skips injection.
 /// If it's something else (e.g. VS Code's helper), saves it as "original"
 /// in the generated scripts so credentials chain through.
+///
+/// Returns `true` if helpers were newly injected, `false` if already present.
 async fn inject_helpers(
     provider: &dyn ContainerProvider,
     container_id: &ContainerId,
     user: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     // 1. Read the container's current credsStore
     let current_creds_store = read_container_creds_store(provider, container_id, user).await;
 
     if current_creds_store.as_deref() == Some("devc") {
         tracing::debug!("Credential helpers already injected, skipping");
-        return Ok(());
+        return Ok(false);
     }
 
     let original = sanitize_docker_helper_name(
@@ -222,18 +238,20 @@ async fn inject_helpers(
     // 6. Update container git config: set credential.helper
     set_container_git_credential_helper(provider, container_id, user).await?;
 
-    Ok(())
+    Ok(true)
 }
 
 /// Refresh credential cache on the tmpfs mount.
 ///
 /// Resolves Docker and Git credentials on the host, then writes them into
 /// the container's `/run/devc-creds/` directory.
+///
+/// Returns `(docker_registry_count, git_host_count)`.
 async fn refresh_credentials(
     provider: &dyn ContainerProvider,
     container_id: &ContainerId,
     global_config: &GlobalConfig,
-) -> Result<()> {
+) -> Result<(usize, usize)> {
     // Ensure the tmpfs directory exists (it should from the mount, but just in case)
     exec_script(
         provider,
@@ -244,12 +262,16 @@ async fn refresh_credentials(
     .await
     .ok();
 
+    let mut docker_count = 0;
+    let mut git_count = 0;
+
     // Resolve and write Docker credentials
     if global_config.credentials.docker {
         let docker_auths = host::resolve_docker_credentials().await;
         if docker_auths.is_empty() {
             tracing::debug!("No Docker credentials found on host, skipping");
         } else {
+            docker_count = docker_auths.len();
             let config_json = host::build_docker_config_json(&docker_auths);
             write_file_to_container(
                 provider,
@@ -260,7 +282,7 @@ async fn refresh_credentials(
             .await?;
             tracing::debug!(
                 "Wrote Docker credentials for {} registries to tmpfs",
-                docker_auths.len()
+                docker_count
             );
         }
     }
@@ -271,6 +293,7 @@ async fn refresh_credentials(
         if git_creds.is_empty() {
             tracing::debug!("No Git credentials found on host, skipping");
         } else {
+            git_count = git_creds.len();
             let creds_content = host::format_git_credentials(&git_creds);
             write_file_to_container(
                 provider,
@@ -281,12 +304,12 @@ async fn refresh_credentials(
             .await?;
             tracing::debug!(
                 "Wrote Git credentials for {} hosts to tmpfs",
-                git_creds.len()
+                git_count
             );
         }
     }
 
-    Ok(())
+    Ok((docker_count, git_count))
 }
 
 /// Read the container's Docker config credsStore value
@@ -330,25 +353,24 @@ async fn set_container_creds_store(
     container_id: &ContainerId,
     user: Option<&str>,
 ) -> Result<()> {
-    // Use $HOME so it works for any user
+    // Use $HOME so it works for any user.
+    // Uses jq if available, otherwise falls back to simple file write.
     let script = r#"
 mkdir -p "$HOME/.docker"
-if [ -f "$HOME/.docker/config.json" ]; then
-    python3 -c "
-import json, os, sys
-home = os.environ['HOME']
-path = home + '/.docker/config.json'
-try:
-    with open(path) as f:
-        config = json.load(f)
-except:
-    config = {}
-config['credsStore'] = 'devc'
-with open(path, 'w') as f:
-    json.dump(config, f, indent=2)
-" 2>/dev/null || echo '{"credsStore":"devc"}' > "$HOME/.docker/config.json"
+DOCKER_CFG="$HOME/.docker/config.json"
+if [ -f "$DOCKER_CFG" ] && command -v jq >/dev/null 2>&1; then
+    jq '.credsStore = "devc"' "$DOCKER_CFG" > "$DOCKER_CFG.tmp" && mv "$DOCKER_CFG.tmp" "$DOCKER_CFG"
+elif [ -f "$DOCKER_CFG" ]; then
+    # Shell fallback: if credsStore exists, replace it; otherwise add it
+    if grep -q '"credsStore"' "$DOCKER_CFG" 2>/dev/null; then
+        sed 's/"credsStore"[[:space:]]*:[[:space:]]*"[^"]*"/"credsStore": "devc"/' "$DOCKER_CFG" > "$DOCKER_CFG.tmp" && mv "$DOCKER_CFG.tmp" "$DOCKER_CFG"
+    else
+        # Insert credsStore after first opening brace (works with compact and pretty JSON, BusyBox sed)
+        # Only replace the first occurrence using line-address '1'
+        sed '1 s/{/{"credsStore":"devc",/' "$DOCKER_CFG" > "$DOCKER_CFG.tmp" && mv "$DOCKER_CFG.tmp" "$DOCKER_CFG"
+    fi
 else
-    echo '{"credsStore":"devc"}' > "$HOME/.docker/config.json"
+    echo '{"credsStore":"devc"}' > "$DOCKER_CFG"
 fi
 "#;
 
@@ -503,6 +525,11 @@ mod tests {
         assert!(script.contains(r#"ORIGINAL_HELPER="""#));
         assert!(script.contains("/run/devc-creds/config.json"));
         assert!(script.contains("docker-credential-"));
+        // Should not require python3
+        assert!(!script.contains("python3"));
+        // Should use jq with shell fallback
+        assert!(script.contains("jq"));
+        assert!(script.contains("base64 -d"));
     }
 
     #[test]
@@ -591,6 +618,10 @@ mod tests {
 
         let result = setup_credentials(&provider, &container_id, &config, None).await;
         assert!(result.is_ok());
+        let status = result.unwrap();
+        assert_eq!(status.docker_registries, 0);
+        assert_eq!(status.git_hosts, 0);
+        assert!(!status.helpers_injected);
         // No exec calls should have been made
         assert!(provider.get_calls().is_empty());
     }
@@ -610,6 +641,9 @@ mod tests {
 
         let result = setup_credentials(&provider, &container_id, &config, None).await;
         assert!(result.is_ok());
+        let status = result.unwrap();
+        // helpers_injected should be false since they were already there
+        assert!(!status.helpers_injected);
 
         // Should have called exec for: read credsStore, mkdir, and credential writes
         let calls = provider.get_calls();

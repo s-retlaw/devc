@@ -69,7 +69,7 @@ pub fn read_docker_cred_config() -> Option<DockerCredConfig> {
     serde_json::from_str(&content).ok()
 }
 
-fn docker_config_path(home: &Path) -> PathBuf {
+pub fn docker_config_path(home: &Path) -> PathBuf {
     // Respect DOCKER_CONFIG env var
     if let Ok(docker_config) = std::env::var("DOCKER_CONFIG") {
         return PathBuf::from(docker_config).join("config.json");
@@ -161,7 +161,7 @@ pub async fn resolve_docker_credentials() -> HashMap<String, DockerAuth> {
 ///
 /// On macOS Docker Desktop uses "osxkeychain", on Linux "secretservice" or "pass".
 /// Returns None if no default helper binary is found.
-fn detect_default_creds_store() -> Option<String> {
+pub fn detect_default_creds_store() -> Option<String> {
     let candidates = if cfg!(target_os = "macos") {
         vec!["desktop", "osxkeychain"]
     } else {
@@ -184,7 +184,7 @@ fn detect_default_creds_store() -> Option<String> {
 }
 
 /// Check if a binary exists in PATH
-fn which_exists(binary: &str) -> bool {
+pub fn which_exists(binary: &str) -> bool {
     std::process::Command::new("which")
         .arg(binary)
         .stdout(std::process::Stdio::null())
@@ -197,7 +197,7 @@ fn which_exists(binary: &str) -> bool {
 /// Call `docker-credential-<helper> list` to discover all stored registries.
 ///
 /// Returns a list of registry URLs. Non-fatal: returns empty on failure.
-async fn list_credential_helper_registries(helper: &str) -> Vec<String> {
+pub async fn list_credential_helper_registries(helper: &str) -> Vec<String> {
     if !is_valid_helper_name(helper) {
         return Vec::new();
     }

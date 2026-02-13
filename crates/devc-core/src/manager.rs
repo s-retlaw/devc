@@ -145,6 +145,47 @@ impl ContainerManager {
         &self.global_config
     }
 
+    /// Set up credential forwarding for a container and return status.
+    ///
+    /// This is idempotent — safe to call before every shell/exec.
+    /// Returns credential status for user-visible reporting.
+    pub async fn setup_credentials_for_container(
+        &self,
+        id: &str,
+    ) -> Result<crate::credentials::CredentialStatus> {
+        let provider = self.require_provider()?;
+
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        if container_state.status != DevcContainerStatus::Running {
+            return Ok(crate::credentials::CredentialStatus::default());
+        }
+
+        let container_id = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container has no container ID".to_string()))?;
+        let cid = ContainerId::new(container_id);
+
+        let user = Container::from_config(&container_state.config_path)
+            .ok()
+            .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()));
+
+        crate::credentials::setup_credentials(
+            provider,
+            &cid,
+            &self.global_config,
+            user.as_deref(),
+        )
+        .await
+    }
+
     /// List all managed containers
     pub async fn list(&self) -> Result<Vec<ContainerState>> {
         let state = self.state.read().await;
@@ -1772,7 +1813,7 @@ fi
         };
 
         // Refresh credential forwarding
-        if let Err(e) = crate::credentials::setup_credentials(
+        match crate::credentials::setup_credentials(
             provider,
             &cid,
             &self.global_config,
@@ -1780,7 +1821,15 @@ fi
         )
         .await
         {
-            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+            Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
+                tracing::info!(
+                    "Credential forwarding: {} Docker registries, {} Git hosts",
+                    status.docker_registries,
+                    status.git_hosts
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e),
         }
 
         let result = provider
@@ -1826,7 +1875,7 @@ fi
         };
 
         // Refresh credential forwarding
-        if let Err(e) = crate::credentials::setup_credentials(
+        match crate::credentials::setup_credentials(
             provider,
             &cid,
             &self.global_config,
@@ -1834,7 +1883,15 @@ fi
         )
         .await
         {
-            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+            Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
+                tracing::info!(
+                    "Credential forwarding: {} Docker registries, {} Git hosts",
+                    status.docker_registries,
+                    status.git_hosts
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e),
         }
 
         let config = container.exec_config_with_feature_env(cmd, true, true, feat_env);
@@ -1881,7 +1938,7 @@ fi
         };
 
         // Refresh credential forwarding (inject helpers on first call, refresh cache every time)
-        if let Err(e) = crate::credentials::setup_credentials(
+        match crate::credentials::setup_credentials(
             provider,
             &cid,
             &self.global_config,
@@ -1889,7 +1946,15 @@ fi
         )
         .await
         {
-            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+            Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
+                tracing::info!(
+                    "Credential forwarding: {} Docker registries, {} Git hosts",
+                    status.docker_registries,
+                    status.git_hosts
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e),
         }
 
         let config = container.shell_config_with_feature_env(feat_env);

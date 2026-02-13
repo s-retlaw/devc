@@ -7,4 +7,4 @@
 pub mod host;
 pub mod inject;
 
-pub use inject::setup_credentials;
+pub use inject::{setup_credentials, CredentialStatus};

@@ -135,6 +135,12 @@ enum Commands {
         container: Option<String>,
     },
 
+    /// Show credential forwarding diagnostics
+    Creds {
+        /// Container name or ID (optional, shows container-side status if given)
+        container: Option<String>,
+    },
+
     /// Rebuild a container (destroy and rebuild, optionally on new provider)
     Rebuild {
         /// Container name or ID (interactive selection if not specified)
@@ -341,6 +347,9 @@ async fn run() -> anyhow::Result<()> {
                 Commands::Config { .. } => unreachable!(), // Handled above
                 Commands::Adopt { container } => {
                     commands::adopt(&manager, container).await?;
+                }
+                Commands::Creds { container } => {
+                    commands::creds(&manager, container).await?;
                 }
                 Commands::Rebuild { container, no_cache, yes } => {
                     let name = match container {
