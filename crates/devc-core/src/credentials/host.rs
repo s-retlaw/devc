@@ -80,15 +80,10 @@ fn docker_config_path(home: &Path) -> PathBuf {
 /// Resolve all Docker credentials from the host.
 ///
 /// Collects credentials from credsStore, credHelpers, and auths entries.
+/// If no config.json exists, tries the platform-default credential helper.
 /// Returns a map of registry → base64-encoded auth strings.
 pub async fn resolve_docker_credentials() -> HashMap<String, DockerAuth> {
-    let config = match read_docker_cred_config() {
-        Some(c) => c,
-        None => {
-            tracing::debug!("No Docker config found, skipping Docker credential resolution");
-            return HashMap::new();
-        }
-    };
+    let config = read_docker_cred_config().unwrap_or_default();
 
     let mut result = HashMap::new();
 
@@ -113,29 +108,127 @@ pub async fn resolve_docker_credentials() -> HashMap<String, DockerAuth> {
         }
     }
 
-    // 3. Resolve credsStore for any auths registries not yet covered by credHelpers
-    if let Some(ref store) = config.creds_store {
-        if !store.is_empty() {
-            // Resolve for all known registries from auths that don't have a credHelper
-            for registry in config.auths.keys() {
-                if !config.cred_helpers.contains_key(registry) {
-                    if let Some(auth) = resolve_docker_credential_helper(store, registry).await {
-                        result.insert(registry.clone(), auth);
-                    }
+    // 3. Determine the credential store to use:
+    //    - Explicit credsStore from config.json, OR
+    //    - Platform default if config.json is missing/empty
+    let creds_store = config
+        .creds_store
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(detect_default_creds_store);
+
+    if let Some(ref store) = creds_store {
+        // Resolve for all known registries from auths that don't have a credHelper
+        for registry in config.auths.keys() {
+            if !config.cred_helpers.contains_key(registry) {
+                if let Some(auth) = resolve_docker_credential_helper(store, registry).await {
+                    result.insert(registry.clone(), auth);
                 }
             }
-            // Also try the default Docker Hub registry
-            if !result.contains_key("https://index.docker.io/v1/") {
-                if let Some(auth) =
-                    resolve_docker_credential_helper(store, "https://index.docker.io/v1/").await
-                {
-                    result.insert("https://index.docker.io/v1/".to_string(), auth);
+        }
+
+        // Use `docker-credential-<store> list` to discover all stored registries
+        let listed = list_credential_helper_registries(store).await;
+        for registry in listed {
+            if !result.contains_key(&registry) {
+                if let Some(auth) = resolve_docker_credential_helper(store, &registry).await {
+                    result.insert(registry, auth);
                 }
+            }
+        }
+
+        // Also try the default Docker Hub registry if not already found
+        if !result.contains_key("https://index.docker.io/v1/") {
+            if let Some(auth) =
+                resolve_docker_credential_helper(store, "https://index.docker.io/v1/").await
+            {
+                result.insert("https://index.docker.io/v1/".to_string(), auth);
             }
         }
     }
 
+    if result.is_empty() {
+        tracing::debug!("No Docker credentials found on host");
+    } else {
+        tracing::debug!("Resolved Docker credentials for {} registries", result.len());
+    }
+
     result
+}
+
+/// Detect the platform-default Docker credential helper.
+///
+/// On macOS Docker Desktop uses "osxkeychain", on Linux "secretservice" or "pass".
+/// Returns None if no default helper binary is found.
+fn detect_default_creds_store() -> Option<String> {
+    let candidates = if cfg!(target_os = "macos") {
+        vec!["desktop", "osxkeychain"]
+    } else {
+        vec!["secretservice", "pass"]
+    };
+
+    for helper in candidates {
+        let binary = format!("docker-credential-{}", helper);
+        if which_exists(&binary) {
+            tracing::debug!(
+                "No credsStore in config, detected platform default: {}",
+                helper
+            );
+            return Some(helper.to_string());
+        }
+    }
+
+    tracing::debug!("No Docker credential helper found on system");
+    None
+}
+
+/// Check if a binary exists in PATH
+fn which_exists(binary: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(binary)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Call `docker-credential-<helper> list` to discover all stored registries.
+///
+/// Returns a list of registry URLs. Non-fatal: returns empty on failure.
+async fn list_credential_helper_registries(helper: &str) -> Vec<String> {
+    if !is_valid_helper_name(helper) {
+        return Vec::new();
+    }
+
+    let binary = format!("docker-credential-{}", helper);
+
+    let result = tokio::time::timeout(HELPER_TIMEOUT, async {
+        let output = Command::new(&binary)
+            .arg("list")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        // `list` returns a JSON object: {"registry": "username", ...}
+        let map: HashMap<String, String> =
+            serde_json::from_slice(&output.stdout).ok()?;
+
+        Some(map.into_keys().collect::<Vec<_>>())
+    })
+    .await;
+
+    match result {
+        Ok(Some(registries)) => registries,
+        _ => Vec::new(),
+    }
 }
 
 /// Validate a Docker credential helper name.

@@ -410,6 +410,19 @@ async fn write_file_to_container(
     exec_script(provider, container_id, &script, Some("root")).await
 }
 
+/// Wrap a script to ensure $HOME is set correctly from /etc/passwd.
+///
+/// Docker/Podman exec usually sets HOME, but some runtimes or custom
+/// images may not. This resolves HOME from getent/passwd for any distro
+/// (Alpine, Fedora, Arch, etc.) rather than hardcoding /home/{user}.
+fn wrap_with_home_resolve(script: &str) -> String {
+    format!(
+        r#"if [ -z "$HOME" ]; then HOME=$(getent passwd "$(whoami)" 2>/dev/null | cut -d: -f6 || echo "/root"); export HOME; fi
+{}"#,
+        script
+    )
+}
+
 /// Execute a script in the container
 async fn exec_script(
     provider: &dyn ContainerProvider,
@@ -417,8 +430,9 @@ async fn exec_script(
     script: &str,
     user: Option<&str>,
 ) -> Result<()> {
+    let wrapped = wrap_with_home_resolve(script);
     let config = ExecConfig {
-        cmd: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        cmd: vec!["/bin/sh".to_string(), "-c".to_string(), wrapped],
         env: HashMap::new(),
         working_dir: None,
         user: user.map(|s| s.to_string()),
@@ -448,8 +462,9 @@ async fn exec_script_with_output(
     script: &str,
     user: Option<&str>,
 ) -> Option<String> {
+    let wrapped = wrap_with_home_resolve(script);
     let config = ExecConfig {
-        cmd: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        cmd: vec!["/bin/sh".to_string(), "-c".to_string(), wrapped],
         env: HashMap::new(),
         working_dir: None,
         user: user.map(|s| s.to_string()),
@@ -542,6 +557,24 @@ mod tests {
     #[test]
     fn test_creds_tmpfs_path() {
         assert_eq!(CREDS_TMPFS_PATH, "/run/devc-creds");
+    }
+
+    #[test]
+    fn test_wrap_with_home_resolve() {
+        let wrapped = wrap_with_home_resolve("echo hello");
+        // Should include getent passwd lookup for $HOME
+        assert!(wrapped.contains("getent passwd"));
+        assert!(wrapped.contains("whoami"));
+        assert!(wrapped.contains("export HOME"));
+        // Original script should be at the end
+        assert!(wrapped.ends_with("echo hello"));
+    }
+
+    #[test]
+    fn test_wrap_preserves_script() {
+        let script = r#"cat "$HOME/.docker/config.json""#;
+        let wrapped = wrap_with_home_resolve(script);
+        assert!(wrapped.contains(script));
     }
 
     #[tokio::test]
