@@ -577,6 +577,34 @@ impl App {
         self.active_provider.is_some()
     }
 
+    /// Open the rebuild confirmation dialog for the selected container.
+    /// Returns early if not connected or no containers.
+    fn start_rebuild_dialog(&mut self) {
+        if self.containers.is_empty() || !self.is_connected() {
+            if !self.is_connected() {
+                self.status_message = Some("Not connected to provider".to_string());
+            }
+            return;
+        }
+        let container = &self.containers[self.selected];
+        if let Some(new_provider) = self.active_provider {
+            let old_provider = container.provider;
+            let provider_change = if old_provider != new_provider {
+                Some((old_provider, new_provider))
+            } else {
+                None
+            };
+
+            self.rebuild_no_cache = false;
+            self.dialog_focus = DialogFocus::Cancel;
+            self.confirm_action = Some(ConfirmAction::Rebuild {
+                id: container.id.clone(),
+                provider_change,
+            });
+            self.view = View::Confirm;
+        }
+    }
+
     /// Create a CliProvider for the given provider type.
     /// Handles toolbox environment detection for Podman.
     async fn create_cli_provider(
@@ -1413,26 +1441,7 @@ impl App {
                     self.status_message = Some("Refreshed".to_string());
                 }
                 KeyCode::Char('R') => {
-                    if !self.containers.is_empty() && self.is_connected() {
-                        let container = &self.containers[self.selected];
-                        let old_provider = container.provider;
-                        let new_provider = self.active_provider.unwrap(); // Safe: checked is_connected
-                        let provider_change = if old_provider != new_provider {
-                            Some((old_provider, new_provider))
-                        } else {
-                            None
-                        };
-
-                        self.rebuild_no_cache = false;
-                        self.dialog_focus = DialogFocus::Cancel;
-                        self.confirm_action = Some(ConfirmAction::Rebuild {
-                            id: container.id.clone(),
-                            provider_change,
-                        });
-                        self.view = View::Confirm;
-                    } else if !self.is_connected() {
-                        self.status_message = Some("Not connected to provider".to_string());
-                    }
+                    self.start_rebuild_dialog();
                 }
                 KeyCode::Char('p') => {
                     // Enter port forwarding view for selected container
@@ -1749,26 +1758,7 @@ impl App {
                 self.fetch_logs().await?;
             }
             KeyCode::Char('R') => {
-                if !self.containers.is_empty() && self.is_connected() {
-                    let container = &self.containers[self.selected];
-                    let old_provider = container.provider;
-                    let new_provider = self.active_provider.unwrap(); // Safe: checked is_connected
-                    let provider_change = if old_provider != new_provider {
-                        Some((old_provider, new_provider))
-                    } else {
-                        None
-                    };
-
-                    self.rebuild_no_cache = false;
-                    self.dialog_focus = DialogFocus::Cancel;
-                    self.confirm_action = Some(ConfirmAction::Rebuild {
-                        id: container.id.clone(),
-                        provider_change,
-                    });
-                    self.view = View::Confirm;
-                } else if !self.is_connected() {
-                    self.status_message = Some("Not connected to provider".to_string());
-                }
+                self.start_rebuild_dialog();
             }
             KeyCode::Char('S') => {
                 #[cfg(unix)]

@@ -32,6 +32,14 @@ pub struct ContainerManager {
 /// Build progress callback
 pub type BuildProgressCallback = Box<dyn Fn(&str) + Send + Sync>;
 
+/// Context prepared by `prepare_exec()` for exec/shell operations.
+struct ExecContext<'a> {
+    provider: &'a dyn ContainerProvider,
+    container_state: ContainerState,
+    cid: ContainerId,
+    feature_props: features::MergedFeatureProperties,
+}
+
 impl ContainerManager {
     /// Create a new container manager
     pub async fn new(provider: Box<dyn ContainerProvider>) -> Result<Self> {
@@ -128,6 +136,69 @@ impl ContainerManager {
                     .unwrap_or_else(|| "No container provider available".to_string()),
             )
         })
+    }
+
+    /// Shared preamble for exec/shell operations.
+    /// Validates the container is running, extracts provider ID, and loads feature properties.
+    async fn prepare_exec(&self, id: &str) -> Result<ExecContext<'_>> {
+        let provider = self.require_provider()?;
+
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        if container_state.status != DevcContainerStatus::Running {
+            return Err(CoreError::InvalidState(
+                "Container is not running".to_string(),
+            ));
+        }
+
+        let container_id = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container has no provider ID".into()))?;
+        let cid = ContainerId::new(container_id);
+        let feature_props = get_feature_properties(&container_state);
+
+        Ok(ExecContext {
+            provider,
+            container_state,
+            cid,
+            feature_props,
+        })
+    }
+
+    /// Refresh credential forwarding, logging results. Failures are non-fatal.
+    async fn refresh_credentials(
+        &self,
+        provider: &dyn ContainerProvider,
+        cid: &ContainerId,
+        user: Option<&str>,
+        workspace_path: &std::path::Path,
+    ) {
+        match crate::credentials::setup_credentials(
+            provider,
+            cid,
+            &self.global_config,
+            user,
+            workspace_path,
+        )
+        .await
+        {
+            Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
+                tracing::info!(
+                    "Credential forwarding: {} Docker registries, {} Git hosts",
+                    status.docker_registries,
+                    status.git_hosts
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e),
+        }
     }
 
     /// Get the provider type (None if disconnected)
@@ -1776,37 +1847,14 @@ fi
 
     /// Shared exec implementation
     async fn exec_inner(&self, id: &str, cmd: Vec<String>, tty: bool) -> Result<devc_provider::ExecResult> {
-        let provider = self.require_provider()?;
-
-        let container_state = {
-            let state = self.state.read().await;
-            state
-                .get(id)
-                .cloned()
-                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
-        };
-
-        if container_state.status != DevcContainerStatus::Running {
-            return Err(CoreError::InvalidState(
-                "Container is not running".to_string(),
-            ));
-        }
-
-        let container_id = container_state.container_id.as_ref().unwrap();
-        let cid = ContainerId::new(container_id);
+        let ctx = self.prepare_exec(id).await?;
 
         // Try loading config for remoteEnv/user/workdir; fall back to a basic config
         // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
-        let feature_props = get_feature_properties(&container_state);
-        let (config, user_for_creds) = match Container::from_config(&container_state.config_path) {
+        let (config, user_for_creds) = match Container::from_config(&ctx.container_state.config_path) {
             Ok(container) => {
                 let user = container.devcontainer.effective_user().map(|s| s.to_string());
-                let feat_env = if feature_props.remote_env.is_empty() {
-                    None
-                } else {
-                    Some(&feature_props.remote_env)
-                };
-                (container.exec_config_with_feature_env(cmd, tty, tty, feat_env), user)
+                (container.exec_config_with_feature_env(cmd, tty, tty, ctx.feature_props.remote_env_option()), user)
             }
             Err(_) => {
                 let mut env = std::collections::HashMap::new();
@@ -1826,29 +1874,15 @@ fi
             }
         };
 
-        // Refresh credential forwarding
-        match crate::credentials::setup_credentials(
-            provider,
-            &cid,
-            &self.global_config,
+        self.refresh_credentials(
+            ctx.provider,
+            &ctx.cid,
             user_for_creds.as_deref(),
-            &container_state.workspace_path,
-        )
-        .await
-        {
-            Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
-                tracing::info!(
-                    "Credential forwarding: {} Docker registries, {} Git hosts",
-                    status.docker_registries,
-                    status.git_hosts
-                );
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e),
-        }
+            &ctx.container_state.workspace_path,
+        ).await;
 
-        let result = provider
-            .exec(&cid, &config)
+        let result = ctx.provider
+            .exec(&ctx.cid, &config)
             .await?;
 
         // Update last used
@@ -1863,56 +1897,19 @@ fi
 
     /// Execute a command interactively with PTY
     pub async fn exec_interactive(&self, id: &str, cmd: Vec<String>) -> Result<ExecStream> {
-        let provider = self.require_provider()?;
+        let ctx = self.prepare_exec(id).await?;
+        let container = Container::from_config(&ctx.container_state.config_path)?;
 
-        let container_state = {
-            let state = self.state.read().await;
-            state
-                .get(id)
-                .cloned()
-                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
-        };
-
-        if container_state.status != DevcContainerStatus::Running {
-            return Err(CoreError::InvalidState(
-                "Container is not running".to_string(),
-            ));
-        }
-
-        let container_id = container_state.container_id.as_ref().unwrap();
-        let cid = ContainerId::new(container_id);
-        let container = Container::from_config(&container_state.config_path)?;
-        let feature_props = get_feature_properties(&container_state);
-        let feat_env = if feature_props.remote_env.is_empty() {
-            None
-        } else {
-            Some(&feature_props.remote_env)
-        };
-
-        // Refresh credential forwarding
-        match crate::credentials::setup_credentials(
-            provider,
-            &cid,
-            &self.global_config,
+        self.refresh_credentials(
+            ctx.provider,
+            &ctx.cid,
             container.devcontainer.effective_user(),
-            &container_state.workspace_path,
-        )
-        .await
-        {
-            Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
-                tracing::info!(
-                    "Credential forwarding: {} Docker registries, {} Git hosts",
-                    status.docker_registries,
-                    status.git_hosts
-                );
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e),
-        }
+            &ctx.container_state.workspace_path,
+        ).await;
 
-        let config = container.exec_config_with_feature_env(cmd, true, true, feat_env);
-        let stream = provider
-            .exec_interactive(&cid, &config)
+        let config = container.exec_config_with_feature_env(cmd, true, true, ctx.feature_props.remote_env_option());
+        let stream = ctx.provider
+            .exec_interactive(&ctx.cid, &config)
             .await?;
 
         // Update last used
@@ -1927,56 +1924,19 @@ fi
 
     /// Open an interactive shell in a container
     pub async fn shell(&self, id: &str) -> Result<ExecStream> {
-        let provider = self.require_provider()?;
+        let ctx = self.prepare_exec(id).await?;
+        let container = Container::from_config(&ctx.container_state.config_path)?;
 
-        let container_state = {
-            let state = self.state.read().await;
-            state
-                .get(id)
-                .cloned()
-                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
-        };
-
-        if container_state.status != DevcContainerStatus::Running {
-            return Err(CoreError::InvalidState(
-                "Container is not running".to_string(),
-            ));
-        }
-
-        let container_id = container_state.container_id.as_ref().unwrap();
-        let cid = ContainerId::new(container_id);
-        let container = Container::from_config(&container_state.config_path)?;
-        let feature_props = get_feature_properties(&container_state);
-        let feat_env = if feature_props.remote_env.is_empty() {
-            None
-        } else {
-            Some(&feature_props.remote_env)
-        };
-
-        // Refresh credential forwarding (inject helpers on first call, refresh cache every time)
-        match crate::credentials::setup_credentials(
-            provider,
-            &cid,
-            &self.global_config,
+        self.refresh_credentials(
+            ctx.provider,
+            &ctx.cid,
             container.devcontainer.effective_user(),
-            &container_state.workspace_path,
-        )
-        .await
-        {
-            Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
-                tracing::info!(
-                    "Credential forwarding: {} Docker registries, {} Git hosts",
-                    status.docker_registries,
-                    status.git_hosts
-                );
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e),
-        }
+            &ctx.container_state.workspace_path,
+        ).await;
 
-        let config = container.shell_config_with_feature_env(feat_env);
-        let stream = provider
-            .exec_interactive(&cid, &config)
+        let config = container.shell_config_with_feature_env(ctx.feature_props.remote_env_option());
+        let stream = ctx.provider
+            .exec_interactive(&ctx.cid, &config)
             .await?;
 
         // Update last used

@@ -118,6 +118,16 @@ impl MergedFeatureProperties {
             || self.privileged
             || self.entrypoint.is_some()
     }
+
+    /// Returns `Some(&remote_env)` if non-empty, `None` otherwise.
+    /// Used to pass feature remote env to exec/shell config builders.
+    pub fn remote_env_option(&self) -> Option<&HashMap<String, String>> {
+        if self.remote_env.is_empty() {
+            None
+        } else {
+            Some(&self.remote_env)
+        }
+    }
 }
 
 /// Merge container-level properties from all resolved features.

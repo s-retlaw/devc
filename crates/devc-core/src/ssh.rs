@@ -272,7 +272,7 @@ chown -R {user}:{user} {home}/.ssh 2>/dev/null || true
             )));
         }
 
-        let first_char = user.chars().next().unwrap();
+        let first_char = user.chars().next().expect("validated non-empty above");
         if !first_char.is_ascii_lowercase() && first_char != '_' {
             return Err(CoreError::SshSetupError(format!(
                 "Invalid username '{}': must start with lowercase letter or underscore",
