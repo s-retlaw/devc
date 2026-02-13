@@ -461,10 +461,20 @@ impl ContainerManager {
             .get("feature_properties")
             .and_then(|json| serde_json::from_str::<features::MergedFeatureProperties>(json).ok());
 
-        let create_config = container.create_config_with_features(
+        let mut create_config = container.create_config_with_features(
             image_id,
             feature_props.as_ref(),
         );
+
+        // Add tmpfs mount for credential cache if credential forwarding is enabled
+        if self.global_config.credentials.docker || self.global_config.credentials.git {
+            create_config.mounts.push(devc_provider::MountConfig {
+                mount_type: devc_provider::MountType::Tmpfs,
+                source: String::new(),
+                target: crate::credentials::inject::CREDS_TMPFS_PATH.to_string(),
+                read_only: false,
+            });
+        }
 
         // Clean up any orphaned container with the same name before creating
         // This handles cases where state has container_id=null but a container exists
@@ -1728,18 +1738,20 @@ fi
         }
 
         let container_id = container_state.container_id.as_ref().unwrap();
+        let cid = ContainerId::new(container_id);
 
         // Try loading config for remoteEnv/user/workdir; fall back to a basic config
         // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
         let feature_props = get_feature_properties(&container_state);
-        let config = match Container::from_config(&container_state.config_path) {
+        let (config, user_for_creds) = match Container::from_config(&container_state.config_path) {
             Ok(container) => {
+                let user = container.devcontainer.effective_user().map(|s| s.to_string());
                 let feat_env = if feature_props.remote_env.is_empty() {
                     None
                 } else {
                     Some(&feature_props.remote_env)
                 };
-                container.exec_config_with_feature_env(cmd, tty, tty, feat_env)
+                (container.exec_config_with_feature_env(cmd, tty, tty, feat_env), user)
             }
             Err(_) => {
                 let mut env = std::collections::HashMap::new();
@@ -1747,7 +1759,7 @@ fi
                 env.insert("COLORTERM".to_string(), "truecolor".to_string());
                 env.insert("LANG".to_string(), "C.UTF-8".to_string());
                 env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
-                devc_provider::ExecConfig {
+                (devc_provider::ExecConfig {
                     cmd,
                     env,
                     working_dir: None,
@@ -1755,12 +1767,24 @@ fi
                     tty,
                     stdin: tty,
                     privileged: false,
-                }
+                }, None)
             }
         };
 
+        // Refresh credential forwarding
+        if let Err(e) = crate::credentials::setup_credentials(
+            provider,
+            &cid,
+            &self.global_config,
+            user_for_creds.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+        }
+
         let result = provider
-            .exec(&ContainerId::new(container_id), &config)
+            .exec(&cid, &config)
             .await?;
 
         // Update last used
@@ -1792,6 +1816,7 @@ fi
         }
 
         let container_id = container_state.container_id.as_ref().unwrap();
+        let cid = ContainerId::new(container_id);
         let container = Container::from_config(&container_state.config_path)?;
         let feature_props = get_feature_properties(&container_state);
         let feat_env = if feature_props.remote_env.is_empty() {
@@ -1800,9 +1825,21 @@ fi
             Some(&feature_props.remote_env)
         };
 
+        // Refresh credential forwarding
+        if let Err(e) = crate::credentials::setup_credentials(
+            provider,
+            &cid,
+            &self.global_config,
+            container.devcontainer.effective_user(),
+        )
+        .await
+        {
+            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+        }
+
         let config = container.exec_config_with_feature_env(cmd, true, true, feat_env);
         let stream = provider
-            .exec_interactive(&ContainerId::new(container_id), &config)
+            .exec_interactive(&cid, &config)
             .await?;
 
         // Update last used
@@ -1834,6 +1871,7 @@ fi
         }
 
         let container_id = container_state.container_id.as_ref().unwrap();
+        let cid = ContainerId::new(container_id);
         let container = Container::from_config(&container_state.config_path)?;
         let feature_props = get_feature_properties(&container_state);
         let feat_env = if feature_props.remote_env.is_empty() {
@@ -1842,9 +1880,21 @@ fi
             Some(&feature_props.remote_env)
         };
 
+        // Refresh credential forwarding (inject helpers on first call, refresh cache every time)
+        if let Err(e) = crate::credentials::setup_credentials(
+            provider,
+            &cid,
+            &self.global_config,
+            container.devcontainer.effective_user(),
+        )
+        .await
+        {
+            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+        }
+
         let config = container.shell_config_with_feature_env(feat_env);
         let stream = provider
-            .exec_interactive(&ContainerId::new(container_id), &config)
+            .exec_interactive(&cid, &config)
             .await?;
 
         // Update last used

@@ -10,6 +10,7 @@
 
 mod build;
 mod container;
+pub mod credentials;
 mod dotfiles;
 mod error;
 pub mod features;

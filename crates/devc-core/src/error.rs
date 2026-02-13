@@ -34,6 +34,9 @@ pub enum CoreError {
     #[error("SSH key generation failed: {0}")]
     SshKeygenError(String),
 
+    #[error("Credential forwarding error: {0}")]
+    CredentialError(String),
+
     #[error("Feature download failed for {feature}: {reason}")]
     FeatureDownloadFailed { feature: String, reason: String },
 

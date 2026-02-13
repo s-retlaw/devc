@@ -14,6 +14,26 @@ use std::path::PathBuf;
 pub struct GlobalConfig {
     pub defaults: DefaultsConfig,
     pub providers: ProvidersConfig,
+    pub credentials: CredentialsConfig,
+}
+
+/// Credential forwarding configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CredentialsConfig {
+    /// Forward Docker credentials into containers (default: true)
+    pub docker: bool,
+    /// Forward Git credentials into containers (default: true)
+    pub git: bool,
+}
+
+impl Default for CredentialsConfig {
+    fn default() -> Self {
+        Self {
+            docker: true,
+            git: true,
+        }
+    }
 }
 
 /// Default settings
