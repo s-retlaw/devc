@@ -8,7 +8,7 @@
 
 use devc_config::{Command, StringOrArray};
 use devc_core::{run_host_command, run_lifecycle_command_with_env, Container};
-use devc_provider::{CliProvider, ContainerProvider, CreateContainerConfig, ExecConfig};
+use devc_provider::{CliProvider, ContainerId, ContainerProvider, CreateContainerConfig, ExecConfig};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -37,6 +37,39 @@ fn create_test_workspace(devcontainer_json: &str) -> TempDir {
     )
     .expect("failed to write devcontainer.json");
     temp
+}
+
+/// Inspect a running container and return a single formatted field.
+/// Handles direct runtime access and Toolbox (flatpak-spawn --host) environments.
+fn inspect_container_field(provider: &CliProvider, cid: &ContainerId, format: &str) -> String {
+    let runtime = provider.info().provider_type.to_string();
+    let args = ["inspect", "--format", format, &cid.0];
+
+    // Try direct command first
+    if let Ok(output) = std::process::Command::new(&runtime).args(&args).output() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+
+    // Fallback: try via flatpak-spawn (Toolbox environments)
+    if let Ok(output) = std::process::Command::new("flatpak-spawn")
+        .arg("--host")
+        .arg(&runtime)
+        .args(&args)
+        .output()
+    {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+
+    panic!(
+        "{runtime} inspect returned empty for container {} with format {format}",
+        cid.0
+    );
 }
 
 /// Pull alpine:latest, skipping if already present
@@ -124,6 +157,33 @@ async fn test_e2e_runtime_flags() {
         result.output.contains("vim"),
         "EDITOR should be 'vim' via remoteEnv, got: {}",
         result.output.trim()
+    );
+
+    // Verify CapAdd is actually set on the running container
+    let cap_add_json = inspect_container_field(&provider, &id, "{{json .HostConfig.CapAdd}}");
+    eprintln!("Container CapAdd: {}", cap_add_json);
+    assert!(
+        cap_add_json.contains("SYS_PTRACE"),
+        "Container should have SYS_PTRACE capability, inspect output: {}",
+        cap_add_json
+    );
+
+    // Verify SecurityOpt is actually set on the running container
+    let sec_opt_json = inspect_container_field(&provider, &id, "{{json .HostConfig.SecurityOpt}}");
+    eprintln!("Container SecurityOpt: {}", sec_opt_json);
+    assert!(
+        sec_opt_json.contains("seccomp=unconfined"),
+        "Container should have seccomp=unconfined, inspect output: {}",
+        sec_opt_json
+    );
+
+    // Verify Init is actually set on the running container
+    let init_json = inspect_container_field(&provider, &id, "{{json .HostConfig.Init}}");
+    eprintln!("Container Init: {}", init_json);
+    assert!(
+        init_json.contains("true"),
+        "Container should have init=true, inspect output: {}",
+        init_json
     );
 
     // Cleanup

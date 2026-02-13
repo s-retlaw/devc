@@ -42,6 +42,11 @@ pub fn generate_compose_override(
         yaml.push_str("    privileged: true\n");
     }
 
+    if let Some(ref entrypoint) = props.entrypoint {
+        yaml.push_str(&format!("    entrypoint: [\"{}\"]", entrypoint));
+        yaml.push('\n');
+    }
+
     Some(yaml)
 }
 

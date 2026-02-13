@@ -355,6 +355,13 @@ impl ContainerProvider for CliProvider {
             args.push("--init".to_string());
         }
 
+        // Entrypoint override
+        if let Some(ref entrypoint) = config.entrypoint {
+            if let Some(ep) = entrypoint.first() {
+                args.push(format!("--entrypoint={}", ep));
+            }
+        }
+
         // Extra arguments (from runArgs)
         args.extend(config.extra_args.clone());
 

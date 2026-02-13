@@ -55,6 +55,18 @@ pub struct FeatureMetadata {
     pub post_start_command: Option<Command>,
     /// Command to run after attaching to the container
     pub post_attach_command: Option<Command>,
+    /// Command to run when content is updated (between onCreate and postCreate)
+    pub update_content_command: Option<Command>,
+    /// Entrypoint to use for the container (e.g. dockerd-entrypoint.sh for docker-in-docker)
+    pub entrypoint: Option<String>,
+    // TODO: Implement transitive dependency resolution for dependsOn.
+    // Currently we only resolve features explicitly listed in devcontainer.json.
+    // Full support requires: for each resolved feature, check its depends_on,
+    // download each dependency's metadata, recurse until the full graph is resolved,
+    // then topologically sort respecting both dependsOn (hard) and installsAfter
+    // (soft) edges. See devcontainer spec: https://containers.dev/implementors/features/
+    /// Hard dependencies on other features (feature ID → config)
+    pub depends_on: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// A single option definition from devcontainer-feature.json
@@ -92,13 +104,23 @@ pub struct MergedFeatureProperties {
     /// remoteEnv from features — applied to exec/lifecycle commands, not container creation
     #[serde(default)]
     pub remote_env: HashMap<String, String>,
+    /// Lifecycle: updateContentCommand(s) from features (ordered by feature install order)
+    #[serde(default)]
+    pub update_content_commands: Vec<Command>,
+    /// Entrypoint override from features (last feature wins — only one entrypoint can be active)
+    #[serde(default)]
+    pub entrypoint: Option<String>,
 }
 
 impl MergedFeatureProperties {
     /// Returns true if any container-level properties (capAdd, securityOpt, init, privileged)
     /// need to be applied. Mounts and lifecycle commands are not considered here.
     pub fn has_container_properties(&self) -> bool {
-        !self.cap_add.is_empty() || !self.security_opt.is_empty() || self.init || self.privileged
+        !self.cap_add.is_empty()
+            || !self.security_opt.is_empty()
+            || self.init
+            || self.privileged
+            || self.entrypoint.is_some()
     }
 }
 
@@ -153,6 +175,13 @@ pub fn merge_feature_properties(features: &[ResolvedFeature]) -> MergedFeaturePr
             for (key, value) in env {
                 result.remote_env.insert(key.clone(), value.clone());
             }
+        }
+        if let Some(ref cmd) = feature.metadata.update_content_command {
+            result.update_content_commands.push(cmd.clone());
+        }
+        // Entrypoint: last feature wins (only one entrypoint can be active)
+        if let Some(ref ep) = feature.metadata.entrypoint {
+            result.entrypoint = Some(ep.clone());
         }
     }
 

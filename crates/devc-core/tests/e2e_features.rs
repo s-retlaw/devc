@@ -10,7 +10,7 @@ use devc_core::features;
 use devc_core::features::resolve::{parse_feature_ref, FeatureSource};
 use devc_core::features::merge_feature_properties;
 use devc_core::{Container, EnhancedBuildContext};
-use devc_provider::{BuildConfig, CliProvider, ContainerProvider, CreateContainerConfig, ExecConfig};
+use devc_provider::{BuildConfig, CliProvider, ContainerProvider, ContainerId, CreateContainerConfig, ExecConfig};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -39,6 +39,40 @@ fn create_test_workspace(devcontainer_json: &str) -> TempDir {
     )
     .expect("failed to write devcontainer.json");
     temp
+}
+
+/// Inspect a running container and return a single formatted field.
+/// `format` is a Go template string, e.g. `"{{json .HostConfig.CapAdd}}"`.
+/// Handles direct runtime access and Toolbox (flatpak-spawn --host) environments.
+fn inspect_container_field(provider: &CliProvider, cid: &ContainerId, format: &str) -> String {
+    let runtime = provider.info().provider_type.to_string();
+    let args = ["inspect", "--format", format, &cid.0];
+
+    // Try direct command first
+    if let Ok(output) = std::process::Command::new(&runtime).args(&args).output() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+
+    // Fallback: try via flatpak-spawn (Toolbox environments)
+    if let Ok(output) = std::process::Command::new("flatpak-spawn")
+        .arg("--host")
+        .arg(&runtime)
+        .args(&args)
+        .output()
+    {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+
+    panic!(
+        "{runtime} inspect returned empty for container {} with format {format}",
+        cid.0
+    );
 }
 
 // ==========================================================================
@@ -435,33 +469,27 @@ async fn test_e2e_feature_container_properties() {
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify container has SYS_PTRACE capability via inspect
-    // Use the provider's runtime command to inspect
-    let runtime = if std::process::Command::new("podman")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        "podman"
-    } else {
-        "docker"
-    };
-
-    let inspect_output = std::process::Command::new(runtime)
-        .args(["inspect", "--format", "{{json .HostConfig.CapAdd}}", &cid.0])
-        .output()
-        .expect("inspect should work");
-    let cap_add_json = String::from_utf8_lossy(&inspect_output.stdout);
-    eprintln!("Container CapAdd: {}", cap_add_json.trim());
+    let cap_add_json = inspect_container_field(&provider, &cid, "{{json .HostConfig.CapAdd}}");
+    eprintln!("Container CapAdd: {}", cap_add_json);
     assert!(
         cap_add_json.contains("SYS_PTRACE"),
         "Container should have SYS_PTRACE capability, inspect output: {}",
-        cap_add_json.trim()
+        cap_add_json
+    );
+
+    // Verify SecurityOpt was applied to the running container
+    let sec_opt_json = inspect_container_field(&provider, &cid, "{{json .HostConfig.SecurityOpt}}");
+    eprintln!("Container SecurityOpt: {}", sec_opt_json);
+    assert!(
+        sec_opt_json.contains("seccomp=unconfined"),
+        "Container should have seccomp=unconfined, inspect output: {}",
+        sec_opt_json
     );
 
     // Cleanup
+    let runtime = provider.info().provider_type.to_string();
     let _ = provider.remove(&cid, true).await;
-    let _ = std::process::Command::new(runtime)
+    let _ = std::process::Command::new(&runtime)
         .args(["rmi", &image_tag])
         .output();
     eprintln!("E2E feature container properties test passed!");
@@ -612,36 +640,22 @@ async fn test_e2e_feature_mounts() {
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify the mount is present via inspect
-    let runtime = if std::process::Command::new("podman")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        "podman"
-    } else {
-        "docker"
-    };
-
-    let inspect_output = std::process::Command::new(runtime)
-        .args(["inspect", "--format", "{{json .Mounts}}", &cid.0])
-        .output()
-        .expect("inspect should work");
-    let mounts_json = String::from_utf8_lossy(&inspect_output.stdout);
-    eprintln!("Container Mounts: {}", mounts_json.trim());
+    let mounts_json = inspect_container_field(&provider, &cid, "{{json .Mounts}}");
+    eprintln!("Container Mounts: {}", mounts_json);
     assert!(
         mounts_json.contains("/feature-mount-data"),
         "Container should have /feature-mount-data mount, inspect output: {}",
-        mounts_json.trim()
+        mounts_json
     );
 
     // Cleanup
+    let runtime = provider.info().provider_type.to_string();
     let _ = provider.remove(&cid, true).await;
-    let _ = std::process::Command::new(runtime)
+    let _ = std::process::Command::new(&runtime)
         .args(["rmi", &image_tag])
         .output();
     // Clean up the test volume
-    let _ = std::process::Command::new(runtime)
+    let _ = std::process::Command::new(&runtime)
         .args(["volume", "rm", "devc-test-feature-mount-vol"])
         .output();
     eprintln!("E2E feature mounts test passed!");
@@ -667,7 +681,7 @@ async fn test_e2e_feature_lifecycle_commands() {
     let dc_dir = workspace.path().join(".devcontainer");
     std::fs::create_dir_all(&dc_dir).unwrap();
 
-    // Create local feature with a postCreateCommand that writes a marker file
+    // Create local feature with postCreateCommand + updateContentCommand that write timestamps
     let feature_dir = dc_dir.join("lifecycle-feature");
     std::fs::create_dir_all(&feature_dir).unwrap();
     std::fs::write(
@@ -675,7 +689,8 @@ async fn test_e2e_feature_lifecycle_commands() {
         r#"{
             "id": "lifecycle-feature",
             "version": "1.0.0",
-            "postCreateCommand": "echo feature-post-create > /tmp/feature-lifecycle-marker"
+            "postCreateCommand": "date +%s.%N > /tmp/feature-lifecycle-marker",
+            "updateContentCommand": "echo feature-update-content > /tmp/feature-update-marker"
         }"#,
     )
     .unwrap();
@@ -693,7 +708,7 @@ async fn test_e2e_feature_lifecycle_commands() {
             "features": {
                 "./lifecycle-feature": true
             },
-            "postCreateCommand": "echo devcontainer-post-create > /tmp/devcontainer-lifecycle-marker"
+            "postCreateCommand": "date +%s.%N > /tmp/devcontainer-lifecycle-marker"
         }"#,
     )
     .unwrap();
@@ -713,12 +728,17 @@ async fn test_e2e_feature_lifecycle_commands() {
 
     assert_eq!(resolved.len(), 1);
 
-    // Merge feature properties — should pick up postCreateCommand
+    // Merge feature properties — should pick up postCreateCommand and updateContentCommand
     let feature_props = merge_feature_properties(&resolved);
     assert_eq!(
         feature_props.post_create_commands.len(),
         1,
         "Should have 1 feature postCreateCommand"
+    );
+    assert_eq!(
+        feature_props.update_content_commands.len(),
+        1,
+        "Should have 1 feature updateContentCommand"
     );
 
     // Build the enhanced image
@@ -792,7 +812,19 @@ async fn test_e2e_feature_lifecycle_commands() {
             .expect("devcontainer postCreateCommand should succeed");
     }
 
-    // Verify the feature marker file exists
+    // Run feature updateContentCommands (runs between onCreate and postCreate per spec)
+    run_feature_lifecycle_commands(
+        &provider,
+        &cid,
+        &feature_props.update_content_commands,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("feature updateContentCommand should succeed");
+
+    // Verify the feature timestamp marker exists
     let feature_marker = provider
         .exec(
             &cid,
@@ -803,13 +835,16 @@ async fn test_e2e_feature_lifecycle_commands() {
         )
         .await
         .expect("should read feature marker");
-    assert!(
-        feature_marker.output.contains("feature-post-create"),
-        "Feature postCreateCommand should have run, got: {}",
-        feature_marker.output.trim()
-    );
+    let feature_ts: f64 = feature_marker
+        .output
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!(
+            "Feature marker should be a timestamp, got '{}': {}",
+            feature_marker.output.trim(), e
+        ));
 
-    // Verify the devcontainer.json marker file exists
+    // Verify the devcontainer.json timestamp marker exists
     let dc_marker = provider
         .exec(
             &cid,
@@ -820,25 +855,44 @@ async fn test_e2e_feature_lifecycle_commands() {
         )
         .await
         .expect("should read devcontainer marker");
+    let dc_ts: f64 = dc_marker
+        .output
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!(
+            "Devcontainer marker should be a timestamp, got '{}': {}",
+            dc_marker.output.trim(), e
+        ));
+
+    // Feature commands run before devcontainer.json commands per spec
+    eprintln!("Feature ts: {}, Devcontainer ts: {}", feature_ts, dc_ts);
     assert!(
-        dc_marker.output.contains("devcontainer-post-create"),
-        "devcontainer.json postCreateCommand should have run, got: {}",
-        dc_marker.output.trim()
+        feature_ts <= dc_ts,
+        "Feature postCreateCommand ({}) should run before devcontainer postCreateCommand ({})",
+        feature_ts, dc_ts
+    );
+
+    // Verify the updateContentCommand marker was created
+    let update_marker = provider
+        .exec(
+            &cid,
+            &ExecConfig {
+                cmd: vec!["cat".into(), "/tmp/feature-update-marker".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("should read update content marker");
+    assert!(
+        update_marker.output.contains("feature-update-content"),
+        "Feature updateContentCommand should have run, got: {}",
+        update_marker.output.trim()
     );
 
     // Cleanup
+    let runtime = provider.info().provider_type.to_string();
     let _ = provider.remove(&cid, true).await;
-    let runtime = if std::process::Command::new("podman")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        "podman"
-    } else {
-        "docker"
-    };
-    let _ = std::process::Command::new(runtime)
+    let _ = std::process::Command::new(&runtime)
         .args(["rmi", &image_tag])
         .output();
     eprintln!("E2E feature lifecycle commands test passed!");
@@ -1003,6 +1057,27 @@ services:
         env_result.output.trim()
     );
 
+    // Verify the env var actually works at runtime when profile is sourced
+    let runtime_env = provider
+        .exec(
+            cid,
+            &ExecConfig {
+                cmd: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    ". /etc/profile.d/devc-features.sh && echo $MY_FEATURE_VAR".into(),
+                ],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("should source profile and echo env var");
+    assert!(
+        runtime_env.output.trim().contains("hello-from-feature"),
+        "MY_FEATURE_VAR should be 'hello-from-feature' at runtime, got: {}",
+        runtime_env.output.trim()
+    );
+
     // Cleanup
     let _ = provider
         .compose_down(&compose_file_strs, &project_name, project_dir)
@@ -1074,14 +1149,18 @@ async fn test_e2e_docker_in_docker_feature_install() {
         "docker-in-docker feature should have install.sh"
     );
 
-    // Verify privileged comes through from feature metadata
+    // Verify privileged and entrypoint come through from feature metadata BEFORE building
     let feature_props = merge_feature_properties(&resolved);
     eprintln!("Merged feature properties: {:?}", feature_props);
-    // The docker-in-docker feature declares privileged: true in its metadata
     assert!(
         feature_props.privileged,
         "docker-in-docker feature should request privileged mode, got: {:?}",
         feature_props
+    );
+    assert!(
+        feature_props.entrypoint.is_some(),
+        "docker-in-docker feature should declare an entrypoint, got: {:?}",
+        feature_props.entrypoint
     );
 
     // Build the enhanced image with the feature
@@ -1130,10 +1209,14 @@ async fn test_e2e_docker_in_docker_feature_install() {
         "sleep infinity".to_string(),
     ]);
 
-    // Verify privileged is set on the create config
+    // Verify privileged and entrypoint are set on the create config
     assert!(
         create_config.privileged,
         "Container create config should have privileged=true"
+    );
+    assert!(
+        create_config.entrypoint.is_some(),
+        "Container create config should have entrypoint set"
     );
 
     let cid = provider
@@ -1141,6 +1224,33 @@ async fn test_e2e_docker_in_docker_feature_install() {
         .await
         .expect("create should succeed");
     provider.start(&cid).await.expect("start should succeed");
+
+    // Verify privileged mode is actually set on the running container
+    let privileged_json = inspect_container_field(&provider, &cid, "{{json .HostConfig.Privileged}}");
+    eprintln!("Container Privileged: {}", privileged_json);
+    assert!(
+        privileged_json.contains("true"),
+        "Container should be privileged, inspect output: {}",
+        privileged_json
+    );
+
+    // Verify entrypoint was actually applied to the running container
+    let entrypoint_json = inspect_container_field(&provider, &cid, "{{json .Config.Entrypoint}}");
+    eprintln!("Container Entrypoint: {}", entrypoint_json);
+    assert!(
+        entrypoint_json.contains("docker-init.sh"),
+        "Container should have docker-init.sh entrypoint, inspect output: {}",
+        entrypoint_json
+    );
+
+    // Verify the feature mount (/var/lib/docker) exists on the running container
+    let mounts_json = inspect_container_field(&provider, &cid, "{{json .Mounts}}");
+    eprintln!("Container Mounts: {}", mounts_json);
+    assert!(
+        mounts_json.contains("/var/lib/docker"),
+        "Container should have /var/lib/docker mount, inspect output: {}",
+        mounts_json
+    );
 
     // Verify docker CLI is installed inside the container
     let docker_result = provider
@@ -1160,19 +1270,45 @@ async fn test_e2e_docker_in_docker_feature_install() {
         docker_result.output.trim()
     );
 
-    // Cleanup
-    let _ = provider.remove(&cid, true).await;
-    let runtime = if std::process::Command::new("podman")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        "podman"
+    // Verify dockerd starts via entrypoint — only works under Docker (not Podman)
+    // docker-in-docker requires a real Docker daemon host; Podman can't run dockerd inside.
+    if provider.info().provider_type == devc_provider::ProviderType::Docker {
+        eprintln!("Waiting for dockerd to start via entrypoint...");
+        let mut docker_info_ok = false;
+        for attempt in 1..=15 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let docker_info = provider
+                .exec(
+                    &cid,
+                    &ExecConfig {
+                        cmd: vec!["docker".into(), "info".into()],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("docker info exec should work");
+            eprintln!(
+                "  attempt {}/15: docker info exit_code={}",
+                attempt, docker_info.exit_code
+            );
+            if docker_info.exit_code == 0 {
+                docker_info_ok = true;
+                eprintln!("docker info output: {}", docker_info.output.trim());
+                break;
+            }
+        }
+        assert!(
+            docker_info_ok,
+            "docker info should succeed within 30s (dockerd running via entrypoint)"
+        );
     } else {
-        "docker"
-    };
-    let _ = std::process::Command::new(runtime)
+        eprintln!("Skipping dockerd verification: docker-in-docker not supported under Podman");
+    }
+
+    // Cleanup
+    let runtime = provider.info().provider_type.to_string();
+    let _ = provider.remove(&cid, true).await;
+    let _ = std::process::Command::new(&runtime)
         .args(["rmi", &image_tag])
         .output();
     eprintln!("E2E docker-in-docker feature install test passed!");
@@ -1428,18 +1564,9 @@ async fn test_e2e_tarball_url_feature_install() {
     );
 
     // Cleanup
+    let runtime = provider.info().provider_type.to_string();
     let _ = provider.remove(&cid, true).await;
-    let runtime = if std::process::Command::new("podman")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        "podman"
-    } else {
-        "docker"
-    };
-    let _ = std::process::Command::new(runtime)
+    let _ = std::process::Command::new(&runtime)
         .args(["rmi", &image_tag])
         .output();
     server.abort();

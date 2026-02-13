@@ -1294,6 +1294,19 @@ fi
                 ).await?;
             }
 
+            // Feature updateContentCommands run first (per spec)
+            if !feature_props.update_content_commands.is_empty() {
+                send_progress(progress, "Running feature updateContentCommand(s)...");
+                let details = provider.inspect(&container_id).await?;
+                if details.status != ContainerStatus::Running {
+                    provider.start(&container_id).await?;
+                }
+                run_feature_lifecycle_commands(
+                    provider, &container_id, &feature_props.update_content_commands,
+                    user, workspace_folder, remote_env,
+                ).await?;
+            }
+
             // Run updateContentCommand (between onCreate and postCreate per spec)
             if let Some(ref cmd) = container.devcontainer.update_content_command {
                 send_progress(progress, "Running updateContentCommand...");
@@ -1552,6 +1565,14 @@ fi
             send_progress(progress, "Running onCreate command...");
             run_lifecycle_command_with_env(
                 provider, &container_id, cmd, user, workspace_folder, remote_env,
+            ).await?;
+        }
+
+        if !feature_props.update_content_commands.is_empty() {
+            send_progress(progress, "Running feature updateContentCommand(s)...");
+            run_feature_lifecycle_commands(
+                provider, &container_id, &feature_props.update_content_commands,
+                user, workspace_folder, remote_env,
             ).await?;
         }
 

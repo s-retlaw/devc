@@ -409,7 +409,9 @@ impl Container {
             image: image.to_string(),
             name: Some(self.container_name()),
             cmd,
-            entrypoint: None,
+            entrypoint: feature_props
+                .and_then(|p| p.entrypoint.as_ref())
+                .map(|e| vec![e.clone()]),
             env,
             working_dir,
             user,
