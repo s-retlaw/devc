@@ -23,7 +23,7 @@ pub enum MockCall {
     Stop { id: String },
     Remove { id: String, force: bool },
     RemoveByName { name: String },
-    Exec { id: String, cmd: Vec<String> },
+    Exec { id: String, cmd: Vec<String>, working_dir: Option<String>, user: Option<String> },
     ExecInteractive { id: String },
     Inspect { id: String },
     List { all: bool },
@@ -277,6 +277,8 @@ impl ContainerProvider for MockProvider {
         self.record(MockCall::Exec {
             id: id.0.clone(),
             cmd: config.cmd.clone(),
+            working_dir: config.working_dir.clone(),
+            user: config.user.clone(),
         });
         if let Some(err) = self.exec_error.lock().unwrap().as_ref() {
             return Err(clone_provider_error(err));
