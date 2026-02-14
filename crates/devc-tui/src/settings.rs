@@ -12,6 +12,7 @@ pub enum SettingsSection {
     ContainerDefaults,
     Dotfiles,
     Ssh,
+    Credentials,
 }
 
 impl SettingsSection {
@@ -20,6 +21,7 @@ impl SettingsSection {
             SettingsSection::ContainerDefaults,
             SettingsSection::Dotfiles,
             SettingsSection::Ssh,
+            SettingsSection::Credentials,
         ]
     }
 
@@ -28,6 +30,7 @@ impl SettingsSection {
             Self::ContainerDefaults => "CONTAINER DEFAULTS",
             Self::Dotfiles => "DOTFILES",
             Self::Ssh => "SSH / CONNECTION",
+            Self::Credentials => "CREDENTIALS",
         }
     }
 
@@ -36,6 +39,7 @@ impl SettingsSection {
             Self::ContainerDefaults => &[SettingsField::DefaultShell, SettingsField::DefaultUser],
             Self::Dotfiles => &[SettingsField::DotfilesRepo, SettingsField::DotfilesLocal],
             Self::Ssh => &[SettingsField::SshEnabled, SettingsField::SshKeyPath],
+            Self::Credentials => &[SettingsField::CredentialsDocker, SettingsField::CredentialsGit],
         }
     }
 }
@@ -52,6 +56,9 @@ pub enum SettingsField {
     // SSH
     SshEnabled,
     SshKeyPath,
+    // Credentials
+    CredentialsDocker,
+    CredentialsGit,
 }
 
 impl SettingsField {
@@ -66,6 +73,9 @@ impl SettingsField {
             // SSH
             SettingsField::SshEnabled,
             SettingsField::SshKeyPath,
+            // Credentials
+            SettingsField::CredentialsDocker,
+            SettingsField::CredentialsGit,
         ]
     }
 
@@ -77,6 +87,8 @@ impl SettingsField {
             Self::DotfilesLocal => "Local Path",
             Self::SshEnabled => "SSH Enabled",
             Self::SshKeyPath => "SSH Key Path",
+            Self::CredentialsDocker => "Docker Credentials",
+            Self::CredentialsGit => "Git Credentials",
         }
     }
 
@@ -85,15 +97,16 @@ impl SettingsField {
             Self::DefaultShell | Self::DefaultUser => SettingsSection::ContainerDefaults,
             Self::DotfilesRepo | Self::DotfilesLocal => SettingsSection::Dotfiles,
             Self::SshEnabled | Self::SshKeyPath => SettingsSection::Ssh,
+            Self::CredentialsDocker | Self::CredentialsGit => SettingsSection::Credentials,
         }
     }
 
     pub fn is_editable(&self) -> bool {
-        !matches!(self, Self::SshEnabled)
+        !matches!(self, Self::SshEnabled | Self::CredentialsDocker | Self::CredentialsGit)
     }
 
     pub fn is_toggle(&self) -> bool {
-        matches!(self, Self::SshEnabled)
+        matches!(self, Self::SshEnabled | Self::CredentialsDocker | Self::CredentialsGit)
     }
 
     pub fn description(&self) -> &'static str {
@@ -104,6 +117,8 @@ impl SettingsField {
             Self::DotfilesLocal => "Local directory path for dotfiles",
             Self::SshEnabled => "Enable SSH for better TTY support",
             Self::SshKeyPath => "Path to SSH private key",
+            Self::CredentialsDocker => "Forward Docker registry credentials into containers",
+            Self::CredentialsGit => "Forward Git credentials into containers",
         }
     }
 }
@@ -118,8 +133,8 @@ pub struct SettingsState {
     input: TextInputState,
     /// Pending changes (not yet saved)
     pub draft: SettingsDraft,
-    /// Whether changes have been made
-    pub dirty: bool,
+    /// Snapshot of last-saved state for dirty detection
+    pub saved: SettingsDraft,
 }
 
 // Legacy accessor methods for backwards compatibility with existing code
@@ -136,7 +151,7 @@ impl SettingsState {
 }
 
 /// Draft settings that haven't been saved yet
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SettingsDraft {
     // Container defaults
     pub shell: String,
@@ -147,17 +162,26 @@ pub struct SettingsDraft {
     // SSH
     pub ssh_enabled: bool,
     pub ssh_key_path: Option<String>,
+    // Credentials
+    pub credentials_docker: bool,
+    pub credentials_git: bool,
 }
 
 impl SettingsState {
     pub fn new(config: &GlobalConfig) -> Self {
+        let draft = SettingsDraft::from_config(config);
         Self {
             focused: 0,
             editing: false,
             input: TextInputState::new(),
-            draft: SettingsDraft::from_config(config),
-            dirty: false,
+            saved: draft.clone(),
+            draft,
         }
+    }
+
+    /// Whether draft differs from last-saved state
+    pub fn dirty(&self) -> bool {
+        self.draft != self.saved
     }
 
     pub fn focused_field(&self) -> SettingsField {
@@ -190,9 +214,17 @@ impl SettingsState {
 
     pub fn toggle_field(&mut self) {
         let field = self.focused_field();
-        if let SettingsField::SshEnabled = field {
-            self.draft.ssh_enabled = !self.draft.ssh_enabled;
-            self.dirty = true;
+        match field {
+            SettingsField::SshEnabled => {
+                self.draft.ssh_enabled = !self.draft.ssh_enabled;
+            }
+            SettingsField::CredentialsDocker => {
+                self.draft.credentials_docker = !self.draft.credentials_docker;
+            }
+            SettingsField::CredentialsGit => {
+                self.draft.credentials_git = !self.draft.credentials_git;
+            }
+            _ => {}
         }
     }
 
@@ -205,7 +237,6 @@ impl SettingsState {
         if self.editing {
             let field = self.focused_field();
             self.draft.set_value(&field, self.input.value());
-            self.dirty = true;
             self.editing = false;
             self.input.clear();
         }
@@ -242,12 +273,15 @@ impl SettingsState {
         // SSH
         config.defaults.ssh_enabled = Some(self.draft.ssh_enabled);
         config.defaults.ssh_key_path = self.draft.ssh_key_path.clone();
+        // Credentials
+        config.credentials.docker = self.draft.credentials_docker;
+        config.credentials.git = self.draft.credentials_git;
     }
 
     /// Reset draft from config
     pub fn reset_from_config(&mut self, config: &GlobalConfig) {
         self.draft = SettingsDraft::from_config(config);
-        self.dirty = false;
+        self.saved = self.draft.clone();
         self.focused = 0;
     }
 }
@@ -261,6 +295,8 @@ impl SettingsDraft {
             dotfiles_local: config.defaults.dotfiles_local.clone(),
             ssh_enabled: config.defaults.ssh_enabled.unwrap_or(true),
             ssh_key_path: config.defaults.ssh_key_path.clone(),
+            credentials_docker: config.credentials.docker,
+            credentials_git: config.credentials.git,
         }
     }
 
@@ -274,6 +310,12 @@ impl SettingsDraft {
                 if self.ssh_enabled { "true" } else { "false" }.to_string()
             }
             SettingsField::SshKeyPath => self.ssh_key_path.clone().unwrap_or_default(),
+            SettingsField::CredentialsDocker => {
+                if self.credentials_docker { "true" } else { "false" }.to_string()
+            }
+            SettingsField::CredentialsGit => {
+                if self.credentials_git { "true" } else { "false" }.to_string()
+            }
         }
     }
 
@@ -289,6 +331,12 @@ impl SettingsDraft {
                 self.ssh_enabled = value == "true" || value == "1" || value == "yes";
             }
             SettingsField::SshKeyPath => self.ssh_key_path = value_opt,
+            SettingsField::CredentialsDocker => {
+                self.credentials_docker = value == "true" || value == "1" || value == "yes";
+            }
+            SettingsField::CredentialsGit => {
+                self.credentials_git = value == "true" || value == "1" || value == "yes";
+            }
         }
     }
 }
@@ -449,7 +497,7 @@ mod tests {
 
         state.confirm_edit();
         assert!(!state.editing);
-        assert!(state.dirty);
+        assert!(state.dirty());
         assert_eq!(state.draft.shell, "/bin/fish");
     }
 
@@ -562,6 +610,6 @@ mod tests {
 
         state.toggle_field();
         assert_eq!(state.draft.ssh_enabled, !initial);
-        assert!(state.dirty);
+        assert!(state.dirty());
     }
 }

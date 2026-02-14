@@ -1798,7 +1798,7 @@ impl App {
                         self.status_message = Some(format!("Failed to save: {}", e));
                     } else {
                         self.status_message = Some("Settings saved".to_string());
-                        self.settings_state.dirty = false;
+                        self.settings_state.saved = self.settings_state.draft.clone();
                     }
                 }
                 KeyCode::Char('r') => {

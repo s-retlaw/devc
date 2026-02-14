@@ -2,7 +2,7 @@
 
 use ansi_to_tui::IntoText;
 use crate::app::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
-use crate::settings::{SettingsField, SettingsSection};
+use crate::settings::SettingsSection;
 use crate::widgets::{centered_rect, DialogBuilder};
 use devc_core::DevcContainerStatus;
 use devc_provider::{ContainerStatus, DevcontainerSource};
@@ -167,7 +167,11 @@ fn draw_header_with_tabs(frame: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(i, tab)| {
             let number = format!("{}:", i + 1);
-            let label = tab.label();
+            let label = if *tab == Tab::Settings && app.settings_state.dirty() {
+                format!("{}*", tab.label())
+            } else {
+                tab.label().to_string()
+            };
             if *tab == app.tab {
                 Line::from(vec![
                     Span::styled(number, Style::default().fg(Color::Yellow)),
@@ -719,8 +723,13 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
         // Fields in this section
         for field in section.fields() {
             let is_focused = settings.focused == field_index;
-            let label = field.label();
             let value = settings.draft.get_value(field);
+            let field_dirty = value != settings.saved.get_value(field);
+            let label = if field_dirty {
+                format!("{}*", field.label())
+            } else {
+                field.label().to_string()
+            };
 
             let display_value = if settings.editing && is_focused {
                 // Show edit buffer with cursor
@@ -729,14 +738,10 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
                 let after = &settings.edit_buffer()[cursor_pos..];
                 format!("{}│{}", before, after)
             } else if field.is_toggle() {
-                if let SettingsField::SshEnabled = field {
-                    if value == "true" {
-                        "[●] Enabled  [ ] Disabled".to_string()
-                    } else {
-                        "[ ] Enabled  [●] Disabled".to_string()
-                    }
+                if value == "true" {
+                    "[●] Enabled  [ ] Disabled".to_string()
                 } else {
-                    value.clone()
+                    "[ ] Enabled  [●] Disabled".to_string()
                 }
             } else if value.is_empty() {
                 "(not set)".to_string()
@@ -751,7 +756,7 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
             };
 
             let line = Line::from(vec![
-                Span::styled(format!("   {:<16}", label), style.bold()),
+                Span::styled(format!("   {:<20}", label), style.bold()),
                 Span::styled(display_value, style),
             ]);
 
@@ -760,7 +765,7 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let title = if settings.dirty {
+    let title = if settings.dirty() {
         " Settings (unsaved changes) "
     } else {
         " Settings "
@@ -770,7 +775,7 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(if settings.dirty {
+            .border_style(if settings.dirty() {
                 Style::default().fg(Color::Yellow)
             } else {
                 Style::default()
