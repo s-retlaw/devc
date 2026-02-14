@@ -4363,4 +4363,100 @@ mod tests {
             }
         }
     }
+
+    // ==================== Duplicate Name Lookup ====================
+
+    #[tokio::test]
+    async fn test_get_by_id_unambiguous_with_duplicate_names() {
+        let tmp1 = create_test_workspace();
+        let tmp2 = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp2.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04"}"#,
+        )
+        .unwrap();
+
+        // Two containers with the same name but different workspaces (and thus different IDs)
+        let mut cs1 = make_container_state(
+            tmp1.path(),
+            DevcContainerStatus::Running,
+            Some("img1"),
+            Some("cid1"),
+        );
+        cs1.name = "myproject".to_string();
+
+        let mut cs2 = make_container_state(
+            tmp2.path(),
+            DevcContainerStatus::Running,
+            Some("img2"),
+            Some("cid2"),
+        );
+        cs2.name = "myproject".to_string();
+
+        // Ensure different IDs
+        assert_ne!(cs1.id, cs2.id);
+
+        let id1 = cs1.id.clone();
+        let id2 = cs2.id.clone();
+
+        let mut state = StateStore::new();
+        state.add(cs1);
+        state.add(cs2);
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager_with_state(mock, state);
+
+        // get() by ID always returns the exact container
+        let found1 = mgr.get(&id1).await.unwrap().unwrap();
+        assert_eq!(found1.id, id1);
+        assert_eq!(found1.container_id.as_deref(), Some("cid1"));
+
+        let found2 = mgr.get(&id2).await.unwrap().unwrap();
+        assert_eq!(found2.id, id2);
+        assert_eq!(found2.container_id.as_deref(), Some("cid2"));
+    }
+
+    #[tokio::test]
+    async fn test_get_by_name_returns_one_when_duplicates() {
+        let tmp1 = create_test_workspace();
+        let tmp2 = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp2.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04"}"#,
+        )
+        .unwrap();
+
+        let mut cs1 = make_container_state(
+            tmp1.path(),
+            DevcContainerStatus::Running,
+            Some("img1"),
+            Some("cid1"),
+        );
+        cs1.name = "myproject".to_string();
+
+        let mut cs2 = make_container_state(
+            tmp2.path(),
+            DevcContainerStatus::Running,
+            Some("img2"),
+            Some("cid2"),
+        );
+        cs2.name = "myproject".to_string();
+
+        let mut state = StateStore::new();
+        state.add(cs1);
+        state.add(cs2);
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager_with_state(mock, state);
+
+        // get_by_name returns *some* container — the result is non-deterministic
+        // when there are duplicates, but it shouldn't error
+        let found = mgr.get_by_name("myproject").await.unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "myproject");
+    }
 }

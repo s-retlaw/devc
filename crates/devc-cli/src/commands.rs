@@ -304,7 +304,8 @@ pub async fn resize(
 
     let state = match container {
         Some(ref name) => {
-            state_store.find_by_name(name)
+            state_store.get(name)
+                .or_else(|| state_store.find_by_name(name))
                 .ok_or_else(|| anyhow!("Container '{}' not found", name))?
         }
         None => {
@@ -694,13 +695,13 @@ pub async fn config(edit: bool) -> Result<()> {
 
 /// Find a container by name or ID
 async fn find_container(manager: &ContainerManager, name_or_id: &str) -> Result<ContainerState> {
-    // Try by name first
-    if let Some(state) = manager.get_by_name(name_or_id).await? {
+    // Try by ID first (exact match — UUIDs from selector)
+    if let Some(state) = manager.get(name_or_id).await? {
         return Ok(state);
     }
 
-    // Try by ID
-    if let Some(state) = manager.get(name_or_id).await? {
+    // Try by name (user typed a name on the command line)
+    if let Some(state) = manager.get_by_name(name_or_id).await? {
         return Ok(state);
     }
 

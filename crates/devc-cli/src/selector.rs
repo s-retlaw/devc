@@ -111,7 +111,7 @@ fn status_color(status: &DevcContainerStatus) -> Color {
 
 /// Interactively select a container from the list
 ///
-/// Returns the selected container's name, or an error if cancelled or no containers available.
+/// Returns the selected container's unique ID, or an error if cancelled or no containers available.
 pub fn select_container(
     containers: &[ContainerState],
     context: SelectionContext,
@@ -164,7 +164,7 @@ pub fn select_container(
                     KeyCode::Enter => {
                         // Clear the selector UI
                         clear_selector(&mut stdout, total)?;
-                        return Ok(filtered[selected].name.clone());
+                        return Ok(filtered[selected].id.clone());
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
                         // Clear the selector UI
