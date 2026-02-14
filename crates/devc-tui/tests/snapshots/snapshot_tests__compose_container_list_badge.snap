@@ -6,10 +6,10 @@ expression: output
 │ 1:Containers  │  2:Providers  │  3:Settings                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Containers ──────────────────────────────────────────────────────────────────┐
-│      Name                         Status       Provider Workspace            │
+│      Name                     Source   Status       Provider Workspace       │
 │                                                                              │
-│▶ ●   compose-app [compose:3]      running      docker   /tmp/test            │
-│  ●   standalone                   running      docker   /tmp/test            │
+│▶ ●   compose-app [compose:3]  devc     running      docker   /tmp/test       │
+│  ●   standalone               devc     running      docker   /tmp/test       │
 │                                                                              │
 │                                                                              │
 │                                                                              │

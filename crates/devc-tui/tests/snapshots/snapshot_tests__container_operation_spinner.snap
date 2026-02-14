@@ -6,10 +6,10 @@ expression: output
 │ 1:Containers  │  2:Providers  │  3:Settings                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Containers ──────────────────────────────────────────────────────────────────┐
-│      Name                         Status       Provider Workspace            │
+│      Name                     Source   Status       Provider Workspace       │
 │                                                                              │
-│▶ ●   my-rust-project              running      docker   /tmp/test            │
-│  ○   python-api                   stopped      docker   /tmp/test            │
+│▶ ●   my-rust-project          devc     running      docker   /tmp/test       │
+│  ○   python-api               devc     stopped      docker   /tmp/test       │
 │                                                                              │
 │                   ┌ Stopping ────────────────────────────┐                   │
 │                   │                                      │                   │

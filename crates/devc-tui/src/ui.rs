@@ -238,6 +238,13 @@ fn container_list_footer(app: &App) -> String {
         }
     }
 
+    // Show forget option for non-devc containers
+    if let Some(container) = app.selected_container() {
+        if container.source != DevcontainerSource::Devc && !container.status.is_available() {
+            keys.push("f: Forget");
+        }
+    }
+
     let action_part = keys.join("  ");
     if action_part.is_empty() {
         "D: Discover  j/k: Navigate  Enter: Details  ?: Help  q: Quit".to_string()
@@ -405,6 +412,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     let header = Row::new(vec![
         Cell::from(" "),
         Cell::from("Name"),
+        Cell::from("Source"),
         Cell::from("Status"),
         Cell::from("Provider"),
         Cell::from("Workspace"),
@@ -464,6 +472,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
                 Cell::from(name_display).style(Style::default().bold()),
+                Cell::from(container.source.to_string()).style(Style::default().fg(Color::DarkGray)),
                 Cell::from(container.status.to_string()).style(Style::default().fg(status_color)),
                 Cell::from(container.provider.to_string()),
                 Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
@@ -474,7 +483,8 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     // Define column widths
     let widths = [
         Constraint::Length(3),   // Status icon
-        Constraint::Length(28),  // Name
+        Constraint::Length(24),  // Name
+        Constraint::Length(8),   // Source
         Constraint::Length(12),  // Status
         Constraint::Length(8),   // Provider
         Constraint::Min(10),     // Workspace (takes remaining)
@@ -1608,6 +1618,14 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 app,
                 area,
                 &format!("Adopt '{}' into devc management?", container_name),
+            );
+        }
+        Some(ConfirmAction::Forget { name, .. }) => {
+            draw_simple_confirm_dialog(
+                frame,
+                app,
+                area,
+                &format!("Forget '{}'? (container will not be deleted)", name),
             );
         }
         Some(ConfirmAction::CancelBuild) => {

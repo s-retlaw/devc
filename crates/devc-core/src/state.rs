@@ -5,7 +5,7 @@
 use crate::Result;
 use chrono::{DateTime, Utc};
 use devc_config::GlobalConfig;
-use devc_provider::ProviderType;
+use devc_provider::{DevcontainerSource, ProviderType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,13 @@ pub struct ContainerState {
     /// Docker Compose service name (if this container uses compose)
     #[serde(default)]
     pub compose_service: Option<String>,
+    /// Source/creator of this container
+    #[serde(default = "default_devc_source")]
+    pub source: DevcontainerSource,
+}
+
+fn default_devc_source() -> DevcontainerSource {
+    DevcontainerSource::Devc
 }
 
 /// devc container status (separate from Docker status)
@@ -239,6 +246,7 @@ impl ContainerState {
             metadata: HashMap::new(),
             compose_project: None,
             compose_service: None,
+            source: DevcontainerSource::Devc,
         }
     }
 

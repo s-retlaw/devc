@@ -7,8 +7,8 @@ use crate::{
 };
 use devc_config::{GlobalConfig, ImageSource};
 use devc_provider::{
-    ContainerId, ContainerProvider, ContainerStatus, DiscoveredContainer, ExecStream, LogConfig,
-    ProviderType,
+    ContainerId, ContainerProvider, ContainerStatus, DevcontainerSource, DiscoveredContainer,
+    ExecStream, LogConfig, ProviderType,
 };
 use crate::features;
 use std::collections::HashMap;
@@ -2147,6 +2147,7 @@ fi
         &self,
         container_id: &str,
         workspace_path: Option<&str>,
+        source: DevcontainerSource,
     ) -> Result<ContainerState> {
         let provider = self.require_provider()?;
         let provider_type = self
@@ -2210,6 +2211,7 @@ fi
         container_state.container_id = Some(container_id.to_string());
         container_state.image_id = Some(details.image_id.clone());
         container_state.status = status;
+        container_state.source = source;
 
         // Save state
         {
@@ -2219,6 +2221,14 @@ fi
         }
 
         Ok(container_state)
+    }
+
+    /// Remove a container from devc tracking without stopping or deleting the runtime container
+    pub async fn forget(&self, id: &str) -> Result<()> {
+        let mut state = self.state.write().await;
+        state.remove(id);
+        state.save()?;
+        Ok(())
     }
 }
 

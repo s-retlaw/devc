@@ -459,6 +459,12 @@ impl ContainerProvider for CliProvider {
             args.push(format!("--workdir={}", wd));
         }
 
+        if let Some(ref user) = config.user {
+            args.push(format!("--user={}", user));
+        }
+
+        args.extend(Self::env_args(&config.env));
+
         args.push(id.0.clone());
         args.extend(config.cmd.clone());
 

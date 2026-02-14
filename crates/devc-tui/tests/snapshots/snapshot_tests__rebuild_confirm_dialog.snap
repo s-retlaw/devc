@@ -6,9 +6,9 @@ expression: output
 │ 1:Containers  │  2:Providers  │  3:Settings                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Containers ──────────────────────────────────────────────────────────────────┐
-│      Name                         Status       Provider Workspace            │
+│      Name                     Source   Status       Provider Workspace       │
 │                                                                              │
-│▶ ●   test-container               running      docker   /tmp/test            │
+│▶ ●   test-container           devc     running      docker   /tmp/test       │
 │              ┌ Rebuild Container ─────────────────────────────┐              │
 │              │                                                │              │
 │              │            Rebuild 'test-container'?           │              │

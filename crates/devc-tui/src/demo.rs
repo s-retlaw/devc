@@ -4,7 +4,7 @@ use crate::event::{Event, EventHandler};
 use crate::AppResult;
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_core::{ContainerState, DevcContainerStatus};
-use devc_provider::ProviderType;
+use devc_provider::{DevcontainerSource, ProviderType};
 use ratatui::prelude::*;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -50,6 +50,7 @@ impl DemoApp {
                 metadata: Default::default(),
                 compose_project: None,
                 compose_service: None,
+                source: DevcontainerSource::Devc,
             },
             ContainerState {
                 id: "def456ghi789".to_string(),
@@ -65,6 +66,7 @@ impl DemoApp {
                 metadata: Default::default(),
                 compose_project: None,
                 compose_service: None,
+                source: DevcontainerSource::VsCode,
             },
             ContainerState {
                 id: "ghi789jkl012".to_string(),
@@ -80,6 +82,7 @@ impl DemoApp {
                 metadata: Default::default(),
                 compose_project: None,
                 compose_service: None,
+                source: DevcontainerSource::Devc,
             },
             ContainerState {
                 id: "jkl012mno345".to_string(),
@@ -95,6 +98,7 @@ impl DemoApp {
                 metadata: Default::default(),
                 compose_project: None,
                 compose_service: None,
+                source: DevcontainerSource::Other,
             },
         ];
 

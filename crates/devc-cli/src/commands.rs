@@ -1107,7 +1107,7 @@ pub async fn adopt(manager: &ContainerManager, container: Option<String>) -> Res
     println!("Adopting '{}'...", to_adopt.name);
 
     // Adopt the container
-    let state = manager.adopt(&to_adopt.id.0, to_adopt.workspace_path.as_deref()).await?;
+    let state = manager.adopt(&to_adopt.id.0, to_adopt.workspace_path.as_deref(), to_adopt.source.clone()).await?;
 
     println!("Adopted container: {}", state.name);
     println!("\nYou can now use devc commands with this container:");

@@ -12,7 +12,7 @@ use crate::{resume_tui, suspend_tui, ui};
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
 use devc_core::{Container, ContainerManager, ContainerState, DevcContainerStatus};
-use devc_provider::{create_provider, detect_available_providers, ContainerProvider, DiscoveredContainer, ProviderType};
+use devc_provider::{create_provider, detect_available_providers, ContainerProvider, DevcontainerSource, DiscoveredContainer, ProviderType};
 use ratatui::prelude::*;
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
@@ -103,6 +103,12 @@ pub enum ConfirmAction {
         container_id: String,
         container_name: String,
         workspace_path: Option<String>,
+        source: DevcontainerSource,
+    },
+    /// Forget (untrack) a non-devc container without deleting it
+    Forget {
+        id: String,
+        name: String,
     },
     /// Cancel an in-progress build/operation
     CancelBuild,
@@ -428,6 +434,7 @@ impl App {
             metadata: HashMap::new(),
             compose_project: None,
             compose_service: None,
+            source: DevcontainerSource::Devc,
         }
     }
 
@@ -461,6 +468,7 @@ impl App {
             metadata: HashMap::new(),
             compose_project: Some(project.to_string()),
             compose_service: Some(service.to_string()),
+            source: DevcontainerSource::Devc,
         }
     }
 
@@ -1443,6 +1451,7 @@ impl App {
                                 container_id: container.id.0.clone(),
                                 container_name: container.name.clone(),
                                 workspace_path: container.workspace_path.clone(),
+                                source: container.source.clone(),
                             });
                             self.view = View::Confirm;
                         } else {
@@ -1508,6 +1517,21 @@ impl App {
                             self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
                             self.dialog_focus = DialogFocus::Cancel;
                             self.view = View::Confirm;
+                        }
+                    }
+                }
+                KeyCode::Char('f') => {
+                    if !self.containers.is_empty() {
+                        let container = &self.containers[self.selected];
+                        if container.source != DevcontainerSource::Devc && !container.status.is_available() {
+                            self.confirm_action = Some(ConfirmAction::Forget {
+                                id: container.id.clone(),
+                                name: container.name.clone(),
+                            });
+                            self.dialog_focus = DialogFocus::Cancel;
+                            self.view = View::Confirm;
+                        } else if container.source == DevcontainerSource::Devc {
+                            self.status_message = Some("Cannot forget devc-created containers".to_string());
                         }
                     }
                 }
@@ -2998,14 +3022,14 @@ impl App {
                     self.retry_connection().await?;
                 }
             }
-            ConfirmAction::Adopt { container_id, container_name, workspace_path } => {
+            ConfirmAction::Adopt { container_id, container_name, workspace_path, source } => {
                 self.loading = true;
                 self.status_message = Some(format!("Adopting '{}'...", container_name));
 
                 // Use a block to ensure the read guard is dropped before refresh_containers
                 let adopt_result = {
                     let manager = self.manager.read().await;
-                    manager.adopt(&container_id, workspace_path.as_deref()).await
+                    manager.adopt(&container_id, workspace_path.as_deref(), source).await
                 };
 
                 match adopt_result {
@@ -3017,6 +3041,26 @@ impl App {
                     }
                     Err(e) => {
                         self.status_message = Some(format!("Failed to adopt: {}", e));
+                    }
+                }
+                self.loading = false;
+            }
+            ConfirmAction::Forget { id, name } => {
+                self.loading = true;
+                self.status_message = Some(format!("Forgetting '{}'...", name));
+
+                let forget_result = {
+                    let manager = self.manager.read().await;
+                    manager.forget(&id).await
+                };
+
+                match forget_result {
+                    Ok(()) => {
+                        self.status_message = Some(format!("Forgot '{}' (container still running)", name));
+                        self.refresh_containers().await?;
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to forget: {}", e));
                     }
                 }
                 self.loading = false;
@@ -3158,6 +3202,7 @@ fn make_available_entry(
         metadata: std::collections::HashMap::new(),
         compose_project: None,
         compose_service: None,
+        source: DevcontainerSource::Devc,
     }
 }
 

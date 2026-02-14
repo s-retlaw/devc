@@ -6,9 +6,9 @@ expression: output
 │ 1:Contai│Name:        my-rust-project                              │         │
 └─────────│Status:      running                                      │─────────┘
 ┌ Containe│Provider:    docker                                       │─────────┐
-│      Nam│ID:          test-my-rust-project                         │         │
+│      Nam│ID:          test-my-rust-project                         │ce       │
 │         │                                                          │         │
-│▶ ●   my-│Workspace:   /tmp/test                                    │         │
+│▶ ●   my-│Workspace:   /tmp/test                                    │st       │
 │         │Config:      /tmp/test/.devcontainer/devcontainer.json    │         │
 │         │                                                          │         │
 │         │Image ID:    sha256:abc123                                │         │
