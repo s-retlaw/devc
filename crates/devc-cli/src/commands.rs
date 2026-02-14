@@ -486,6 +486,7 @@ pub async fn list(manager: &ContainerManager, discover: bool, sync: bool) -> Res
 
     for container in containers {
         let status_symbol = match container.status {
+            DevcContainerStatus::Available => "◌",
             DevcContainerStatus::Running => "●",
             DevcContainerStatus::Stopped => "○",
             DevcContainerStatus::Building => "◐",

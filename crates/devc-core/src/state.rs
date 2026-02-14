@@ -48,6 +48,8 @@ pub struct ContainerState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DevcContainerStatus {
+    /// Config found on disk but not registered — ephemeral, never persisted
+    Available,
     /// Configuration loaded but not built
     Configured,
     /// Image is being built
@@ -67,6 +69,7 @@ pub enum DevcContainerStatus {
 impl std::fmt::Display for DevcContainerStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Available => write!(f, "available"),
             Self::Configured => write!(f, "configured"),
             Self::Building => write!(f, "building"),
             Self::Built => write!(f, "built"),
@@ -75,6 +78,13 @@ impl std::fmt::Display for DevcContainerStatus {
             Self::Stopped => write!(f, "stopped"),
             Self::Failed => write!(f, "failed"),
         }
+    }
+}
+
+impl DevcContainerStatus {
+    /// Whether this is an ephemeral Available entry (not registered)
+    pub fn is_available(self) -> bool {
+        matches!(self, Self::Available)
     }
 }
 
@@ -249,7 +259,9 @@ impl ContainerState {
     pub fn can_remove(&self) -> bool {
         !matches!(
             self.status,
-            DevcContainerStatus::Running | DevcContainerStatus::Building
+            DevcContainerStatus::Available
+                | DevcContainerStatus::Running
+                | DevcContainerStatus::Building
         )
     }
 
@@ -433,6 +445,17 @@ mod tests {
         assert!(make_state("d", DevcContainerStatus::Failed).can_remove());
         assert!(!make_state("e", DevcContainerStatus::Running).can_remove());
         assert!(!make_state("f", DevcContainerStatus::Building).can_remove());
+        assert!(!make_state("g", DevcContainerStatus::Available).can_remove());
+    }
+
+    #[test]
+    fn test_available_status() {
+        let cs = make_state("avail", DevcContainerStatus::Available);
+        assert!(cs.status.is_available());
+        assert!(!cs.can_start());
+        assert!(!cs.can_stop());
+        assert!(!cs.can_remove());
+        assert_eq!(cs.status.to_string(), "available");
     }
 
     #[test]

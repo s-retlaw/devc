@@ -12,7 +12,7 @@ use devc_provider::{
 };
 use crate::features;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -138,6 +138,14 @@ impl ContainerManager {
         })
     }
 
+    /// Load a Container from config, using this manager's GlobalConfig
+    /// instead of loading from disk (so test overrides are respected).
+    fn load_container(&self, config_path: &Path) -> Result<Container> {
+        let mut container = Container::from_config(config_path)?;
+        container.global_config = self.global_config.clone();
+        Ok(container)
+    }
+
     /// Shared preamble for exec/shell operations.
     /// Validates the container is running, extracts provider ID, and loads feature properties.
     async fn prepare_exec(&self, id: &str) -> Result<ExecContext<'_>> {
@@ -244,7 +252,7 @@ impl ContainerManager {
             .ok_or_else(|| CoreError::InvalidState("Container has no container ID".to_string()))?;
         let cid = ContainerId::new(container_id);
 
-        let user = Container::from_config(&container_state.config_path)
+        let user = self.load_container(&container_state.config_path)
             .ok()
             .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()));
 
@@ -311,7 +319,7 @@ impl ContainerManager {
             .provider_type()
             .ok_or_else(|| CoreError::NotConnected("Cannot init: no provider available".to_string()))?;
 
-        let container = Container::from_config(config_path)?;
+        let container = self.load_container(config_path)?;
 
         let mut state = self.state.write().await;
 
@@ -359,6 +367,44 @@ impl ContainerManager {
         Ok(newly_registered)
     }
 
+    /// Find devcontainer.json configs on disk that are NOT already registered
+    /// in the state store. Returns (name, config_path, workspace_path) tuples.
+    /// Does NOT register anything — the results are ephemeral.
+    pub async fn find_unregistered_configs(
+        &self,
+        workspace_dir: &Path,
+    ) -> Vec<(String, PathBuf, PathBuf)> {
+        use devc_config::DevContainerConfig;
+
+        let all_configs = DevContainerConfig::load_all_from_dir(workspace_dir);
+        let state = self.state.read().await;
+        let mut unregistered = Vec::new();
+
+        for (_config, config_path) in all_configs {
+            if state.find_by_config_path(&config_path).is_some() {
+                continue; // already registered
+            }
+            match self.load_container(&config_path) {
+                Ok(container) => {
+                    unregistered.push((
+                        container.name.clone(),
+                        container.config_path.clone(),
+                        container.workspace_path.clone(),
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping config {}: {}",
+                        config_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        unregistered
+    }
+
     /// Build a container image
     pub async fn build(&self, id: &str) -> Result<String> {
         self.build_with_options(id, false).await
@@ -377,7 +423,7 @@ impl ContainerManager {
         };
 
         // Load container config
-        let container = Container::from_config(&container_state.config_path)?;
+        let container = self.load_container(&container_state.config_path)?;
 
         // Update status to building
         {
@@ -566,7 +612,7 @@ impl ContainerManager {
             CoreError::InvalidState("Container image not built yet".to_string())
         })?;
 
-        let container = Container::from_config(&container_state.config_path)?;
+        let container = self.load_container(&container_state.config_path)?;
 
         // Deserialize feature properties from build metadata (if any)
         let feature_props = container_state
@@ -632,11 +678,11 @@ impl ContainerManager {
 
         // Handle compose start: bring up all services
         let is_compose = container_state.compose_project.is_some()
-            || Container::from_config(&container_state.config_path)
+            || self.load_container(&container_state.config_path)
                 .map(|c| c.is_compose())
                 .unwrap_or(false);
         if is_compose {
-            let container = Container::from_config(&container_state.config_path)?;
+            let container = self.load_container(&container_state.config_path)?;
             if let Some(compose_files) = container.compose_files() {
                 let owned = compose_file_strs(&compose_files);
                 let compose_file_refs: Vec<&str> =
@@ -738,7 +784,7 @@ impl ContainerManager {
         }
 
         // Run post-start commands (feature commands first, then devcontainer.json)
-        let container = Container::from_config(&container_state.config_path)?;
+        let container = self.load_container(&container_state.config_path)?;
         let feature_props = get_feature_properties(&container_state);
         let merged_env = merge_remote_env(
             container.devcontainer.remote_env.as_ref(),
@@ -824,7 +870,7 @@ fi
 
         // Handle compose stop: bring down all services
         if let Some(ref compose_project) = container_state.compose_project {
-            let container = Container::from_config(&container_state.config_path)?;
+            let container = self.load_container(&container_state.config_path)?;
             if let Some(compose_files) = container.compose_files() {
                 let owned = compose_file_strs(&compose_files);
                 let compose_file_refs: Vec<&str> =
@@ -919,7 +965,7 @@ fi
 
         // Handle compose teardown
         if let Some(ref compose_project) = container_state.compose_project {
-            let container = Container::from_config(&container_state.config_path)?;
+            let container = self.load_container(&container_state.config_path)?;
             if let Some(compose_files) = container.compose_files() {
                 let owned = compose_file_strs(&compose_files);
                 let compose_file_refs: Vec<&str> =
@@ -1032,7 +1078,7 @@ fi
         }
 
         // 3. Run initializeCommand on host before build (per spec)
-        let container = Container::from_config(&container_state.config_path)?;
+        let container = self.load_container(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.initialize_command {
             crate::run_host_command(cmd, &container.workspace_path, None).await?;
         }
@@ -1093,7 +1139,7 @@ fi
         }
 
         // 3. Run initializeCommand on host before build (per spec)
-        let container = Container::from_config(&container_state.config_path)?;
+        let container = self.load_container(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.initialize_command {
             let _ = progress.send("Running initializeCommand on host...".to_string());
             crate::run_host_command(cmd, &container.workspace_path, Some(&progress)).await?;
@@ -1127,7 +1173,7 @@ fi
         };
 
         // Load container config
-        let container = Container::from_config(&container_state.config_path)?;
+        let container = self.load_container(&container_state.config_path)?;
 
         // Update status to building
         {
@@ -1337,7 +1383,7 @@ fi
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
-        let container = Container::from_config(&container_state.config_path)?;
+        let container = self.load_container(&container_state.config_path)?;
         if let Some(ref wait_for) = container.devcontainer.wait_for {
             tracing::info!("waitFor is set to '{}' (async lifecycle deferral not yet implemented)", wait_for);
         }
@@ -1821,7 +1867,7 @@ fi
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
-        let container = Container::from_config(&container_state.config_path)?;
+        let container = self.load_container(&container_state.config_path)?;
         let container_id_str = container_state.container_id.as_ref().ok_or_else(|| {
             CoreError::InvalidState("Container not created yet".to_string())
         })?;
@@ -1872,7 +1918,7 @@ fi
 
         // Try loading config for remoteEnv/user/workdir; fall back to a basic config
         // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
-        let (config, user_for_creds) = match Container::from_config(&ctx.container_state.config_path) {
+        let (config, user_for_creds) = match self.load_container(&ctx.container_state.config_path) {
             Ok(container) => {
                 let user = container.devcontainer.effective_user().map(|s| s.to_string());
                 (container.exec_config_with_feature_env(cmd, tty, tty, ctx.feature_props.remote_env_option()), user)
@@ -1919,7 +1965,7 @@ fi
     /// Execute a command interactively with PTY
     pub async fn exec_interactive(&self, id: &str, cmd: Vec<String>) -> Result<ExecStream> {
         let ctx = self.prepare_exec(id).await?;
-        let container = Container::from_config(&ctx.container_state.config_path)?;
+        let container = self.load_container(&ctx.container_state.config_path)?;
 
         self.refresh_credentials(
             ctx.provider,
@@ -1946,7 +1992,7 @@ fi
     /// Open an interactive shell in a container
     pub async fn shell(&self, id: &str) -> Result<ExecStream> {
         let ctx = self.prepare_exec(id).await?;
-        let container = Container::from_config(&ctx.container_state.config_path)?;
+        let container = self.load_container(&ctx.container_state.config_path)?;
 
         self.refresh_credentials(
             ctx.provider,
@@ -2084,7 +2130,7 @@ fi
         &self,
         state: &ContainerState,
     ) -> Result<devc_config::DevContainerConfig> {
-        let container = Container::from_config(&state.config_path)?;
+        let container = self.load_container(&state.config_path)?;
         Ok(container.devcontainer)
     }
 

@@ -11,7 +11,7 @@ expression: output
 │▶ ●   test-container               running      docker   /tmp/test            │
 │              ┌ Confirm ───────────────────────────────────────┐              │
 │              │                                                │              │
-│              │       Delete container 'test-container'?       │              │
+│              │     Remove 'test-container' from registry?     │              │
 │              │                                                │              │
 │              │                                                │              │
 │              │              Confirm        Cancel             │              │

@@ -86,6 +86,7 @@ impl Drop for RawModeGuard {
 /// Get status symbol for a container
 fn status_symbol(status: &DevcContainerStatus) -> &'static str {
     match status {
+        DevcContainerStatus::Available => "◌",
         DevcContainerStatus::Running => "●",
         DevcContainerStatus::Stopped => "○",
         DevcContainerStatus::Building => "◐",
@@ -99,6 +100,7 @@ fn status_symbol(status: &DevcContainerStatus) -> &'static str {
 /// Get color for a status
 fn status_color(status: &DevcContainerStatus) -> Color {
     match status {
+        DevcContainerStatus::Available => Color::DarkGrey,
         DevcContainerStatus::Running => Color::Green,
         DevcContainerStatus::Stopped => Color::DarkGrey,
         DevcContainerStatus::Building => Color::Yellow,

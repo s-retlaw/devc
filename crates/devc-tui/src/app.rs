@@ -16,6 +16,8 @@ use devc_provider::{create_provider, detect_available_providers, ContainerProvid
 use ratatui::prelude::*;
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -464,14 +466,15 @@ impl App {
 
     /// Create a new application
     pub async fn new(manager: ContainerManager, workspace_dir: Option<&std::path::Path>) -> AppResult<Self> {
-        // Auto-discover local devcontainer.json configs before listing
+        let mut containers = manager.list().await?;
+
+        // Append ephemeral Available entries for unregistered configs
         if let Some(dir) = workspace_dir {
-            if let Err(e) = manager.auto_discover_configs(dir).await {
-                tracing::warn!("Auto-discovery failed: {}", e);
+            let unregistered = manager.find_unregistered_configs(dir).await;
+            for (name, config_path, ws_path) in unregistered {
+                containers.push(make_available_entry(name, config_path, ws_path));
             }
         }
-
-        let containers = manager.list().await?;
         let config = GlobalConfig::load().unwrap_or_default();
         let active_provider = manager.provider_type();
         let connection_error = manager.connection_error().map(|s| s.to_string());
@@ -587,6 +590,10 @@ impl App {
             return;
         }
         let container = &self.containers[self.selected];
+        if container.status.is_available() {
+            self.status_message = Some("Use 'b' to build or 'u' to build and start".to_string());
+            return;
+        }
         if let Some(new_provider) = self.active_provider {
             let old_provider = container.provider;
             let provider_change = if old_provider != new_provider {
@@ -603,6 +610,70 @@ impl App {
             });
             self.view = View::Confirm;
         }
+    }
+
+    /// Build an Available (unregistered) entry: register it, then run build with log output.
+    async fn build_available(&mut self) -> AppResult<()> {
+        if self.containers.is_empty() || !self.is_connected() {
+            if !self.is_connected() {
+                self.status_message = Some("Not connected to provider".to_string());
+            }
+            return Ok(());
+        }
+
+        let container = &self.containers[self.selected];
+        if !container.status.is_available() {
+            self.status_message = Some("Already registered — use 'u' or 'R'".to_string());
+            return Ok(());
+        }
+
+        // Register the Available entry
+        let config_path = container.config_path.clone();
+        let result = self.manager.read().await.init_from_config(&config_path).await;
+        let id = match result {
+            Ok(Some(cs)) => cs.id,
+            Ok(None) => {
+                self.status_message = Some("Already registered".to_string());
+                self.refresh_containers().await?;
+                return Ok(());
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Failed to register: {}", e));
+                return Ok(());
+            }
+        };
+
+        // Refresh so the registered entry replaces the ephemeral one
+        self.refresh_containers().await?;
+        if let Some(pos) = self.containers.iter().position(|c| c.id == id) {
+            self.selected = pos;
+            self.containers_table_state.select(Some(pos));
+        }
+
+        // Switch to build output view
+        self.loading = true;
+        self.view = View::BuildOutput;
+        self.build_output.clear();
+        self.build_output_scroll = 0;
+        self.build_auto_scroll = true;
+        self.build_complete = false;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.build_progress_rx = Some(rx);
+
+        let manager = Arc::clone(&self.manager);
+        tokio::spawn(async move {
+            match manager.read().await.rebuild_with_progress(&id, false, tx.clone()).await {
+                Ok(()) => {
+                    // Success message is sent by rebuild_with_progress
+                }
+                Err(e) => {
+                    let _ = tx.send(format!("Error: Build failed: {}", e));
+                }
+            }
+        });
+
+        Ok(())
     }
 
     /// Create a CliProvider for the given provider type.
@@ -1431,14 +1502,21 @@ impl App {
                 KeyCode::Char('d') | KeyCode::Delete => {
                     if !self.containers.is_empty() {
                         let container = &self.containers[self.selected];
-                        self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
-                        self.dialog_focus = DialogFocus::Cancel;
-                        self.view = View::Confirm;
+                        if container.status.is_available() {
+                            self.status_message = Some("Not registered — nothing to remove".to_string());
+                        } else {
+                            self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
+                            self.dialog_focus = DialogFocus::Cancel;
+                            self.view = View::Confirm;
+                        }
                     }
                 }
                 KeyCode::Char('r') | KeyCode::F(5) => {
                     self.refresh_containers().await?;
                     self.status_message = Some("Refreshed".to_string());
+                }
+                KeyCode::Char('b') => {
+                    self.build_available().await?;
                 }
                 KeyCode::Char('R') => {
                     self.start_rebuild_dialog();
@@ -1756,6 +1834,9 @@ impl App {
             }
             KeyCode::Char('l') => {
                 self.fetch_logs().await?;
+            }
+            KeyCode::Char('b') => {
+                self.build_available().await?;
             }
             KeyCode::Char('R') => {
                 self.start_rebuild_dialog();
@@ -2534,23 +2615,23 @@ impl App {
 
     /// Refresh container list
     async fn refresh_containers(&mut self) -> AppResult<()> {
-        // Re-run auto-discovery every 5 seconds to pick up new configs
-        if let Some(ref dir) = self.workspace_dir {
-            if self.last_discovery.elapsed() >= Duration::from_secs(5) {
-                let _ = self.manager.read().await.auto_discover_configs(dir).await;
-                self.last_discovery = std::time::Instant::now();
-            }
-        }
-
         self.containers = self.manager.read().await.list().await?;
 
-        // Sync status for all containers
+        // Sync status for all registered containers
         for container in &self.containers {
             let _ = self.manager.read().await.sync_status(&container.id).await;
         }
 
         // Re-fetch after sync
         self.containers = self.manager.read().await.list().await?;
+
+        // Append ephemeral Available entries for unregistered configs
+        if let Some(ref dir) = self.workspace_dir {
+            let unregistered = self.manager.read().await.find_unregistered_configs(dir).await;
+            for (name, config_path, ws_path) in unregistered {
+                self.containers.push(make_available_entry(name, config_path, ws_path));
+            }
+        }
 
         // Ensure selected index is valid
         if !self.containers.is_empty() && self.selected >= self.containers.len() {
@@ -2592,6 +2673,10 @@ impl App {
         }
 
         let container = &self.containers[self.selected];
+        if container.status.is_available() {
+            self.status_message = Some("Use 'u' to build first".to_string());
+            return Ok(());
+        }
         let id = container.id.clone();
         let name = container.name.clone();
 
@@ -2634,6 +2719,34 @@ impl App {
     async fn up_selected(&mut self) -> AppResult<()> {
         if self.containers.is_empty() || self.container_op.is_some() {
             return Ok(());
+        }
+
+        // If this is an Available (unregistered) entry, register it first
+        let is_available = self.containers[self.selected].status.is_available();
+        if is_available {
+            let config_path = self.containers[self.selected].config_path.clone();
+            let result = self.manager.read().await.init_from_config(&config_path).await;
+            match result {
+                Ok(Some(_cs)) => {
+                    // Refresh so the new registered entry replaces the ephemeral one
+                    self.refresh_containers().await?;
+                    // Find the newly registered entry by its config_path
+                    if let Some(pos) = self.containers.iter().position(|c| c.config_path == config_path && !c.status.is_available()) {
+                        self.selected = pos;
+                        self.containers_table_state.select(Some(pos));
+                    }
+                    // Fall through to the normal up logic below
+                }
+                Ok(None) => {
+                    // Already registered (race condition), just refresh
+                    self.refresh_containers().await?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    self.status_message = Some(format!("Failed to register: {}", e));
+                    return Ok(());
+                }
+            }
         }
 
         let container = &self.containers[self.selected];
@@ -3013,6 +3126,38 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+/// Build an ephemeral ContainerState for an unregistered config.
+/// Uses a deterministic ID derived from the config path so it stays
+/// stable across refreshes.
+fn make_available_entry(
+    name: String,
+    config_path: PathBuf,
+    workspace_path: PathBuf,
+) -> ContainerState {
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+    config_path.hash(&mut hasher);
+    let id = format!("avail-{:x}", hasher.finish());
+
+    let now = chrono::Utc::now();
+    ContainerState {
+        id,
+        name,
+        provider: ProviderType::Docker, // placeholder — not meaningful for Available
+        config_path,
+        image_id: None,
+        container_id: None,
+        status: DevcContainerStatus::Available,
+        created_at: now,
+        last_used: now,
+        workspace_path,
+        metadata: std::collections::HashMap::new(),
+        compose_project: None,
+        compose_service: None,
     }
 }
 

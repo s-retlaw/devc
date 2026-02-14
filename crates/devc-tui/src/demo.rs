@@ -201,6 +201,7 @@ impl DemoApp {
 
         let items: Vec<ListItem> = self.containers.iter().enumerate().map(|(i, c)| {
             let symbol = match c.status {
+                DevcContainerStatus::Available => "◌",
                 DevcContainerStatus::Running => "●",
                 DevcContainerStatus::Stopped => "○",
                 DevcContainerStatus::Building => "◐",

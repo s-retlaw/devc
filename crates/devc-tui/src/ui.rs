@@ -214,14 +214,18 @@ fn container_list_footer(app: &App) -> String {
             _ => {}
         }
         match st {
-            DevcContainerStatus::Configured
+            DevcContainerStatus::Available
+            | DevcContainerStatus::Configured
             | DevcContainerStatus::Built
             | DevcContainerStatus::Created
             | DevcContainerStatus::Stopped
             | DevcContainerStatus::Failed => keys.push("u: Up"),
             _ => {}
         }
-        if st != DevcContainerStatus::Building {
+        if st == DevcContainerStatus::Available {
+            keys.push("b: Build");
+        }
+        if st != DevcContainerStatus::Building && st != DevcContainerStatus::Available {
             keys.push("R: Rebuild");
         }
         if st == DevcContainerStatus::Running {
@@ -229,7 +233,7 @@ fn container_list_footer(app: &App) -> String {
             keys.push("S: Shell");
             keys.push("l: Logs");
         }
-        if st != DevcContainerStatus::Building {
+        if st != DevcContainerStatus::Building && st != DevcContainerStatus::Available {
             keys.push("d: Delete");
         }
     }
@@ -263,21 +267,25 @@ fn container_detail_footer(app: &App) -> String {
             _ => {}
         }
         match st {
-            DevcContainerStatus::Configured
+            DevcContainerStatus::Available
+            | DevcContainerStatus::Configured
             | DevcContainerStatus::Built
             | DevcContainerStatus::Created
             | DevcContainerStatus::Stopped
             | DevcContainerStatus::Failed => keys.push("u: Up"),
             _ => {}
         }
-        if st != DevcContainerStatus::Building {
+        if st == DevcContainerStatus::Available {
+            keys.push("b: Build");
+        }
+        if st != DevcContainerStatus::Building && st != DevcContainerStatus::Available {
             keys.push("R: Rebuild");
         }
         if st == DevcContainerStatus::Running {
             keys.push("l: Logs");
             keys.push("S: Shell");
         }
-        if st != DevcContainerStatus::Building {
+        if st != DevcContainerStatus::Building && st != DevcContainerStatus::Available {
             keys.push("d: Delete");
         }
     }
@@ -410,6 +418,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|container| {
             let status_symbol = match container.status {
+                DevcContainerStatus::Available => "◌",
                 DevcContainerStatus::Running => "●",
                 DevcContainerStatus::Stopped => "○",
                 DevcContainerStatus::Building => "◐",
@@ -420,6 +429,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             let status_color = match container.status {
+                DevcContainerStatus::Available => Color::DarkGray,
                 DevcContainerStatus::Running => Color::Green,
                 DevcContainerStatus::Stopped => Color::DarkGray,
                 DevcContainerStatus::Building => Color::Yellow,
@@ -893,6 +903,7 @@ fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
 /// Build the info text lines for the container detail view
 fn build_detail_text(container: &devc_core::ContainerState) -> Vec<Line<'static>> {
     let status_color = match container.status {
+        DevcContainerStatus::Available => Color::DarkGray,
         DevcContainerStatus::Running => Color::Green,
         DevcContainerStatus::Stopped => Color::DarkGray,
         DevcContainerStatus::Building => Color::Yellow,
@@ -1556,13 +1567,15 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
     match &app.confirm_action {
         Some(ConfirmAction::Delete(id)) => {
-            let name = app
-                .containers
-                .iter()
-                .find(|c| &c.id == id)
-                .map(|c| c.name.as_str())
-                .unwrap_or(id);
-            draw_simple_confirm_dialog(frame, app, area, &format!("Delete container '{}'?", name));
+            let container = app.containers.iter().find(|c| &c.id == id);
+            let name = container.map(|c| c.name.as_str()).unwrap_or(id);
+            let has_container = container.map(|c| c.container_id.is_some()).unwrap_or(false);
+            let msg = if has_container {
+                format!("Delete container '{}'?", name)
+            } else {
+                format!("Remove '{}' from registry?", name)
+            };
+            draw_simple_confirm_dialog(frame, app, area, &msg);
         }
         Some(ConfirmAction::Stop(id)) => {
             let name = app
