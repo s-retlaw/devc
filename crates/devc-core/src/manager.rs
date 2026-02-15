@@ -1014,16 +1014,24 @@ fi
             )));
         }
 
-        // Remove the container if it exists (only if we have its provider)
-        if let Some(ref container_id) = container_state.container_id {
-            if let Some(provider) = self.providers.get(&container_state.provider) {
-                if let Err(e) = provider
-                    .remove(&ContainerId::new(container_id), force)
-                    .await
-                {
-                    tracing::warn!("Failed to remove container {}: {}", container_id, e);
+        // Only destroy the runtime container if devc created it
+        if container_state.source == DevcontainerSource::Devc {
+            if let Some(ref container_id) = container_state.container_id {
+                if let Some(provider) = self.providers.get(&container_state.provider) {
+                    if let Err(e) = provider
+                        .remove(&ContainerId::new(container_id), force)
+                        .await
+                    {
+                        tracing::warn!("Failed to remove container {}: {}", container_id, e);
+                    }
                 }
             }
+        } else {
+            tracing::info!(
+                "Skipping runtime destroy for adopted container '{}' (source: {:?})",
+                container_state.name,
+                container_state.source,
+            );
         }
 
         // Remove from state
@@ -1046,48 +1054,57 @@ fi
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
-        let provider = self.require_container_provider(&container_state)?;
-
-        // Handle compose teardown
-        if let Some(ref compose_project) = container_state.compose_project {
-            let container = self.load_container(&container_state.config_path)?;
-            if let Some(compose_files) = container.compose_files() {
-                let owned = compose_file_strs(&compose_files);
-                let compose_file_refs: Vec<&str> =
-                    owned.iter().map(|s| s.as_str()).collect();
-
-                if let Err(e) = provider
-                    .compose_down(
-                        &compose_file_refs,
-                        compose_project,
-                        &container.workspace_path,
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to run compose down: {}", e);
-                }
-            }
+        // For adopted containers, skip runtime teardown — only clean up tracking state
+        if container_state.source != DevcontainerSource::Devc {
+            tracing::info!(
+                "Skipping runtime stop/remove for adopted container '{}' (source: {:?})",
+                container_state.name,
+                container_state.source,
+            );
         } else {
-            // Standard single-container teardown
-            // Stop if running
-            if container_state.status == DevcContainerStatus::Running {
-                if let Some(ref container_id) = container_state.container_id {
+            let provider = self.require_container_provider(&container_state)?;
+
+            // Handle compose teardown
+            if let Some(ref compose_project) = container_state.compose_project {
+                let container = self.load_container(&container_state.config_path)?;
+                if let Some(compose_files) = container.compose_files() {
+                    let owned = compose_file_strs(&compose_files);
+                    let compose_file_refs: Vec<&str> =
+                        owned.iter().map(|s| s.as_str()).collect();
+
                     if let Err(e) = provider
-                        .stop(&ContainerId::new(container_id), Some(10))
+                        .compose_down(
+                            &compose_file_refs,
+                            compose_project,
+                            &container.workspace_path,
+                        )
                         .await
                     {
-                        tracing::warn!("Failed to stop container {}: {}", container_id, e);
+                        tracing::warn!("Failed to run compose down: {}", e);
                     }
                 }
-            }
+            } else {
+                // Standard single-container teardown
+                // Stop if running
+                if container_state.status == DevcContainerStatus::Running {
+                    if let Some(ref container_id) = container_state.container_id {
+                        if let Err(e) = provider
+                            .stop(&ContainerId::new(container_id), Some(10))
+                            .await
+                        {
+                            tracing::warn!("Failed to stop container {}: {}", container_id, e);
+                        }
+                    }
+                }
 
-            // Remove the runtime container if it exists
-            if let Some(ref container_id) = container_state.container_id {
-                if let Err(e) = provider
-                    .remove(&ContainerId::new(container_id), true)
-                    .await
-                {
-                    tracing::warn!("Failed to remove container {}: {}", container_id, e);
+                // Remove the runtime container if it exists
+                if let Some(ref container_id) = container_state.container_id {
+                    if let Err(e) = provider
+                        .remove(&ContainerId::new(container_id), true)
+                        .await
+                    {
+                        tracing::warn!("Failed to remove container {}: {}", container_id, e);
+                    }
                 }
             }
         }
@@ -1525,154 +1542,11 @@ fi
                 })?,
         );
 
-        // Run onCreate command if this is first create
+        // Run first-create lifecycle if this is a newly created container
         if container_state.status == DevcContainerStatus::Created {
-            let feature_props = get_feature_properties(&container_state);
-            let user = container.devcontainer.effective_user();
-            let workspace_folder = container.devcontainer.workspace_folder.as_deref();
-            let merged_env = merge_remote_env(
-                container.devcontainer.remote_env.as_ref(),
-                &feature_props.remote_env,
-            );
-            let remote_env = merged_env.as_ref();
-
-            // Feature onCreateCommands run first (per spec)
-            if !feature_props.on_create_commands.is_empty() {
-                send_progress(progress, "Running feature onCreateCommand(s)...");
-                provider.start(&container_id).await?;
-                run_feature_lifecycle_commands(
-                    provider, &container_id, &feature_props.on_create_commands,
-                    user, workspace_folder, remote_env,
-                ).await?;
-            }
-
-            if let Some(ref cmd) = container.devcontainer.on_create_command {
-                send_progress(progress, "Running onCreate command...");
-                // Start the container first for onCreate
-                let details = provider.inspect(&container_id).await?;
-                if details.status != ContainerStatus::Running {
-                    provider.start(&container_id).await?;
-                }
-
-                run_lifecycle_command_with_env(
-                    provider, &container_id, cmd, user, workspace_folder, remote_env,
-                ).await?;
-            }
-
-            // Feature updateContentCommands run first (per spec)
-            if !feature_props.update_content_commands.is_empty() {
-                send_progress(progress, "Running feature updateContentCommand(s)...");
-                let details = provider.inspect(&container_id).await?;
-                if details.status != ContainerStatus::Running {
-                    provider.start(&container_id).await?;
-                }
-                run_feature_lifecycle_commands(
-                    provider, &container_id, &feature_props.update_content_commands,
-                    user, workspace_folder, remote_env,
-                ).await?;
-            }
-
-            // Run updateContentCommand (between onCreate and postCreate per spec)
-            if let Some(ref cmd) = container.devcontainer.update_content_command {
-                send_progress(progress, "Running updateContentCommand...");
-                let details = provider.inspect(&container_id).await?;
-                if details.status != ContainerStatus::Running {
-                    provider.start(&container_id).await?;
-                }
-
-                run_lifecycle_command_with_env(
-                    provider, &container_id, cmd, user, workspace_folder, remote_env,
-                ).await?;
-            }
-
-            // Feature postCreateCommands run first (per spec)
-            if !feature_props.post_create_commands.is_empty() {
-                send_progress(progress, "Running feature postCreateCommand(s)...");
-                let details = provider.inspect(&container_id).await?;
-                if details.status != ContainerStatus::Running {
-                    provider.start(&container_id).await?;
-                }
-                run_feature_lifecycle_commands(
-                    provider, &container_id, &feature_props.post_create_commands,
-                    user, workspace_folder, remote_env,
-                ).await?;
-            }
-
-            // Run postCreateCommand
-            if let Some(ref cmd) = container.devcontainer.post_create_command {
-                send_progress(progress, "Running postCreateCommand...");
-                // Ensure container is started
-                let details = provider.inspect(&container_id).await?;
-                if details.status != ContainerStatus::Running {
-                    provider.start(&container_id).await?;
-                }
-
-                run_lifecycle_command_with_env(
-                    provider, &container_id, cmd, user, workspace_folder, remote_env,
-                ).await?;
-            }
-
-            // Setup SSH if enabled (for proper TTY/resize support)
-            if self.global_config.defaults.ssh_enabled.unwrap_or(false) {
-                send_progress(progress, "Setting up SSH...");
-                // Ensure container is running for SSH setup
-                let details = provider.inspect(&container_id).await?;
-                if details.status != ContainerStatus::Running {
-                    provider.start(&container_id).await?;
-                }
-
-                let ssh_manager = SshManager::new()?;
-                ssh_manager.ensure_keys_exist()?;
-
-                let user = container.devcontainer.effective_user();
-                match ssh_manager
-                    .setup_container(provider, &container_id, user)
-                    .await
-                {
-                    Ok(()) => {
-                        tracing::info!("SSH setup completed for container");
-                        let mut state = self.state.write().await;
-                        if let Some(cs) = state.get_mut(id) {
-                            cs.metadata
-                                .insert("ssh_available".to_string(), "true".to_string());
-                            if let Some(u) = user {
-                                cs.metadata
-                                    .insert("remote_user".to_string(), u.to_string());
-                            }
-                        }
-                        state.save()?;
-                    }
-                    Err(e) => {
-                        tracing::warn!("SSH setup failed (will use exec fallback): {}", e);
-                        let mut state = self.state.write().await;
-                        if let Some(cs) = state.get_mut(id) {
-                            cs.metadata
-                                .insert("ssh_available".to_string(), "false".to_string());
-                        }
-                        state.save()?;
-                    }
-                }
-            }
-
-            // Inject dotfiles
-            let dotfiles_manager = if let Some(ref dotfiles_config) = container.devcontainer.dotfiles
-            {
-                DotfilesManager::from_devcontainer_config(dotfiles_config, &self.global_config)
-            } else {
-                DotfilesManager::from_global_config(&self.global_config)
-            };
-
-            if dotfiles_manager.is_configured() {
-                send_progress(progress, "Installing dotfiles...");
-                dotfiles_manager
-                    .inject_with_progress(
-                        provider,
-                        &container_id,
-                        container.devcontainer.effective_user(),
-                        progress,
-                    )
-                    .await?;
-            }
+            self.run_first_create_lifecycle(
+                id, &container, provider, &container_id, progress,
+            ).await?;
         }
 
         // Start container (idempotent) and run post-start phase
@@ -1690,6 +1564,179 @@ fi
         .await
         {
             tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Run first-create lifecycle commands on a container.
+    ///
+    /// This runs (in order):
+    /// 1. Feature onCreateCommands
+    /// 2. onCreateCommand
+    /// 3. Feature updateContentCommands
+    /// 4. updateContentCommand
+    /// 5. Feature postCreateCommands
+    /// 6. postCreateCommand
+    /// 7. SSH setup (if enabled)
+    /// 8. Dotfiles injection
+    ///
+    /// Used by both `up()` for newly created containers and `adopt()` for running containers.
+    async fn run_first_create_lifecycle(
+        &self,
+        id: &str,
+        container: &Container,
+        provider: &dyn ContainerProvider,
+        container_id: &ContainerId,
+        progress: Option<&mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+        let feature_props = get_feature_properties(&container_state);
+        let user = container.devcontainer.effective_user();
+        let workspace_folder = container.devcontainer.workspace_folder.as_deref();
+        let merged_env = merge_remote_env(
+            container.devcontainer.remote_env.as_ref(),
+            &feature_props.remote_env,
+        );
+        let remote_env = merged_env.as_ref();
+
+        // Feature onCreateCommands run first (per spec)
+        if !feature_props.on_create_commands.is_empty() {
+            send_progress(progress, "Running feature onCreateCommand(s)...");
+            let details = provider.inspect(container_id).await?;
+            if details.status != ContainerStatus::Running {
+                provider.start(container_id).await?;
+            }
+            run_feature_lifecycle_commands(
+                provider, container_id, &feature_props.on_create_commands,
+                user, workspace_folder, remote_env,
+            ).await?;
+        }
+
+        if let Some(ref cmd) = container.devcontainer.on_create_command {
+            send_progress(progress, "Running onCreate command...");
+            let details = provider.inspect(container_id).await?;
+            if details.status != ContainerStatus::Running {
+                provider.start(container_id).await?;
+            }
+            run_lifecycle_command_with_env(
+                provider, container_id, cmd, user, workspace_folder, remote_env,
+            ).await?;
+        }
+
+        // Feature updateContentCommands run first (per spec)
+        if !feature_props.update_content_commands.is_empty() {
+            send_progress(progress, "Running feature updateContentCommand(s)...");
+            let details = provider.inspect(container_id).await?;
+            if details.status != ContainerStatus::Running {
+                provider.start(container_id).await?;
+            }
+            run_feature_lifecycle_commands(
+                provider, container_id, &feature_props.update_content_commands,
+                user, workspace_folder, remote_env,
+            ).await?;
+        }
+
+        if let Some(ref cmd) = container.devcontainer.update_content_command {
+            send_progress(progress, "Running updateContentCommand...");
+            let details = provider.inspect(container_id).await?;
+            if details.status != ContainerStatus::Running {
+                provider.start(container_id).await?;
+            }
+            run_lifecycle_command_with_env(
+                provider, container_id, cmd, user, workspace_folder, remote_env,
+            ).await?;
+        }
+
+        // Feature postCreateCommands run first (per spec)
+        if !feature_props.post_create_commands.is_empty() {
+            send_progress(progress, "Running feature postCreateCommand(s)...");
+            let details = provider.inspect(container_id).await?;
+            if details.status != ContainerStatus::Running {
+                provider.start(container_id).await?;
+            }
+            run_feature_lifecycle_commands(
+                provider, container_id, &feature_props.post_create_commands,
+                user, workspace_folder, remote_env,
+            ).await?;
+        }
+
+        if let Some(ref cmd) = container.devcontainer.post_create_command {
+            send_progress(progress, "Running postCreateCommand...");
+            let details = provider.inspect(container_id).await?;
+            if details.status != ContainerStatus::Running {
+                provider.start(container_id).await?;
+            }
+            run_lifecycle_command_with_env(
+                provider, container_id, cmd, user, workspace_folder, remote_env,
+            ).await?;
+        }
+
+        // Setup SSH if enabled (for proper TTY/resize support)
+        if self.global_config.defaults.ssh_enabled.unwrap_or(false) {
+            send_progress(progress, "Setting up SSH...");
+            let details = provider.inspect(container_id).await?;
+            if details.status != ContainerStatus::Running {
+                provider.start(container_id).await?;
+            }
+
+            let ssh_manager = SshManager::new()?;
+            ssh_manager.ensure_keys_exist()?;
+
+            let user = container.devcontainer.effective_user();
+            match ssh_manager
+                .setup_container(provider, container_id, user)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!("SSH setup completed for container");
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.metadata
+                            .insert("ssh_available".to_string(), "true".to_string());
+                        if let Some(u) = user {
+                            cs.metadata
+                                .insert("remote_user".to_string(), u.to_string());
+                        }
+                    }
+                    state.save()?;
+                }
+                Err(e) => {
+                    tracing::warn!("SSH setup failed (will use exec fallback): {}", e);
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.metadata
+                            .insert("ssh_available".to_string(), "false".to_string());
+                    }
+                    state.save()?;
+                }
+            }
+        }
+
+        // Inject dotfiles
+        let dotfiles_manager = if let Some(ref dotfiles_config) = container.devcontainer.dotfiles
+        {
+            DotfilesManager::from_devcontainer_config(dotfiles_config, &self.global_config)
+        } else {
+            DotfilesManager::from_global_config(&self.global_config)
+        };
+
+        if dotfiles_manager.is_configured() {
+            send_progress(progress, "Installing dotfiles...");
+            dotfiles_manager
+                .inject_with_progress(
+                    provider,
+                    container_id,
+                    container.devcontainer.effective_user(),
+                    progress,
+                )
+                .await?;
         }
 
         Ok(())
@@ -2338,7 +2385,7 @@ fi
         container_state.status = status;
         container_state.source = source;
 
-        // Extract remote_user from devcontainer.json if available
+        // Extract remote_user and workspace_folder from devcontainer.json if available
         if container_state.config_path.exists() {
             if let Ok(c) = Container::from_config(&container_state.config_path) {
                 if let Some(user) = c.devcontainer.effective_user() {
@@ -2346,17 +2393,93 @@ fi
                         .metadata
                         .insert("remote_user".to_string(), user.to_string());
                 }
+                if let Some(ref wf) = c.devcontainer.workspace_folder {
+                    container_state
+                        .metadata
+                        .insert("workspace_folder".to_string(), wf.clone());
+                }
+            }
+        }
+
+        // Fall back to detecting workspace_folder from bind mounts
+        if !container_state.metadata.contains_key("workspace_folder") {
+            if let Some(mount) = details.mounts.iter().find(|m| {
+                m.mount_type == "bind" && m.destination.starts_with("/workspaces/")
+            }) {
+                container_state
+                    .metadata
+                    .insert("workspace_folder".to_string(), mount.destination.clone());
             }
         }
 
         // Save state
+        let state_id = container_state.id.clone();
         {
             let mut state = self.state.write().await;
             state.add(container_state.clone());
             state.save()?;
         }
 
-        Ok(container_state)
+        // Run lifecycle commands if the container is running and has a valid config
+        if container_state.status == DevcContainerStatus::Running
+            && container_state.config_path.exists()
+        {
+            if let Ok(container) = self.load_container(&container_state.config_path) {
+                let cid = ContainerId::new(container_id);
+
+                // initializeCommand runs on host (per spec)
+                if let Some(ref cmd) = container.devcontainer.initialize_command {
+                    if let Err(e) =
+                        crate::run_host_command(cmd, &container_state.workspace_path, None).await
+                    {
+                        tracing::warn!(
+                            "initializeCommand failed during adopt (non-fatal): {}",
+                            e
+                        );
+                    }
+                }
+
+                // Run first-create lifecycle (non-fatal — adopt succeeds even if lifecycle fails)
+                if let Err(e) = self
+                    .run_first_create_lifecycle(&state_id, &container, provider, &cid, None)
+                    .await
+                {
+                    tracing::warn!(
+                        "Lifecycle commands failed during adopt (non-fatal): {}",
+                        e
+                    );
+                }
+
+                // Start (runs postStartCommand, SSH daemon)
+                if let Err(e) = self.start(&state_id).await {
+                    tracing::warn!("Post-start phase failed during adopt (non-fatal): {}", e);
+                }
+
+                // Credentials setup
+                if let Err(e) = crate::credentials::setup_credentials(
+                    provider,
+                    &cid,
+                    &self.global_config,
+                    container.devcontainer.effective_user(),
+                    &container_state.workspace_path,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "Credential forwarding failed during adopt (non-fatal): {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        // Re-read state to capture any metadata updates from lifecycle
+        let final_state = {
+            let state = self.state.read().await;
+            state.get(&state_id).cloned().unwrap_or(container_state)
+        };
+
+        Ok(final_state)
     }
 
     /// Remove a container from devc tracking without stopping or deleting the runtime container
@@ -4804,6 +4927,317 @@ mod tests {
         assert!(
             state.metadata.get("remote_user").is_none(),
             "Should not have remote_user when devcontainer.json doesn't specify one"
+        );
+    }
+
+    // ==================== Adopt — workspace_folder metadata ====================
+
+    /// Helper: create workspace with workspaceFolder in devcontainer.json
+    fn create_test_workspace_with_workspace_folder(folder: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            format!(r#"{{"image": "ubuntu:22.04", "workspaceFolder": "{}"}}"#, folder),
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[tokio::test]
+    async fn test_adopt_stores_workspace_folder() {
+        let workspace = create_test_workspace_with_workspace_folder("/workspaces/myapp");
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        let state = mgr
+            .adopt(
+                "mock_container_id",
+                Some(workspace.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.metadata.get("workspace_folder").map(|s| s.as_str()),
+            Some("/workspaces/myapp"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_infers_workspace_from_mounts() {
+        let workspace = create_test_workspace(); // no workspaceFolder in config
+        let mock = MockProvider::new(ProviderType::Docker);
+        // Set up inspect result with a bind mount to /workspaces/project
+        let mut details = mock_container_details("mock_container_id", ContainerStatus::Running);
+        details.mounts.push(devc_provider::MountInfo {
+            mount_type: "bind".to_string(),
+            source: "/home/user/project".to_string(),
+            destination: "/workspaces/project".to_string(),
+            read_only: false,
+        });
+        *mock.inspect_result.lock().unwrap() = Ok(details);
+        let mgr = test_manager(mock);
+        let state = mgr
+            .adopt(
+                "mock_container_id",
+                Some(workspace.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.metadata.get("workspace_folder").map(|s| s.as_str()),
+            Some("/workspaces/project"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_config_workspace_folder_beats_mounts() {
+        let workspace = create_test_workspace_with_workspace_folder("/workspaces/from-config");
+        let mock = MockProvider::new(ProviderType::Docker);
+        // Also set up a bind mount with a different path
+        let mut details = mock_container_details("mock_container_id", ContainerStatus::Running);
+        details.mounts.push(devc_provider::MountInfo {
+            mount_type: "bind".to_string(),
+            source: "/home/user/project".to_string(),
+            destination: "/workspaces/from-mount".to_string(),
+            read_only: false,
+        });
+        *mock.inspect_result.lock().unwrap() = Ok(details);
+        let mgr = test_manager(mock);
+        let state = mgr
+            .adopt(
+                "mock_container_id",
+                Some(workspace.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.metadata.get("workspace_folder").map(|s| s.as_str()),
+            Some("/workspaces/from-config"),
+            "Config workspaceFolder should take precedence over bind mount detection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_no_workspace_folder_when_unavailable() {
+        let workspace = create_test_workspace(); // no workspaceFolder, no bind mounts
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        let state = mgr
+            .adopt(
+                "mock_container_id",
+                Some(workspace.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await
+            .unwrap();
+        assert!(
+            state.metadata.get("workspace_folder").is_none(),
+            "Should not have workspace_folder when neither config nor mounts provide one"
+        );
+    }
+
+    // ==================== Adopt — lifecycle commands ====================
+
+    #[tokio::test]
+    async fn test_adopt_runs_lifecycle_when_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04", "postCreateCommand": "echo hello"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = Arc::clone(&mock.calls);
+        let mgr = test_manager(mock);
+
+        let _state = mgr
+            .adopt(
+                "mock_container_id",
+                Some(tmp.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await
+            .unwrap();
+
+        // Should have made exec calls for lifecycle commands
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded.iter().any(|c| matches!(c, MockCall::Exec { .. })),
+            "Expected lifecycle exec calls for running container, got: {:?}",
+            *recorded,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_skips_lifecycle_when_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04", "postCreateCommand": "echo hello"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        // Container is stopped
+        *mock.inspect_result.lock().unwrap() =
+            Ok(mock_container_details("mock_container_id", ContainerStatus::Exited));
+        let calls = Arc::clone(&mock.calls);
+        let mgr = test_manager(mock);
+
+        let _state = mgr
+            .adopt(
+                "mock_container_id",
+                Some(tmp.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await
+            .unwrap();
+
+        // Should NOT have made exec calls (only inspect)
+        let recorded = calls.lock().unwrap();
+        assert!(
+            !recorded.iter().any(|c| matches!(c, MockCall::Exec { .. })),
+            "Should not exec lifecycle for stopped container, got: {:?}",
+            *recorded,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_lifecycle_failure_is_non_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"image": "ubuntu:22.04", "postCreateCommand": "fail"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.exec_error.lock().unwrap() =
+            Some(ProviderError::ExecError("command failed".to_string()));
+        let mgr = test_manager(mock);
+
+        // adopt should succeed even when lifecycle commands fail
+        let result = mgr
+            .adopt(
+                "mock_container_id",
+                Some(tmp.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await;
+        assert!(result.is_ok(), "Adopt should succeed even when lifecycle fails");
+    }
+
+    // ==================== Delete safety for adopted containers ====================
+
+    #[tokio::test]
+    async fn test_remove_adopted_skips_runtime_destroy() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = Arc::clone(&mock.calls);
+
+        // Create a state with an adopted container
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("adopted_container_id"),
+        );
+        cs.source = DevcontainerSource::VsCode;
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.remove(&id, true).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+        assert!(
+            !recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })),
+            "Should NOT call provider.remove() for adopted container, got: {:?}",
+            *recorded,
+        );
+
+        // Verify removed from state
+        let state = mgr.state.read().await;
+        assert!(state.get(&id).is_none(), "Should be removed from state tracking");
+    }
+
+    #[tokio::test]
+    async fn test_remove_devc_destroys_runtime() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = Arc::clone(&mock.calls);
+
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("devc_container_id"),
+        );
+        cs.source = DevcontainerSource::Devc;
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.remove(&id, true).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })),
+            "Should call provider.remove() for devc-created container, got: {:?}",
+            *recorded,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_down_adopted_skips_runtime_destroy() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = Arc::clone(&mock.calls);
+
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("adopted_container_id"),
+        );
+        cs.source = DevcontainerSource::VsCode;
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.down(&id).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+        assert!(
+            !recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })),
+            "Should NOT call provider.stop() for adopted container, got: {:?}",
+            *recorded,
+        );
+        assert!(
+            !recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })),
+            "Should NOT call provider.remove() for adopted container, got: {:?}",
+            *recorded,
         );
     }
 }

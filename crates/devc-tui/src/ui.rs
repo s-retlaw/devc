@@ -1956,8 +1956,11 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
         Some(ConfirmAction::Delete(id)) => {
             let container = app.containers.iter().find(|c| &c.id == id);
             let name = container.map(|c| c.name.as_str()).unwrap_or(id);
+            let is_adopted = container.map(|c| c.source != DevcontainerSource::Devc).unwrap_or(false);
             let has_container = container.map(|c| c.container_id.is_some()).unwrap_or(false);
-            let msg = if has_container {
+            let msg = if is_adopted {
+                format!("Stop tracking '{}'? (container will not be deleted)", name)
+            } else if has_container {
                 format!("Delete container '{}'?", name)
             } else {
                 format!("Remove '{}' from registry?", name)

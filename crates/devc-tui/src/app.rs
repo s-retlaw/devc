@@ -182,6 +182,8 @@ pub struct ShellSession {
     pub runtime_prefix: Vec<String>,
     /// Effective user for the shell (from config override, metadata, or devcontainer.json)
     pub user: Option<String>,
+    /// Working directory for the shell (from metadata or devcontainer.json workspaceFolder)
+    pub working_dir: Option<String>,
     #[cfg(unix)]
     pub pty: Option<PtyShell>,
 }
@@ -2531,16 +2533,18 @@ impl App {
                 .unwrap_or_else(|_| (container.provider.to_string(), vec![]))
         };
 
-        // Resolve effective user: global config override > metadata > devcontainer.json
+        // Resolve effective user and working dir: metadata > devcontainer.json
+        let parsed = Container::from_config(&container.config_path).ok();
         let effective_user = if self.config.defaults.user.is_some() {
             self.config.defaults.user.clone()
         } else if let Some(user) = container.metadata.get("remote_user") {
             Some(user.clone())
         } else {
-            Container::from_config(&container.config_path)
-                .ok()
+            parsed.as_ref()
                 .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()))
         };
+        let effective_working_dir = container.metadata.get("workspace_folder").cloned()
+            .or_else(|| parsed.as_ref().and_then(|c| c.devcontainer.workspace_folder.clone()));
 
         // Create a new session (PTY will be spawned in run_shell_session)
         self.shell_sessions.insert(
@@ -2552,6 +2556,7 @@ impl App {
                 runtime_program: rt_program,
                 runtime_prefix: rt_prefix,
                 user: effective_user,
+                working_dir: effective_working_dir,
                 pty: None,
             },
         );
@@ -2571,14 +2576,14 @@ impl App {
     }
 
     #[cfg(unix)]
-    fn make_shell_config(&self, runtime_program: String, runtime_prefix: Vec<String>, container_id: String, user: Option<String>) -> ShellConfig {
+    fn make_shell_config(&self, runtime_program: String, runtime_prefix: Vec<String>, container_id: String, user: Option<String>, working_dir: Option<String>) -> ShellConfig {
         ShellConfig {
             runtime_program,
             runtime_prefix,
             container_id,
             shell: self.config.defaults.shell.clone(),
             user,
-            working_dir: None,
+            working_dir,
         }
     }
 
@@ -2620,7 +2625,7 @@ impl App {
         };
 
         // Extract session info we need before taking the PTY
-        let (container_name, provider_container_id, runtime_program, runtime_prefix, user, has_pty) = {
+        let (container_name, provider_container_id, runtime_program, runtime_prefix, user, working_dir, has_pty) = {
             match self.shell_sessions.get(&container_id) {
                 Some(s) => (
                     s.container_name.clone(),
@@ -2628,6 +2633,7 @@ impl App {
                     s.runtime_program.clone(),
                     s.runtime_prefix.clone(),
                     s.user.clone(),
+                    s.working_dir.clone(),
                     s.pty.is_some(),
                 ),
                 None => {
@@ -2671,7 +2677,7 @@ impl App {
                 if !p.is_alive() {
                     // PTY died while we were away, spawn a new one below
                     drop(p);
-                    let mut config = self.make_shell_config(runtime_program.clone(), runtime_prefix.clone(), provider_container_id.clone(), user.clone());
+                    let mut config = self.make_shell_config(runtime_program.clone(), runtime_prefix.clone(), provider_container_id.clone(), user.clone(), working_dir.clone());
                     config.shell = Self::detect_shell(&runtime_program, &runtime_prefix, &provider_container_id, &config.shell);
                     match PtyShell::spawn(&config) {
                         Ok(new_p) => new_p,
@@ -2701,7 +2707,7 @@ impl App {
             }
             _ => {
                 // Spawn new PTY
-                let mut config = self.make_shell_config(runtime_program.clone(), runtime_prefix.clone(), provider_container_id.clone(), user.clone());
+                let mut config = self.make_shell_config(runtime_program.clone(), runtime_prefix.clone(), provider_container_id.clone(), user.clone(), working_dir.clone());
                 config.shell = Self::detect_shell(&runtime_program, &runtime_prefix, &provider_container_id, &config.shell);
                 match PtyShell::spawn(&config) {
                     Ok(p) => p,

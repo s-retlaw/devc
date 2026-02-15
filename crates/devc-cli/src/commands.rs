@@ -143,8 +143,15 @@ async fn ssh_to_container(state: &ContainerState, cmd: &[String], program: &str,
         .map(|v| v == "true")
         .unwrap_or(false);
 
+    // Resolve effective user and workspace_folder from metadata or devcontainer.json
+    let parsed = Container::from_config(&state.config_path).ok();
+    let effective_user = state.metadata.get("remote_user").cloned()
+        .or_else(|| parsed.as_ref().and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string())));
+    let workspace_folder = state.metadata.get("workspace_folder").cloned()
+        .or_else(|| parsed.as_ref().and_then(|c| c.devcontainer.workspace_folder.clone()));
+
     if ssh_available {
-        match ssh_via_dropbear(state, cmd, program, prefix).await {
+        match ssh_via_dropbear(state, cmd, program, prefix, workspace_folder.as_deref()).await {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => {
                 // SSH exited with non-zero but we should still respect that
@@ -159,23 +166,12 @@ async fn ssh_to_container(state: &ContainerState, cmd: &[String], program: &str,
         }
     }
 
-    // Resolve effective user from metadata or devcontainer.json
-    let effective_user = state
-        .metadata
-        .get("remote_user")
-        .cloned()
-        .or_else(|| {
-            Container::from_config(&state.config_path)
-                .ok()
-                .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()))
-        });
-
     // Fallback to exec -it
-    exec_shell_fallback(program, prefix, container_id, cmd, effective_user.as_deref()).await
+    exec_shell_fallback(program, prefix, container_id, cmd, effective_user.as_deref(), workspace_folder.as_deref()).await
 }
 
 /// Connect via SSH over stdio using dropbear in inetd mode
-async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str, prefix: &[String]) -> Result<std::process::ExitStatus> {
+async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str, prefix: &[String], working_dir: Option<&str>) -> Result<std::process::ExitStatus> {
     let container_id = state.container_id.as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
@@ -229,6 +225,10 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str,
     if !cmd.is_empty() {
         args.push("--".to_string());
         args.extend(cmd.iter().cloned());
+    } else if let Some(wd) = working_dir {
+        // For interactive shells, cd to the workspace folder
+        args.push("--".to_string());
+        args.push(format!("cd {} && exec $SHELL -l", shell_words::join(&[wd])));
     }
 
     let status = std::process::Command::new("ssh")
@@ -240,7 +240,7 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str,
 }
 
 /// Fallback to exec -it (doesn't support terminal resize)
-async fn exec_shell_fallback(program: &str, prefix: &[String], container_id: &str, cmd: &[String], user: Option<&str>) -> Result<()> {
+async fn exec_shell_fallback(program: &str, prefix: &[String], container_id: &str, cmd: &[String], user: Option<&str>, working_dir: Option<&str>) -> Result<()> {
     // Build the shell command: interactive shell, or `bash -lc "cmd"` for commands
     let shell_args: Vec<String> = if cmd.is_empty() {
         vec!["/bin/bash".to_string()]
@@ -258,6 +258,10 @@ async fn exec_shell_fallback(program: &str, prefix: &[String], container_id: &st
     if let Some(u) = user {
         args.push("--user".to_string());
         args.push(u.to_string());
+    }
+    if let Some(wd) = working_dir {
+        args.push("--workdir".to_string());
+        args.push(wd.to_string());
     }
     args.push(container_id.to_string());
     args.extend(shell_args);
