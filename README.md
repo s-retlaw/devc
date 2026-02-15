@@ -11,12 +11,19 @@ A fast, Rust-based dev container manager with both TUI and CLI interfaces. Suppo
 - **Docker & Podman** - Works with both container runtimes
 - **Docker Compose** - Manage multi-container projects via `dockerComposeFile`
 - **Dev Container Spec** - Compatible with VS Code's devcontainer.json format
+- **Dev Container Features** - OCI-based feature installation
 - **Port Forwarding** - Automatic port forwarding with socat tunnels
-- **Container Stats** - Live CPU/memory monitoring in the TUI
+- **Credential Forwarding** - Docker and Git credentials forwarded into containers
+- **SSH Agent Forwarding** - Seamless SSH key access inside containers
+- **Dotfiles** - Automatic dotfiles repository cloning and installation
 - **Interactive Selection** - Arrow-key navigation when container name is omitted
 - **Vim-style Navigation** - j/k, g/G, Ctrl+d/u throughout the interface
 
 ## Installation
+
+### From GitHub Releases
+
+Download pre-built binaries for Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon), and Windows from the [Releases page](https://github.com/s-retlaw/devc/releases).
 
 ### From Source
 
@@ -29,7 +36,7 @@ cp target/release/devc ~/.local/bin/
 
 ### Requirements
 
-- Rust 1.70+
+- Rust 1.70+ (building from source)
 - Docker or Podman
 
 ## Quick Start
@@ -154,7 +161,7 @@ your-project/
 └── ...
 ```
 
-Supported features:
+Supported fields:
 - `image` - Use a pre-built image
 - `build.dockerfile` - Build from Dockerfile
 - `dockerComposeFile` / `service` - Docker Compose projects
@@ -164,12 +171,18 @@ Supported features:
 - `appPort` - Always-forwarded application ports
 - `portsAttributes` - Per-port labels, protocol, and auto-forward behavior
 - `containerEnv` / `remoteEnv` - Environment variables
-- `features` - Dev container features
+- `features` - Dev container features (OCI-based)
 - `initializeCommand` - Run on host before container creation
+- `onCreateCommand` - Run after first container creation
+- `updateContentCommand` - Run after creating or starting container
 - `postCreateCommand` - Run after container creation
 - `postStartCommand` - Run after container start
 - `postAttachCommand` - Run when attaching to container
+- `runArgs` - Additional arguments passed to `docker run` / `podman run`
+- `privileged` - Run container in privileged mode
+- `capAdd` - Linux capabilities to add
+- `securityOpt` - Security options for the container
 
 ## License
 
-MIT
+MIT - see [LICENSE](LICENSE)
