@@ -6,15 +6,15 @@ expression: output
 │ 1:Conta│Name:        compose-app                                              │        │
 └────────│Status:      running                                                  │────────┘
 ┌ Contain│Provider:    docker                                                   │────────┐
-│      Na│ID:          test-compose-app                                         │        │
-│        │                                                                      │        │
-│▶ ●   co│Workspace:   /tmp/test                                                │        │
+│      Na│Source:      Devc                                                     │        │
+│        │ID:          test-compose-app                                         │        │
+│▶ ●   co│                                                                      │        │
+│        │Workspace:   /tmp/test                                                │        │
 │        │Config:      /tmp/test/.devcontainer/devcontainer.json                │        │
 │        │                                                                      │        │
 │        │Image ID:    sha256:abc123                                            │        │
 │        │Container:   container-compose-app                                    │        │
 │        │                                                                      │        │
-│        │Created:     2024-01-15 12:00:00                                      │        │
 │        │┌ Compose Services ──────────────────────────────────────────────────┐│        │
 │        ││      Service            Status                                     ││        │
 │        ││▶ ●   app (dev)          running                                    ││        │

@@ -85,6 +85,8 @@ pub enum View {
     Ports,
     /// Full terminal shell mode
     Shell,
+    /// Detailed view of a discovered container
+    DiscoverDetail,
 }
 
 /// Confirmation action
@@ -243,6 +245,14 @@ pub struct App {
     pub discovered_containers: Vec<DiscoveredContainer>,
     /// Selected discovered container index
     pub selected_discovered: usize,
+    /// Detailed info for a discovered container (from inspect)
+    pub discover_detail: Option<devc_provider::ContainerDetails>,
+    /// Scroll position for discover detail view
+    pub discover_detail_scroll: usize,
+    /// Detailed info for a managed container (from inspect)
+    pub container_detail: Option<devc_provider::ContainerDetails>,
+    /// Scroll position for container detail view
+    pub container_detail_scroll: usize,
     /// Table state for containers view (tracks selection and scroll)
     pub containers_table_state: TableState,
     /// Table state for discovered containers view
@@ -374,6 +384,10 @@ impl App {
             discover_mode: false,
             discovered_containers: Vec::new(),
             selected_discovered: 0,
+            discover_detail: None,
+            discover_detail_scroll: 0,
+            container_detail: None,
+            container_detail_scroll: 0,
             containers_table_state: TableState::default().with_selected(0),
             discovered_table_state: TableState::default().with_selected(0),
             providers_table_state: TableState::default().with_selected(0),
@@ -550,6 +564,10 @@ impl App {
             discover_mode: false,
             discovered_containers: Vec::new(),
             selected_discovered: 0,
+            discover_detail: None,
+            discover_detail_scroll: 0,
+            container_detail: None,
+            container_detail_scroll: 0,
             containers_table_state: TableState::default().with_selected(0),
             discovered_table_state: TableState::default().with_selected(0),
             providers_table_state: TableState::default().with_selected(0),
@@ -1091,6 +1109,36 @@ impl App {
         self.compose_services_loading = false;
     }
 
+    /// Fetch inspect details for the currently selected managed container
+    async fn fetch_container_detail(&mut self) {
+        let container = match self.selected_container() {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        // Need a provider container ID to inspect
+        let provider_id = match &container.container_id {
+            Some(id) => devc_provider::ContainerId(id.clone()),
+            None => return,
+        };
+
+        let provider_type = container.provider;
+        let config = self.config.clone();
+        let provider = match create_provider(provider_type, &config).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        match provider.inspect(&provider_id).await {
+            Ok(details) => {
+                self.container_detail = Some(details);
+            }
+            Err(_) => {
+                // Non-fatal — detail view still shows ContainerState info
+            }
+        }
+    }
+
     /// Handle a single build progress message
     async fn handle_build_progress(&mut self, line: String) -> AppResult<()> {
         let is_complete = line.contains("complete") || line.contains("Error:") || line.contains("Failed:");
@@ -1385,6 +1433,28 @@ impl App {
             View::BuildOutput => self.handle_build_key(code, modifiers).await?,
             View::Logs => self.handle_logs_key(code, modifiers).await?,
             View::Ports => self.handle_ports_key(code, modifiers).await?,
+            View::DiscoverDetail => {
+                match code {
+                    KeyCode::Char('j') | KeyCode::Down => self.discover_detail_scroll = self.discover_detail_scroll.saturating_add(1),
+                    KeyCode::Char('k') | KeyCode::Up => self.discover_detail_scroll = self.discover_detail_scroll.saturating_sub(1),
+                    KeyCode::Char('a') => {
+                        if let Some(container) = self.discovered_containers.get(self.selected_discovered) {
+                            if container.source != DevcontainerSource::Devc {
+                                self.dialog_focus = DialogFocus::Cancel;
+                                self.confirm_action = Some(ConfirmAction::Adopt {
+                                    container_id: container.id.0.clone(),
+                                    container_name: container.name.clone(),
+                                    workspace_path: container.workspace_path.clone(),
+                                    source: container.source.clone(),
+                                    provider: container.provider,
+                                });
+                                self.view = View::Confirm;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             View::Shell => {} // Shell mode is handled in run() before event loop
             View::Help | View::Confirm => {} // Handled above
         }
@@ -1461,6 +1531,29 @@ impl App {
                         }
                     }
                 }
+                // Inspect selected container
+                KeyCode::Enter => {
+                    if !self.discovered_containers.is_empty() {
+                        let container = &self.discovered_containers[self.selected_discovered];
+                        let provider_type = container.provider;
+                        let container_id = container.id.clone();
+                        match create_provider(provider_type, &self.manager.read().await.global_config()).await {
+                            Ok(provider) => match provider.inspect(&container_id).await {
+                                Ok(details) => {
+                                    self.discover_detail = Some(details);
+                                    self.discover_detail_scroll = 0;
+                                    self.view = View::DiscoverDetail;
+                                }
+                                Err(e) => {
+                                    self.status_message = Some(format!("Inspect failed: {}", e));
+                                }
+                            },
+                            Err(e) => {
+                                self.status_message = Some(format!("Provider error: {}", e));
+                            }
+                        }
+                    }
+                }
                 // Refresh discovered containers
                 KeyCode::Char('r') | KeyCode::F(5) => {
                     self.refresh_discovered().await?;
@@ -1499,9 +1592,12 @@ impl App {
                 KeyCode::Enter => {
                     if !self.containers.is_empty() {
                         self.view = View::ContainerDetail;
+                        self.container_detail = None;
+                        self.container_detail_scroll = 0;
                         self.compose_selected_service = 0;
                         self.compose_services_table_state.select(Some(0));
                         self.fetch_compose_services().await;
+                        self.fetch_container_detail().await;
                     }
                 }
                 KeyCode::Char('s') => {
@@ -1837,12 +1933,25 @@ impl App {
         code: KeyCode,
         _modifiers: KeyModifiers,
     ) -> AppResult<()> {
+        let has_services = self.selected_container()
+            .and_then(|c| self.compose_services.get(&c.id))
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.move_compose_service_selection(1);
+                if has_services {
+                    self.move_compose_service_selection(1);
+                } else {
+                    self.container_detail_scroll = self.container_detail_scroll.saturating_add(1);
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.move_compose_service_selection(-1);
+                if has_services {
+                    self.move_compose_service_selection(-1);
+                } else {
+                    self.container_detail_scroll = self.container_detail_scroll.saturating_sub(1);
+                }
             }
             KeyCode::Char('r') | KeyCode::F(5) => {
                 // Refresh: invalidate cached services and re-fetch
@@ -3094,7 +3203,7 @@ impl App {
     fn is_popup_view(&self) -> bool {
         matches!(
             self.view,
-            View::ContainerDetail | View::ProviderDetail | View::Ports | View::Logs
+            View::ContainerDetail | View::ProviderDetail | View::Ports | View::Logs | View::DiscoverDetail
         )
     }
 
@@ -3105,9 +3214,15 @@ impl App {
                 self.compose_selected_service = 0;
                 self.compose_services_table_state = TableState::default();
                 self.compose_services_loading = false;
+                self.container_detail = None;
+                self.container_detail_scroll = 0;
             }
             View::Logs => {
                 self.logs_service_name = None;
+            }
+            View::DiscoverDetail => {
+                self.discover_detail = None;
+                self.discover_detail_scroll = 0;
             }
             _ => {}
         }

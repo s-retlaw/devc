@@ -1,0 +1,34 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc - Dev Container Manager ──────────────────────────────────────────────────────────┐
+│ 1:Containers  │  2:Providers  │  3:Settings                                            │
+└──────────┌ my-devcontainer ────────────────────────────────────────────────┐───────────┘
+┌ Discovere│─── Identity ───                                                 │───────────┐
+│      Name│Name:        my-devcontainer                                     │           │
+│          │ID:          abc123def456                                        │           │
+│▶ ●   my-d│Image:       mcr.microsoft.com/devcontainers/rust:1              │           │
+│          │Image ID:    sha256:abcdef123456                                 │           │
+│          │Provider:    docker                                              │           │
+│          │Source:      VsCode                                              │           │
+│          │Workspace:   /home/user/project                                  │           │
+│          │                                                                 │           │
+│          │─── Status ───                                                   │           │
+│          │Status:      Running                                             │           │
+│          │Created:     2024-01-15 12:00:00                                 │           │
+│          │Started:     2024-01-15 12:01:00                                 │           │
+│          │                                                                 │           │
+│          │─── Ports ───                                                    │           │
+│          │8080:8080 → tcp                                                  │           │
+│          │                                                                 │           │
+│          │─── Mounts ───                                                   │           │
+│          └─────────────────────────────────────────────────────────────────┘           │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│j/k: Scroll  a: Adopt  Esc: Back                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘

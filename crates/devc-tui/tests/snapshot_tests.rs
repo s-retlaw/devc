@@ -1,6 +1,10 @@
 //! Snapshot tests for UI rendering using insta
 
 use devc_core::DevcContainerStatus;
+use devc_provider::{
+    ContainerDetails, ContainerId, ContainerStatus, DevcontainerSource, DiscoveredContainer,
+    MountInfo, NetworkInfo, NetworkSettings, PortInfo, ProviderType,
+};
 use devc_tui::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
 use ratatui::{backend::TestBackend, Terminal};
 
@@ -413,6 +417,95 @@ fn test_compose_container_detail_loading() {
     app.selected = 0;
     app.view = View::ContainerDetail;
     app.compose_services_loading = true;
+
+    let output = render_app(&mut app, 90, 30);
+    insta::assert_snapshot!(output);
+}
+
+/// Test discover detail popup view
+#[test]
+fn test_discover_detail_view() {
+    use std::collections::HashMap;
+
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+    app.discover_mode = true;
+
+    // Set up a discovered container
+    app.discovered_containers = vec![DiscoveredContainer {
+        id: ContainerId("abc123def456".to_string()),
+        name: "my-devcontainer".to_string(),
+        image: "mcr.microsoft.com/devcontainers/rust:1".to_string(),
+        status: ContainerStatus::Running,
+        source: DevcontainerSource::VsCode,
+        workspace_path: Some("/home/user/project".to_string()),
+        labels: HashMap::new(),
+        provider: ProviderType::Docker,
+        created: Some("2024-01-15 12:00:00".to_string()),
+    }];
+    app.selected_discovered = 0;
+
+    // Set up inspect details
+    let mut labels = HashMap::new();
+    labels.insert("devcontainer.local_folder".to_string(), "/home/user/project".to_string());
+    labels.insert("devc.managed".to_string(), "true".to_string());
+    labels.insert("com.docker.compose.service".to_string(), "devcontainer".to_string());
+    labels.insert("maintainer".to_string(), "dev-team".to_string());
+    labels.insert("devcontainer.metadata".to_string(), "{}".to_string());
+
+    let mut networks = HashMap::new();
+    networks.insert("bridge".to_string(), NetworkInfo {
+        network_id: "net123".to_string(),
+        ip_address: Some("172.17.0.2".to_string()),
+        gateway: Some("172.17.0.1".to_string()),
+    });
+
+    app.discover_detail = Some(ContainerDetails {
+        id: ContainerId("abc123def456".to_string()),
+        name: "my-devcontainer".to_string(),
+        image: "mcr.microsoft.com/devcontainers/rust:1".to_string(),
+        image_id: "sha256:abcdef1234567890abcdef".to_string(),
+        status: ContainerStatus::Running,
+        created: 1705320000, // 2024-01-15 12:00:00 UTC
+        started_at: Some(1705320060),
+        finished_at: None,
+        exit_code: None,
+        labels,
+        env: vec![
+            "PATH=/usr/bin".to_string(),
+            "HOME=/root".to_string(),
+            "RUST_LOG=debug".to_string(),
+            "CARGO_HOME=/usr/local/cargo".to_string(),
+            "HOSTNAME=abc123".to_string(),
+        ],
+        mounts: vec![
+            MountInfo {
+                mount_type: "bind".to_string(),
+                source: "/home/user/project".to_string(),
+                destination: "/workspaces/project".to_string(),
+                read_only: false,
+            },
+            MountInfo {
+                mount_type: "volume".to_string(),
+                source: "vscode-extensions".to_string(),
+                destination: "/root/.vscode-server/extensions".to_string(),
+                read_only: false,
+            },
+        ],
+        ports: vec![PortInfo {
+            container_port: 8080,
+            host_port: Some(8080),
+            protocol: "tcp".to_string(),
+            host_ip: Some("0.0.0.0".to_string()),
+        }],
+        network_settings: NetworkSettings {
+            ip_address: Some("172.17.0.2".to_string()),
+            gateway: Some("172.17.0.1".to_string()),
+            networks,
+        },
+    });
+    app.discover_detail_scroll = 0;
+    app.view = View::DiscoverDetail;
 
     let output = render_app(&mut app, 90, 30);
     insta::assert_snapshot!(output);

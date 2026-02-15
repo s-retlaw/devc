@@ -6,9 +6,10 @@ expression: output
 │ 1:Contai│Name:        my-rust-project                              │         │
 └─────────│Status:      running                                      │─────────┘
 ┌ Containe│Provider:    docker                                       │─────────┐
-│      Nam│ID:          test-my-rust-project                         │ce       │
-│         │                                                          │         │
-│▶ ●   my-│Workspace:   /tmp/test                                    │st       │
+│      Nam│Source:      Devc                                         │ce       │
+│         │ID:          test-my-rust-project                         │         │
+│▶ ●   my-│                                                          │st       │
+│         │Workspace:   /tmp/test                                    │         │
 │         │Config:      /tmp/test/.devcontainer/devcontainer.json    │         │
 │         │                                                          │         │
 │         │Image ID:    sha256:abc123                                │         │
@@ -17,12 +18,11 @@ expression: output
 │         │Created:     2024-01-15 12:00:00                          │         │
 │         │Last used:   2024-01-15 12:00:00                          │         │
 │         │                                                          │         │
-│         │                                                          │         │
 │         └──────────────────────────────────────────────────────────┘         │
 │                                                                              │
 │                                                                              │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│s: Stop  R: Rebuild  l: Logs  S: Shell  d: Delete  1-3: Switch tab  Esc/q: Bac│
+│j/k: Scroll  s: Stop  R: Rebuild  l: Logs  S: Shell  d: Delete  1-3: Switch ta│
 └──────────────────────────────────────────────────────────────────────────────┘

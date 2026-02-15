@@ -104,6 +104,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_main_content(frame, app, content_area);
             draw_confirm_dialog(frame, app, area);
         }
+        View::DiscoverDetail => {
+            draw_main_content(frame, app, content_area);
+            let popup = popup_rect(75, 75, 58, 20, content_area);
+            frame.render_widget(Clear, popup);
+            draw_discover_detail(frame, app, popup);
+        }
         View::Shell => {
             // Shell mode is handled before drawing - this shouldn't be reached
             // but we need to handle it for exhaustive matching
@@ -269,6 +275,8 @@ fn container_detail_footer(app: &App) -> String {
 
     if has_services {
         keys.push("j/k: Select service");
+    } else {
+        keys.push("j/k: Scroll");
     }
 
     if let Some(st) = status {
@@ -315,7 +323,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         View::Main => match app.tab {
             Tab::Containers => {
                 if app.discover_mode {
-                    "Esc/q: Exit  j/k: Navigate  a: Adopt  r: Refresh  ?: Help".to_string()
+                    "Esc/q: Exit  j/k: Navigate  Enter: Details  a: Adopt  r: Refresh  ?: Help".to_string()
                 } else {
                     container_list_footer(app)
                 }
@@ -372,6 +380,15 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 "y/Enter: Confirm  n/Esc: Cancel  Space: Toggle no-cache".to_string()
             } else {
                 "y/Enter: Yes  n/Esc: No".to_string()
+            }
+        }
+        View::DiscoverDetail => {
+            let can_adopt = app.discovered_containers.get(app.selected_discovered)
+                .map(|c| c.source != DevcontainerSource::Devc).unwrap_or(false);
+            if can_adopt {
+                "j/k: Scroll  a: Adopt  Esc: Back".to_string()
+            } else {
+                "j/k: Scroll  Esc: Back".to_string()
             }
         }
         View::Shell => "Ctrl+\\ to detach and return to TUI (session preserved)".to_string(),
@@ -915,7 +932,10 @@ fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Build the info text lines for the container detail view
-fn build_detail_text(container: &devc_core::ContainerState) -> Vec<Line<'static>> {
+fn build_detail_text(
+    container: &devc_core::ContainerState,
+    details: Option<&devc_provider::ContainerDetails>,
+) -> Vec<Line<'static>> {
     let status_color = match container.status {
         DevcContainerStatus::Available => Color::DarkGray,
         DevcContainerStatus::Running => Color::Green,
@@ -927,7 +947,7 @@ fn build_detail_text(container: &devc_core::ContainerState) -> Vec<Line<'static>
         DevcContainerStatus::Configured => Color::DarkGray,
     };
 
-    let text = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::raw("Name:        "),
             Span::styled(container.name.clone(), Style::default().bold()),
@@ -942,6 +962,10 @@ fn build_detail_text(container: &devc_core::ContainerState) -> Vec<Line<'static>
         Line::from(vec![
             Span::raw("Provider:    "),
             Span::raw(container.provider.to_string()),
+        ]),
+        Line::from(vec![
+            Span::raw("Source:      "),
+            Span::styled(format!("{:?}", container.source), Style::default().fg(Color::Cyan)),
         ]),
         Line::from(vec![
             Span::raw("ID:          "),
@@ -976,7 +1000,129 @@ fn build_detail_text(container: &devc_core::ContainerState) -> Vec<Line<'static>
         ]),
     ];
 
-    text
+    // Add inspect-based sections when available
+    if let Some(details) = details {
+        if let Some(code) = details.exit_code {
+            let color = if code == 0 { Color::Green } else { Color::Red };
+            lines.push(Line::from(vec![
+                Span::raw("Exit Code:   "),
+                Span::styled(code.to_string(), Style::default().fg(color)),
+            ]));
+        }
+
+        // Ports
+        if !details.ports.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("─── Ports ───", Style::default().fg(Color::DarkGray))));
+            for p in &details.ports {
+                let host = p.host_port.map(|hp| hp.to_string()).unwrap_or_else(|| "-".to_string());
+                lines.push(Line::from(format!(
+                    "  {}:{} → {}",
+                    host, p.container_port, p.protocol,
+                )));
+            }
+        }
+
+        // Mounts (all types)
+        if !details.mounts.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("─── Mounts ───", Style::default().fg(Color::DarkGray))));
+            for m in &details.mounts {
+                let ro = if m.read_only { " (ro)" } else { "" };
+                lines.push(Line::from(format!(
+                    "  [{}] {} → {}{}",
+                    m.mount_type, m.source, m.destination, ro,
+                )));
+            }
+        }
+
+        // Networks
+        let has_network = details.network_settings.ip_address.is_some()
+            || details.network_settings.gateway.is_some()
+            || !details.network_settings.networks.is_empty();
+        if has_network {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("─── Network ───", Style::default().fg(Color::DarkGray))));
+            if let Some(ip) = &details.network_settings.ip_address {
+                lines.push(Line::from(vec![
+                    Span::raw("IP:          "),
+                    Span::raw(ip.clone()),
+                ]));
+            }
+            if let Some(gw) = &details.network_settings.gateway {
+                lines.push(Line::from(vec![
+                    Span::raw("Gateway:     "),
+                    Span::raw(gw.clone()),
+                ]));
+            }
+            let mut net_names: Vec<_> = details.network_settings.networks.keys().collect();
+            net_names.sort();
+            for net_name in net_names {
+                let net_info = &details.network_settings.networks[net_name];
+                let mut parts = vec![Span::raw(format!("  {}:", net_name))];
+                if let Some(ip) = &net_info.ip_address {
+                    parts.push(Span::raw(format!(" {}", ip)));
+                }
+                if let Some(gw) = &net_info.gateway {
+                    parts.push(Span::styled(format!(" (gw {})", gw), Style::default().fg(Color::DarkGray)));
+                }
+                lines.push(Line::from(parts));
+            }
+        }
+
+        // Labels
+        if !details.labels.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("─── Labels ───", Style::default().fg(Color::DarkGray))));
+
+            let well_known = [
+                "devcontainer.local_folder",
+                "devcontainer.config_file",
+                "devc.managed",
+                "devc.project",
+                "devc.workspace",
+                "com.docker.compose.service",
+                "com.docker.compose.project",
+            ];
+            for key in well_known {
+                if let Some(val) = details.labels.get(key) {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {}: ", key), Style::default().fg(Color::Cyan)),
+                        Span::raw(val.clone()),
+                    ]));
+                }
+            }
+
+            let mut remaining: Vec<_> = details.labels.iter()
+                .filter(|(k, _)| !well_known.contains(&k.as_str()) && k.as_str() != "devcontainer.metadata")
+                .collect();
+            remaining.sort_by_key(|(k, _)| (*k).clone());
+            for (key, val) in remaining {
+                lines.push(Line::from(format!("  {}: {}", key, val)));
+            }
+        }
+
+        // Environment
+        if !details.env.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("─── Environment ───", Style::default().fg(Color::DarkGray))));
+
+            let skip_prefixes = [
+                "PATH=", "HOME=", "HOSTNAME=", "TERM=", "LANG=", "SHELL=",
+                "USER=", "SHLVL=", "PWD=", "OLDPWD=", "LC_", "LESSOPEN=",
+                "LESSCLOSE=", "LS_COLORS=", "_=",
+            ];
+            let mut env_sorted = details.env.clone();
+            env_sorted.sort();
+            for var in &env_sorted {
+                if !skip_prefixes.iter().any(|p| var.starts_with(p)) {
+                    lines.push(Line::from(format!("  {}", var)));
+                }
+            }
+        }
+    }
+
+    lines
 }
 
 /// Draw the container detail view
@@ -987,7 +1133,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let is_compose = container.compose_project.is_some();
-    let text = build_detail_text(&container);
+    let text = build_detail_text(&container, app.container_detail.as_ref());
 
     if is_compose {
         // For compose containers, render outer block then split into info + services
@@ -1011,7 +1157,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
         draw_compose_services(frame, app, &container, chunks[1]);
     } else {
-        // Non-compose: single Paragraph as before
+        // Non-compose: scrollable Paragraph
         let detail = Paragraph::new(text)
             .block(
                 Block::default()
@@ -1019,10 +1165,237 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)),
             )
-            .wrap(Wrap { trim: true });
+            .wrap(Wrap { trim: true })
+            .scroll((app.container_detail_scroll as u16, 0));
 
         frame.render_widget(detail, area);
     }
+}
+
+/// Build detail text lines from a ContainerDetails (discovered container inspect)
+fn build_discover_detail_text(
+    details: &devc_provider::ContainerDetails,
+    discovered: &devc_provider::DiscoveredContainer,
+) -> Vec<Line<'static>> {
+    use devc_provider::ContainerStatus;
+
+    let status_color = match details.status {
+        ContainerStatus::Running => Color::Green,
+        ContainerStatus::Exited | ContainerStatus::Dead => Color::Red,
+        ContainerStatus::Paused => Color::Yellow,
+        ContainerStatus::Created => Color::Cyan,
+        _ => Color::DarkGray,
+    };
+
+    let format_ts = |ts: i64| -> String {
+        chrono::DateTime::from_timestamp(ts, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "N/A".to_string())
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled("─── Identity ───", Style::default().fg(Color::DarkGray))),
+        Line::from(vec![
+            Span::raw("Name:        "),
+            Span::styled(details.name.clone(), Style::default().bold()),
+        ]),
+        Line::from(vec![
+            Span::raw("ID:          "),
+            Span::styled(
+                details.id.0.chars().take(12).collect::<String>(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Image:       "),
+            Span::raw(details.image.clone()),
+        ]),
+        Line::from(vec![
+            Span::raw("Image ID:    "),
+            Span::styled(
+                details.image_id.chars().take(19).collect::<String>(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Provider:    "),
+            Span::raw(discovered.provider.to_string()),
+        ]),
+        Line::from(vec![
+            Span::raw("Source:      "),
+            Span::styled(format!("{:?}", discovered.source), Style::default().fg(Color::Cyan)),
+        ]),
+    ];
+    if let Some(ws) = &discovered.workspace_path {
+        lines.push(Line::from(vec![
+            Span::raw("Workspace:   "),
+            Span::raw(ws.clone()),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("─── Status ───", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(vec![
+        Span::raw("Status:      "),
+        Span::styled(format!("{:?}", details.status), Style::default().fg(status_color).bold()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("Created:     "),
+        Span::raw(format_ts(details.created)),
+    ]));
+
+    if let Some(ts) = details.started_at {
+        lines.push(Line::from(vec![
+            Span::raw("Started:     "),
+            Span::raw(format_ts(ts)),
+        ]));
+    }
+    if let Some(ts) = details.finished_at {
+        lines.push(Line::from(vec![
+            Span::raw("Finished:    "),
+            Span::raw(format_ts(ts)),
+        ]));
+    }
+    if let Some(code) = details.exit_code {
+        let color = if code == 0 { Color::Green } else { Color::Red };
+        lines.push(Line::from(vec![
+            Span::raw("Exit Code:   "),
+            Span::styled(code.to_string(), Style::default().fg(color)),
+        ]));
+    }
+
+    // Ports
+    if !details.ports.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("─── Ports ───", Style::default().fg(Color::DarkGray))));
+        for p in &details.ports {
+            let host = p.host_port.map(|hp| hp.to_string()).unwrap_or_else(|| "-".to_string());
+            lines.push(Line::from(format!(
+                "  {}:{} → {}",
+                host,
+                p.container_port,
+                p.protocol,
+            )));
+        }
+    }
+
+    // Mounts (all types)
+    if !details.mounts.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("─── Mounts ───", Style::default().fg(Color::DarkGray))));
+        for m in &details.mounts {
+            let ro = if m.read_only { " (ro)" } else { "" };
+            lines.push(Line::from(format!(
+                "  [{}] {} → {}{}",
+                m.mount_type, m.source, m.destination, ro,
+            )));
+        }
+    }
+
+    // Networks
+    let has_network = details.network_settings.ip_address.is_some()
+        || details.network_settings.gateway.is_some()
+        || !details.network_settings.networks.is_empty();
+    if has_network {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("─── Network ───", Style::default().fg(Color::DarkGray))));
+        if let Some(ip) = &details.network_settings.ip_address {
+            lines.push(Line::from(vec![
+                Span::raw("IP:          "),
+                Span::raw(ip.clone()),
+            ]));
+        }
+        if let Some(gw) = &details.network_settings.gateway {
+            lines.push(Line::from(vec![
+                Span::raw("Gateway:     "),
+                Span::raw(gw.clone()),
+            ]));
+        }
+        let mut net_names: Vec<_> = details.network_settings.networks.keys().collect();
+        net_names.sort();
+        for net_name in net_names {
+            let net_info = &details.network_settings.networks[net_name];
+            let mut parts = vec![Span::raw(format!("  {}:", net_name))];
+            if let Some(ip) = &net_info.ip_address {
+                parts.push(Span::raw(format!(" {}", ip)));
+            }
+            if let Some(gw) = &net_info.gateway {
+                parts.push(Span::styled(format!(" (gw {})", gw), Style::default().fg(Color::DarkGray)));
+            }
+            lines.push(Line::from(parts));
+        }
+    }
+
+    // Labels
+    if !details.labels.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("─── Labels ───", Style::default().fg(Color::DarkGray))));
+
+        let well_known = [
+            "devcontainer.local_folder",
+            "devcontainer.config_file",
+            "devc.managed",
+            "devc.project",
+            "devc.workspace",
+            "com.docker.compose.service",
+            "com.docker.compose.project",
+        ];
+        for key in well_known {
+            if let Some(val) = details.labels.get(key) {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {}: ", key), Style::default().fg(Color::Cyan)),
+                    Span::raw(val.clone()),
+                ]));
+            }
+        }
+
+        let mut remaining: Vec<_> = details.labels.iter()
+            .filter(|(k, _)| !well_known.contains(&k.as_str()) && k.as_str() != "devcontainer.metadata")
+            .collect();
+        remaining.sort_by_key(|(k, _)| (*k).clone());
+        for (key, val) in remaining {
+            lines.push(Line::from(format!("  {}: {}", key, val)));
+        }
+    }
+
+    // Environment
+    if !details.env.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("─── Environment ───", Style::default().fg(Color::DarkGray))));
+
+        let skip_prefixes = [
+            "PATH=", "HOME=", "HOSTNAME=", "TERM=", "LANG=", "SHELL=",
+            "USER=", "SHLVL=", "PWD=", "OLDPWD=", "LC_", "LESSOPEN=",
+            "LESSCLOSE=", "LS_COLORS=", "_=",
+        ];
+        let mut env_sorted = details.env.clone();
+        env_sorted.sort();
+        for var in &env_sorted {
+            if !skip_prefixes.iter().any(|p| var.starts_with(p)) {
+                lines.push(Line::from(format!("  {}", var)));
+            }
+        }
+    }
+
+    lines
+}
+
+/// Draw the discover detail popup
+fn draw_discover_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let discovered = app.discovered_containers.get(app.selected_discovered);
+    let name = discovered.map(|c| c.name.as_str()).unwrap_or("Unknown");
+    let lines = match (&app.discover_detail, discovered) {
+        (Some(details), Some(disc)) => build_discover_detail_text(details, disc),
+        _ => vec![Line::from("Loading...")],
+    };
+    let detail = Paragraph::new(lines)
+        .block(Block::default()
+            .title(format!(" {} ", name))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)))
+        .wrap(Wrap { trim: true })
+        .scroll((app.discover_detail_scroll as u16, 0));
+    frame.render_widget(detail, area);
 }
 
 /// Draw the compose services table within the detail popup
