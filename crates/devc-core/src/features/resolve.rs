@@ -269,12 +269,13 @@ fn parse_oci_ref(id: &str) -> FeatureSource {
     // Split into registry and the rest
     // If the first segment contains a dot or colon, it's a registry hostname
     let parts: Vec<&str> = path.splitn(2, '/').collect();
-    let (registry, remainder) = if parts.len() == 2 && (parts[0].contains('.') || parts[0].contains(':')) {
-        (parts[0].to_string(), parts[1])
-    } else {
-        // Default registry (shouldn't normally happen for devcontainer features)
-        ("ghcr.io".to_string(), path)
-    };
+    let (registry, remainder) =
+        if parts.len() == 2 && (parts[0].contains('.') || parts[0].contains(':')) {
+            (parts[0].to_string(), parts[1])
+        } else {
+            // Default registry (shouldn't normally happen for devcontainer features)
+            ("ghcr.io".to_string(), path)
+        };
 
     // Split remainder into namespace (everything before last /) and name (last segment)
     let (namespace, name) = match remainder.rsplit_once('/') {
@@ -374,11 +375,15 @@ pub fn order_features(features: Vec<ResolvedFeature>) -> crate::Result<Vec<Resol
     let find_idx = |dep_id: &str, self_idx: usize| -> Option<usize> {
         // Try exact match first, then short-id
         if let Some(&j) = id_to_idx.get(dep_id) {
-            if j != self_idx { return Some(j); }
+            if j != self_idx {
+                return Some(j);
+            }
         }
         let short = extract_feature_short_id(dep_id);
         if let Some(&j) = id_to_idx.get(&short) {
-            if j != self_idx { return Some(j); }
+            if j != self_idx {
+                return Some(j);
+            }
         }
         None
     };
@@ -440,9 +445,7 @@ pub fn order_features(features: Vec<ResolvedFeature>) -> crate::Result<Vec<Resol
     // Handle remaining features (cycles)
     if result_indices.len() < n {
         // Check if any stuck feature has an unsatisfied hard dependency
-        let stuck: Vec<usize> = (0..n)
-            .filter(|i| !result_indices.contains(i))
-            .collect();
+        let stuck: Vec<usize> = (0..n).filter(|i| !result_indices.contains(i)).collect();
 
         // Check for hard cycles: does any stuck feature have a hard edge from another stuck feature?
         let stuck_set: std::collections::HashSet<usize> = stuck.iter().copied().collect();
@@ -465,7 +468,9 @@ pub fn order_features(features: Vec<ResolvedFeature>) -> crate::Result<Vec<Resol
         }
 
         if has_hard_cycle {
-            return Err(CoreError::FeatureDependencyCycle(cycle_features.join(" -> ")));
+            return Err(CoreError::FeatureDependencyCycle(
+                cycle_features.join(" -> "),
+            ));
         }
 
         // Only soft cycles — break by appending in declaration order
@@ -771,7 +776,8 @@ mod tests {
     #[test]
     fn test_parse_feature_ref_url_not_oci() {
         // URLs should not be misrouted to the OCI parser
-        let source = parse_feature_ref("https://github.com/user/repo/releases/download/v1/feature.tar.gz");
+        let source =
+            parse_feature_ref("https://github.com/user/repo/releases/download/v1/feature.tar.gz");
         match source {
             FeatureSource::TarballUrl { url } => {
                 assert!(url.starts_with("https://"));
@@ -857,7 +863,10 @@ mod tests {
             make_feature_with_props(
                 "cpp",
                 Some(vec!["SYS_PTRACE".to_string(), "NET_ADMIN".to_string()]),
-                Some(vec!["seccomp=unconfined".to_string(), "apparmor=unconfined".to_string()]),
+                Some(vec![
+                    "seccomp=unconfined".to_string(),
+                    "apparmor=unconfined".to_string(),
+                ]),
                 Some(true),
                 None,
             ),
@@ -915,10 +924,7 @@ mod tests {
             "privileged": false
         }"#;
         let metadata: FeatureMetadata = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            metadata.cap_add,
-            Some(vec!["SYS_PTRACE".to_string()])
-        );
+        assert_eq!(metadata.cap_add, Some(vec!["SYS_PTRACE".to_string()]));
         assert_eq!(
             metadata.security_opt,
             Some(vec!["seccomp=unconfined".to_string()])
@@ -935,9 +941,9 @@ mod tests {
                 dir: PathBuf::from("/tmp/features/a"),
                 options: HashMap::new(),
                 metadata: FeatureMetadata {
-                    mounts: Some(vec![
-                        Mount::String("type=volume,source=vol-a,target=/data-a".to_string()),
-                    ]),
+                    mounts: Some(vec![Mount::String(
+                        "type=volume,source=vol-a,target=/data-a".to_string(),
+                    )]),
                     ..Default::default()
                 },
             },
@@ -956,7 +962,11 @@ mod tests {
             },
         ];
         let result = merge_feature_properties(&features);
-        assert_eq!(result.mounts.len(), 2, "duplicate mount should be deduplicated");
+        assert_eq!(
+            result.mounts.len(),
+            2,
+            "duplicate mount should be deduplicated"
+        );
         assert_eq!(
             result.mounts[0],
             Mount::String("type=volume,source=vol-a,target=/data-a".to_string())
@@ -1045,9 +1055,7 @@ mod tests {
                 options: HashMap::new(),
                 metadata: FeatureMetadata {
                     on_create_command: Some(Command::String("echo feat-b-oncreate".to_string())),
-                    post_start_command: Some(Command::String(
-                        "echo feat-b-poststart".to_string(),
-                    )),
+                    post_start_command: Some(Command::String("echo feat-b-poststart".to_string())),
                     post_attach_command: Some(Command::Array(vec![
                         "echo".to_string(),
                         "feat-b-postattach".to_string(),
@@ -1178,7 +1186,9 @@ mod tests {
     fn test_has_container_properties_mounts_only() {
         use devc_config::Mount;
         let props = MergedFeatureProperties {
-            mounts: vec![Mount::String("type=volume,source=v,target=/data".to_string())],
+            mounts: vec![Mount::String(
+                "type=volume,source=v,target=/data".to_string(),
+            )],
             ..Default::default()
         };
         // Mounts alone don't count as container properties for compose override
@@ -1237,7 +1247,11 @@ mod tests {
             },
         ];
         let result = merge_feature_properties(&features);
-        assert_eq!(result.remote_env.get("EDITOR").unwrap(), "vim", "later feature should override");
+        assert_eq!(
+            result.remote_env.get("EDITOR").unwrap(),
+            "vim",
+            "later feature should override"
+        );
         assert_eq!(result.remote_env.get("FOO").unwrap(), "bar");
         assert_eq!(result.remote_env.get("BAZ").unwrap(), "qux");
         assert_eq!(result.remote_env.len(), 3);
@@ -1309,8 +1323,15 @@ mod tests {
         let metadata: FeatureMetadata = serde_json::from_str(json).unwrap();
         let deps = metadata.depends_on.unwrap();
         assert_eq!(deps.len(), 2);
-        assert_eq!(deps.get("ghcr.io/devcontainers/features/common-utils:2").unwrap(), &serde_json::json!({}));
-        assert_eq!(deps.get("./local-dep").unwrap(), &serde_json::json!({"magicNumber": "42"}));
+        assert_eq!(
+            deps.get("ghcr.io/devcontainers/features/common-utils:2")
+                .unwrap(),
+            &serde_json::json!({})
+        );
+        assert_eq!(
+            deps.get("./local-dep").unwrap(),
+            &serde_json::json!({"magicNumber": "42"})
+        );
     }
 
     #[test]

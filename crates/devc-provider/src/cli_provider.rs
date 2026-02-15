@@ -7,10 +7,10 @@
 //! - Works with Docker alternatives (Colima, Rancher, Lima, OrbStack)
 
 use crate::{
-    BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider,
-    ContainerStatus, CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig,
-    ExecResult, ExecStream, ImageId, LogConfig, LogStream, MountInfo, MountType, NetworkInfo,
-    NetworkSettings, PortInfo, ProviderError, ProviderInfo, ProviderType, Result,
+    BuildConfig, ContainerDetails, ContainerId, ContainerInfo, ContainerProvider, ContainerStatus,
+    CreateContainerConfig, DevcontainerSource, DiscoveredContainer, ExecConfig, ExecResult,
+    ExecStream, ImageId, LogConfig, LogStream, MountInfo, MountType, NetworkInfo, NetworkSettings,
+    PortInfo, ProviderError, ProviderInfo, ProviderType, Result,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -107,7 +107,9 @@ impl CliProvider {
 
     /// Build `--env=K=V` arguments from an environment variable map
     fn env_args(env: &HashMap<String, String>) -> Vec<String> {
-        env.iter().map(|(k, v)| format!("--env={}={}", k, v)).collect()
+        env.iter()
+            .map(|(k, v)| format!("--env={}={}", k, v))
+            .collect()
     }
 
     /// Check if we should use --userns=keep-id (podman rootless)
@@ -547,7 +549,7 @@ impl ContainerProvider for CliProvider {
         if self.cmd_prefix.is_empty() {
             (self.cmd.clone(), vec![])
         } else {
-            let mut args: Vec<String> = self.cmd_prefix[1..].iter().cloned().collect();
+            let mut args: Vec<String> = self.cmd_prefix[1..].to_vec();
             args.push(self.cmd.clone());
             (self.cmd_prefix[0].clone(), args)
         }
@@ -875,8 +877,14 @@ fn parse_inspect_output(output: &str, id: &ContainerId) -> Result<ContainerDetai
     let network_settings = network_settings_json
         .and_then(|ns| ns.as_object())
         .map(|ns| {
-            let ip_address = ns.get("IPAddress").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let gateway = ns.get("Gateway").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let ip_address = ns
+                .get("IPAddress")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let gateway = ns
+                .get("Gateway")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             let networks = ns
                 .get("Networks")
@@ -984,7 +992,11 @@ fn parse_discover_output(output: &str, provider_type: ProviderType) -> Vec<Disco
 
         let created = {
             let raw = parts[5].trim();
-            if raw.is_empty() { None } else { Some(raw.to_string()) }
+            if raw.is_empty() {
+                None
+            } else {
+                Some(raw.to_string())
+            }
         };
 
         discovered.push(DiscoveredContainer {
@@ -1034,7 +1046,10 @@ fn detect_devcontainer_source_from_labels(
     }
 
     // Check for DevPod labels (case-insensitive prefix)
-    if labels.keys().any(|k| k.to_lowercase().starts_with("devpod.")) {
+    if labels
+        .keys()
+        .any(|k| k.to_lowercase().starts_with("devpod."))
+    {
         return (true, DevcontainerSource::DevPod, false);
     }
 
@@ -1079,9 +1094,7 @@ fn parse_compose_ps_output(stdout: &str) -> Vec<crate::ComposeServiceInfo> {
             .or_else(|| parsed["Id"].as_str())
             .unwrap_or("")
             .to_string();
-        let state = parsed["State"]
-            .as_str()
-            .unwrap_or("unknown");
+        let state = parsed["State"].as_str().unwrap_or("unknown");
 
         services.push(crate::ComposeServiceInfo {
             service_name,
@@ -1359,7 +1372,10 @@ mod tests {
 
         // Labels
         assert_eq!(details.labels.get("devc.managed").unwrap(), "true");
-        assert_eq!(details.labels.get("devc.workspace").unwrap(), "/home/user/project");
+        assert_eq!(
+            details.labels.get("devc.workspace").unwrap(),
+            "/home/user/project"
+        );
 
         // Env
         assert_eq!(details.env.len(), 2);
@@ -1377,14 +1393,24 @@ mod tests {
 
         // Ports
         assert!(details.ports.len() >= 1);
-        let tcp_3000 = details.ports.iter().find(|p| p.container_port == 3000).unwrap();
+        let tcp_3000 = details
+            .ports
+            .iter()
+            .find(|p| p.container_port == 3000)
+            .unwrap();
         assert_eq!(tcp_3000.host_port, Some(3000));
         assert_eq!(tcp_3000.host_ip.as_deref(), Some("0.0.0.0"));
         assert_eq!(tcp_3000.protocol, "tcp");
 
         // Network settings
-        assert_eq!(details.network_settings.ip_address.as_deref(), Some("172.17.0.2"));
-        assert_eq!(details.network_settings.gateway.as_deref(), Some("172.17.0.1"));
+        assert_eq!(
+            details.network_settings.ip_address.as_deref(),
+            Some("172.17.0.2")
+        );
+        assert_eq!(
+            details.network_settings.gateway.as_deref(),
+            Some("172.17.0.1")
+        );
         assert!(details.network_settings.networks.contains_key("bridge"));
 
         // Timestamps
@@ -1496,11 +1522,19 @@ mod tests {
         let details = parse_inspect_output(output, &id).unwrap();
 
         // Port 80 has 2 bindings (IPv4 + IPv6)
-        let port_80: Vec<_> = details.ports.iter().filter(|p| p.container_port == 80).collect();
+        let port_80: Vec<_> = details
+            .ports
+            .iter()
+            .filter(|p| p.container_port == 80)
+            .collect();
         assert_eq!(port_80.len(), 2);
 
         // Port 443 has 1 binding
-        let port_443: Vec<_> = details.ports.iter().filter(|p| p.container_port == 443).collect();
+        let port_443: Vec<_> = details
+            .ports
+            .iter()
+            .filter(|p| p.container_port == 443)
+            .collect();
         assert_eq!(port_443.len(), 1);
         assert_eq!(port_443[0].host_port, Some(8443));
     }
@@ -1514,7 +1548,10 @@ mod tests {
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].name, "my-devc");
         assert_eq!(discovered[0].source, DevcontainerSource::Devc);
-        assert_eq!(discovered[0].workspace_path.as_deref(), Some("/home/user/proj"));
+        assert_eq!(
+            discovered[0].workspace_path.as_deref(),
+            Some("/home/user/proj")
+        );
         assert_eq!(discovered[0].provider, ProviderType::Docker);
     }
 
@@ -1524,7 +1561,10 @@ mod tests {
         let discovered = parse_discover_output(output, ProviderType::Podman);
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].source, DevcontainerSource::VsCode);
-        assert_eq!(discovered[0].workspace_path.as_deref(), Some("/home/user/webapp"));
+        assert_eq!(
+            discovered[0].workspace_path.as_deref(),
+            Some("/home/user/webapp")
+        );
         assert_eq!(discovered[0].provider, ProviderType::Podman);
     }
 
@@ -1582,10 +1622,16 @@ mod tests {
         assert_eq!(ContainerStatus::from("exited"), ContainerStatus::Exited);
         assert_eq!(ContainerStatus::from("created"), ContainerStatus::Created);
         assert_eq!(ContainerStatus::from("paused"), ContainerStatus::Paused);
-        assert_eq!(ContainerStatus::from("restarting"), ContainerStatus::Restarting);
+        assert_eq!(
+            ContainerStatus::from("restarting"),
+            ContainerStatus::Restarting
+        );
         assert_eq!(ContainerStatus::from("removing"), ContainerStatus::Removing);
         assert_eq!(ContainerStatus::from("dead"), ContainerStatus::Dead);
-        assert_eq!(ContainerStatus::from("something_else"), ContainerStatus::Unknown);
+        assert_eq!(
+            ContainerStatus::from("something_else"),
+            ContainerStatus::Unknown
+        );
         assert_eq!(ContainerStatus::from(""), ContainerStatus::Unknown);
     }
 
@@ -1729,7 +1775,10 @@ mod tests {
             ..Default::default()
         };
 
-        let id = provider.create(&config).await.expect("create should succeed");
+        let id = provider
+            .create(&config)
+            .await
+            .expect("create should succeed");
         provider.start(&id).await.expect("start should succeed");
 
         // Verify init flag
@@ -1805,7 +1854,10 @@ mod tests {
             ..Default::default()
         };
 
-        let id = provider.create(&config).await.expect("create should succeed");
+        let id = provider
+            .create(&config)
+            .await
+            .expect("create should succeed");
 
         // Inspect the container's command — should be image default, not sleep infinity
         let cmd_output = provider
@@ -1850,7 +1902,10 @@ mod tests {
             ..Default::default()
         };
 
-        let id = provider.create(&config).await.expect("create should succeed");
+        let id = provider
+            .create(&config)
+            .await
+            .expect("create should succeed");
         provider.start(&id).await.expect("start should succeed");
 
         // Verify env vars via exec
@@ -1862,7 +1917,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        let result = provider.exec(&id, &exec_config).await.expect("exec should succeed");
+        let result = provider
+            .exec(&id, &exec_config)
+            .await
+            .expect("exec should succeed");
         assert!(
             result.output.contains("hello"),
             "MY_VAR should be 'hello', got: {}",
@@ -1877,7 +1935,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        let result2 = provider.exec(&id, &exec_config2).await.expect("exec should succeed");
+        let result2 = provider
+            .exec(&id, &exec_config2)
+            .await
+            .expect("exec should succeed");
         assert!(
             result2.output.contains("world"),
             "ANOTHER should be 'world', got: {}",

@@ -166,8 +166,8 @@ pub(super) fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
-        let mut scrollbar_state = ScrollbarState::new(total_lines.saturating_sub(inner_height))
-            .position(app.logs_scroll);
+        let mut scrollbar_state =
+            ScrollbarState::new(total_lines.saturating_sub(inner_height)).position(app.logs_scroll);
 
         // Render scrollbar in a slightly inset area
         let scrollbar_area = Rect {

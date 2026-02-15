@@ -9,7 +9,6 @@ use tokio::sync::mpsc;
 /// All port-forwarding state, both per-view and persistent across views.
 pub struct PortForwardingState {
     // === Per-view state (cleared when exiting ports view) ===
-
     /// Container currently being viewed for port forwarding (devc container ID)
     pub container_id: Option<String>,
     /// Provider container ID for the ports view
@@ -32,12 +31,10 @@ pub struct PortForwardingState {
     pub port_detect_handle: Option<tokio::task::JoinHandle<()>>,
 
     // === Persistent state (survives view changes) ===
-
     /// Active port forwarders: (container_id, port) -> PortForwarder
     pub active_forwarders: HashMap<(String, u16), PortForwarder>,
 
     // === Auto port forwarding state ===
-
     /// Background port detectors for auto-forwarding, keyed by provider container ID
     pub auto_port_detectors: HashMap<String, mpsc::UnboundedReceiver<PortDetectionUpdate>>,
     /// Auto-forward configurations per provider container ID
@@ -75,15 +72,16 @@ impl PortForwardingState {
 
     /// Handle a port detection update (updates detected_ports list)
     pub fn handle_port_update(&mut self, update: PortDetectionUpdate) {
-        let forwarded_ports: HashSet<u16> = if let Some(ref container_id) = self.provider_container_id {
-            self.active_forwarders
-                .keys()
-                .filter(|(cid, _)| cid == container_id)
-                .map(|(_, port)| *port)
-                .collect()
-        } else {
-            HashSet::new()
-        };
+        let forwarded_ports: HashSet<u16> =
+            if let Some(ref container_id) = self.provider_container_id {
+                self.active_forwarders
+                    .keys()
+                    .filter(|(cid, _)| cid == container_id)
+                    .map(|(_, port)| *port)
+                    .collect()
+            } else {
+                HashSet::new()
+            };
 
         self.detected_ports = update
             .ports
@@ -113,7 +111,8 @@ impl PortForwardingState {
     /// Move selection to the previous port (wrapping)
     pub fn select_prev(&mut self) {
         if !self.detected_ports.is_empty() {
-            self.selected_port = self.selected_port
+            self.selected_port = self
+                .selected_port
                 .checked_sub(1)
                 .unwrap_or(self.detected_ports.len() - 1);
             self.table_state.select(Some(self.selected_port));

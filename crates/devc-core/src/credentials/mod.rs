@@ -7,5 +7,5 @@
 pub mod host;
 pub mod inject;
 
-pub use inject::{setup_credentials, CredentialStatus};
 pub use host::discover_git_hosts;
+pub use inject::{setup_credentials, CredentialStatus};

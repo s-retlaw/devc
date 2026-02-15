@@ -70,10 +70,7 @@ impl EnhancedBuildContext {
         let temp_dir = tempfile::tempdir()?;
         let dockerfile_path = temp_dir.path().join("Dockerfile");
 
-        let dockerfile_content = format!(
-            "FROM {}\n{}",
-            base_image, DROPBEAR_INSTALL_SCRIPT
-        );
+        let dockerfile_content = format!("FROM {}\n{}", base_image, DROPBEAR_INSTALL_SCRIPT);
 
         std::fs::write(&dockerfile_path, dockerfile_content)?;
 
@@ -88,10 +85,7 @@ impl EnhancedBuildContext {
     /// Copies the original build context and appends dropbear installation
     /// to the Dockerfile. If the original Dockerfile has a USER instruction,
     /// restores that user after the root-privileged installation.
-    pub fn from_dockerfile(
-        original_context: &Path,
-        dockerfile_name: &str,
-    ) -> Result<Self> {
+    pub fn from_dockerfile(original_context: &Path, dockerfile_name: &str) -> Result<Self> {
         let temp_dir = tempfile::tempdir()?;
 
         // Copy the entire build context to temp directory
@@ -108,8 +102,7 @@ impl EnhancedBuildContext {
             .rev()
             .find(|line| {
                 let trimmed = line.trim();
-                trimmed.to_uppercase().starts_with("USER ")
-                    && !trimmed.starts_with('#')
+                trimmed.to_uppercase().starts_with("USER ") && !trimmed.starts_with('#')
             })
             .map(|line| line.trim().to_string());
 
@@ -147,8 +140,7 @@ impl EnhancedBuildContext {
         // Copy feature directories into build context
         copy_features_to_context(features, temp_dir.path())?;
 
-        let feature_layers =
-            generate_all_feature_layers(features, "feature", remote_user);
+        let feature_layers = generate_all_feature_layers(features, "feature", remote_user);
 
         let ssh_section = if inject_ssh {
             DROPBEAR_INSTALL_SCRIPT.to_string()
@@ -204,16 +196,17 @@ impl EnhancedBuildContext {
             .rev()
             .find(|line| {
                 let trimmed = line.trim();
-                trimmed.to_uppercase().starts_with("USER ")
-                    && !trimmed.starts_with('#')
+                trimmed.to_uppercase().starts_with("USER ") && !trimmed.starts_with('#')
             })
             .map(|line| line.trim().to_string());
 
-        let feature_layers =
-            generate_all_feature_layers(features, "feature", remote_user);
+        let feature_layers = generate_all_feature_layers(features, "feature", remote_user);
 
         let ssh_section = if inject_ssh {
-            format!("\n# Added by devc for SSH support{}", DROPBEAR_INSTALL_SCRIPT)
+            format!(
+                "\n# Added by devc for SSH support{}",
+                DROPBEAR_INSTALL_SCRIPT
+            )
         } else {
             String::new()
         };
@@ -319,12 +312,8 @@ mod tests {
 
     #[test]
     fn test_from_image_with_features_rejects_malicious_name() {
-        let result = EnhancedBuildContext::from_image_with_features(
-            "bad\rimage",
-            &[],
-            false,
-            "root",
-        );
+        let result =
+            EnhancedBuildContext::from_image_with_features("bad\rimage", &[], false, "root");
         assert!(result.is_err());
     }
 
@@ -456,7 +445,10 @@ SHELL ["/bin/bash", "-c"]
             .iter()
             .filter(|l| l.trim().to_uppercase().starts_with("USER "))
             .collect();
-        assert!(user_lines.len() >= 2, "Should have at least 2 USER instructions");
+        assert!(
+            user_lines.len() >= 2,
+            "Should have at least 2 USER instructions"
+        );
         assert!(
             user_lines.last().unwrap().contains("vscode"),
             "Last USER should restore to vscode"
@@ -493,7 +485,11 @@ RUN dnf install -y bash
         // Create a fake feature directory with install.sh
         let feature_dir = tmp.path().join("node-feature");
         std::fs::create_dir_all(&feature_dir).unwrap();
-        std::fs::write(feature_dir.join("install.sh"), "#!/bin/bash\necho installing node").unwrap();
+        std::fs::write(
+            feature_dir.join("install.sh"),
+            "#!/bin/bash\necho installing node",
+        )
+        .unwrap();
         std::fs::write(
             feature_dir.join("devcontainer-feature.json"),
             r#"{"id": "node"}"#,
@@ -601,7 +597,9 @@ RUN dnf install -y bash
         // Should restore original user
         assert!(dockerfile.contains("Restore original user"));
         // Last USER line should be the restored user
-        let last_user_line = dockerfile.lines().rev()
+        let last_user_line = dockerfile
+            .lines()
+            .rev()
             .find(|l| l.trim().to_uppercase().starts_with("USER "))
             .unwrap();
         assert!(last_user_line.contains("developer"));

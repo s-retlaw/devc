@@ -39,7 +39,10 @@ impl SettingsSection {
             Self::ContainerDefaults => &[SettingsField::DefaultShell, SettingsField::DefaultUser],
             Self::Dotfiles => &[SettingsField::DotfilesRepo, SettingsField::DotfilesLocal],
             Self::Ssh => &[SettingsField::SshEnabled, SettingsField::SshKeyPath],
-            Self::Credentials => &[SettingsField::CredentialsDocker, SettingsField::CredentialsGit],
+            Self::Credentials => &[
+                SettingsField::CredentialsDocker,
+                SettingsField::CredentialsGit,
+            ],
         }
     }
 }
@@ -102,11 +105,17 @@ impl SettingsField {
     }
 
     pub fn is_editable(&self) -> bool {
-        !matches!(self, Self::SshEnabled | Self::CredentialsDocker | Self::CredentialsGit)
+        !matches!(
+            self,
+            Self::SshEnabled | Self::CredentialsDocker | Self::CredentialsGit
+        )
     }
 
     pub fn is_toggle(&self) -> bool {
-        matches!(self, Self::SshEnabled | Self::CredentialsDocker | Self::CredentialsGit)
+        matches!(
+            self,
+            Self::SshEnabled | Self::CredentialsDocker | Self::CredentialsGit
+        )
     }
 
     pub fn description(&self) -> &'static str {
@@ -310,17 +319,27 @@ impl SettingsDraft {
                 if self.ssh_enabled { "true" } else { "false" }.to_string()
             }
             SettingsField::SshKeyPath => self.ssh_key_path.clone().unwrap_or_default(),
-            SettingsField::CredentialsDocker => {
-                if self.credentials_docker { "true" } else { "false" }.to_string()
+            SettingsField::CredentialsDocker => if self.credentials_docker {
+                "true"
+            } else {
+                "false"
             }
-            SettingsField::CredentialsGit => {
-                if self.credentials_git { "true" } else { "false" }.to_string()
+            .to_string(),
+            SettingsField::CredentialsGit => if self.credentials_git {
+                "true"
+            } else {
+                "false"
             }
+            .to_string(),
         }
     }
 
     pub fn set_value(&mut self, field: &SettingsField, value: &str) {
-        let value_opt = if value.is_empty() { None } else { Some(value.to_string()) };
+        let value_opt = if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        };
 
         match field {
             SettingsField::DefaultShell => self.shell = value.to_string(),

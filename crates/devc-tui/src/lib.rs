@@ -9,9 +9,9 @@ mod demo;
 mod event;
 pub mod port_state;
 pub mod ports;
-pub mod shell_state;
 pub mod settings;
 pub mod shell;
+pub mod shell_state;
 pub mod tunnel;
 pub mod ui;
 pub mod widgets;
@@ -19,12 +19,12 @@ pub mod widgets;
 pub use clipboard::copy_to_clipboard;
 
 pub use app::{App, AppResult, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
-pub use shell_state::ShellSession;
 pub use demo::DemoApp;
 pub use event::{Event, EventHandler};
-pub use shell::{reset_terminal, ShellConfig, ShellExitReason};
 #[cfg(unix)]
 pub use shell::PtyShell;
+pub use shell::{reset_terminal, ShellConfig, ShellExitReason};
+pub use shell_state::ShellSession;
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},

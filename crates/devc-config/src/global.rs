@@ -244,9 +244,7 @@ impl GlobalConfig {
 
     /// Check if the config file exists on disk
     pub fn config_exists() -> bool {
-        Self::config_path()
-            .map(|p| p.exists())
-            .unwrap_or(false)
+        Self::config_path().map(|p| p.exists()).unwrap_or(false)
     }
 }
 
@@ -257,7 +255,10 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = GlobalConfig::default();
-        assert!(config.defaults.provider.is_empty(), "Provider should be empty for auto-detection");
+        assert!(
+            config.defaults.provider.is_empty(),
+            "Provider should be empty for auto-detection"
+        );
         assert_eq!(config.defaults.shell, "/bin/bash");
         assert!(config.is_first_run(), "Default config should be first run");
     }

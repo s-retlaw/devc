@@ -8,7 +8,9 @@
 
 use devc_config::{Command, StringOrArray};
 use devc_core::{run_host_command, run_lifecycle_command_with_env, Container};
-use devc_provider::{CliProvider, ContainerId, ContainerProvider, CreateContainerConfig, ExecConfig};
+use devc_provider::{
+    CliProvider, ContainerId, ContainerProvider, CreateContainerConfig, ExecConfig,
+};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -108,7 +110,11 @@ async fn test_e2e_runtime_flags() {
     assert_eq!(config.cap_add, vec!["SYS_PTRACE"]);
     assert_eq!(config.security_opt, vec!["seccomp=unconfined"]);
     assert!(
-        config.env.get("MY_VAR").map(|v| v == "hello").unwrap_or(false),
+        config
+            .env
+            .get("MY_VAR")
+            .map(|v| v == "hello")
+            .unwrap_or(false),
         "containerEnv MY_VAR should be in create config"
     );
     // remoteEnv should NOT be in create config
@@ -121,7 +127,11 @@ async fn test_e2e_runtime_flags() {
     ensure_alpine(&provider).await;
     // Override cmd to use /bin/sh (alpine doesn't have bash)
     let mut config = config;
-    config.cmd = Some(vec!["sh".to_string(), "-c".to_string(), "sleep infinity".to_string()]);
+    config.cmd = Some(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "sleep infinity".to_string(),
+    ]);
     let _ = provider.remove_by_name(&config.name.clone().unwrap()).await;
 
     let id = provider
@@ -147,8 +157,15 @@ async fn test_e2e_runtime_flags() {
     );
 
     // Verify remoteEnv via exec_config (which includes remoteEnv)
-    let exec_with_remote =
-        container.exec_config(vec!["sh".to_string(), "-c".to_string(), "echo $EDITOR".to_string()], false, false);
+    let exec_with_remote = container.exec_config(
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo $EDITOR".to_string(),
+        ],
+        false,
+        false,
+    );
     let result = provider
         .exec(&id, &exec_with_remote)
         .await
@@ -239,7 +256,11 @@ async fn test_e2e_variable_substitution() {
     ensure_alpine(&provider).await;
     let mut config = container.create_config("alpine:latest");
     // Override cmd to use /bin/sh (alpine doesn't have bash)
-    config.cmd = Some(vec!["sh".to_string(), "-c".to_string(), "sleep infinity".to_string()]);
+    config.cmd = Some(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "sleep infinity".to_string(),
+    ]);
     let _ = provider.remove_by_name(&config.name.clone().unwrap()).await;
 
     let id = provider.create(&config).await.expect("create");
@@ -289,7 +310,11 @@ async fn test_e2e_lifecycle_hooks() {
     ensure_alpine(&provider).await;
     let mut config = container.create_config("alpine:latest");
     // Override cmd to use /bin/sh (alpine doesn't have bash)
-    config.cmd = Some(vec!["sh".to_string(), "-c".to_string(), "sleep infinity".to_string()]);
+    config.cmd = Some(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "sleep infinity".to_string(),
+    ]);
     let _ = provider.remove_by_name(&config.name.clone().unwrap()).await;
 
     let id = provider.create(&config).await.expect("create");
@@ -324,7 +349,8 @@ async fn test_e2e_lifecycle_hooks() {
     };
     let result = provider.exec(&id, &exec).await.expect("exec ls");
     assert_eq!(
-        result.exit_code, 0,
+        result.exit_code,
+        0,
         "All lifecycle marker files should exist, output: {}",
         result.output.trim()
     );
@@ -391,7 +417,8 @@ async fn test_e2e_parallel_object_commands() {
     };
     let result = provider.exec(&id, &exec).await.expect("exec ls");
     assert_eq!(
-        result.exit_code, 0,
+        result.exit_code,
+        0,
         "All parallel command marker files should exist, output: {}",
         result.output.trim()
     );
@@ -406,7 +433,9 @@ async fn test_e2e_host_command() {
 
     // Test successful host command
     let cmd = Command::String(format!("touch {}", marker.display()));
-    run_host_command(&cmd, temp.path(), None).await.expect("host command should succeed");
+    run_host_command(&cmd, temp.path(), None)
+        .await
+        .expect("host command should succeed");
     assert!(marker.exists(), "Marker file should exist on host");
 
     // Test failure case
@@ -435,7 +464,11 @@ async fn test_e2e_remote_env_not_in_create() {
         "remoteEnv SECRET should NOT be in create config"
     );
     assert!(
-        create.env.get("PUBLIC").map(|v| v == "visible").unwrap_or(false),
+        create
+            .env
+            .get("PUBLIC")
+            .map(|v| v == "visible")
+            .unwrap_or(false),
         "containerEnv PUBLIC should be in create config"
     );
 
@@ -447,7 +480,10 @@ async fn test_e2e_remote_env_not_in_create() {
         "remoteEnv SECRET should be in exec config"
     );
     assert!(
-        exec.env.get("PUBLIC").map(|v| v == "visible").unwrap_or(false),
+        exec.env
+            .get("PUBLIC")
+            .map(|v| v == "visible")
+            .unwrap_or(false),
         "containerEnv PUBLIC should also be in exec config"
     );
 }

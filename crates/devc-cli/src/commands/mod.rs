@@ -61,15 +61,21 @@ async fn exec_check(
     script: &str,
     user: Option<&str>,
 ) -> Option<String> {
-    let result = provider.exec(cid, &devc_provider::ExecConfig {
-        cmd: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
-        env: std::collections::HashMap::new(),
-        working_dir: None,
-        user: user.map(|s| s.to_string()),
-        tty: false,
-        stdin: false,
-        privileged: false,
-    }).await.ok()?;
+    let result = provider
+        .exec(
+            cid,
+            &devc_provider::ExecConfig {
+                cmd: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+                env: std::collections::HashMap::new(),
+                working_dir: None,
+                user: user.map(|s| s.to_string()),
+                tty: false,
+                stdin: false,
+                privileged: false,
+            },
+        )
+        .await
+        .ok()?;
     if result.exit_code != 0 || result.output.trim().is_empty() {
         return None;
     }

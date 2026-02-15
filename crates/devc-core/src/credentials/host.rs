@@ -91,12 +91,7 @@ pub async fn resolve_docker_credentials() -> HashMap<String, DockerAuth> {
     for (registry, entry) in &config.auths {
         if let Some(ref auth) = entry.auth {
             if !auth.is_empty() {
-                result.insert(
-                    registry.clone(),
-                    DockerAuth {
-                        auth: auth.clone(),
-                    },
-                );
+                result.insert(registry.clone(), DockerAuth { auth: auth.clone() });
             }
         }
     }
@@ -131,9 +126,9 @@ pub async fn resolve_docker_credentials() -> HashMap<String, DockerAuth> {
         // Use `docker-credential-<store> list` to discover all stored registries
         let listed = list_credential_helper_registries(store).await;
         for registry in listed {
-            if !result.contains_key(&registry) {
+            if let std::collections::hash_map::Entry::Vacant(e) = result.entry(registry.clone()) {
                 if let Some(auth) = resolve_docker_credential_helper(store, &registry).await {
-                    result.insert(registry, auth);
+                    e.insert(auth);
                 }
             }
         }
@@ -151,7 +146,10 @@ pub async fn resolve_docker_credentials() -> HashMap<String, DockerAuth> {
     if result.is_empty() {
         tracing::debug!("No Docker credentials found on host");
     } else {
-        tracing::debug!("Resolved Docker credentials for {} registries", result.len());
+        tracing::debug!(
+            "Resolved Docker credentials for {} registries",
+            result.len()
+        );
     }
 
     result
@@ -218,8 +216,7 @@ pub async fn list_credential_helper_registries(helper: &str) -> Vec<String> {
         }
 
         // `list` returns a JSON object: {"registry": "username", ...}
-        let map: HashMap<String, String> =
-            serde_json::from_slice(&output.stdout).ok()?;
+        let map: HashMap<String, String> = serde_json::from_slice(&output.stdout).ok()?;
 
         Some(map.into_keys().collect::<Vec<_>>())
     })
@@ -243,10 +240,7 @@ fn is_valid_helper_name(name: &str) -> bool {
 }
 
 /// Call `docker-credential-<helper> get` with registry on stdin
-async fn resolve_docker_credential_helper(
-    helper: &str,
-    registry: &str,
-) -> Option<DockerAuth> {
+async fn resolve_docker_credential_helper(helper: &str, registry: &str) -> Option<DockerAuth> {
     if !is_valid_helper_name(helper) {
         tracing::warn!(
             "Skipping invalid Docker credential helper name: {:?}",
@@ -258,50 +252,50 @@ async fn resolve_docker_credential_helper(
     let binary = format!("docker-credential-{}", helper);
     tracing::debug!("Calling {} get for {}", binary, registry);
 
-    let result = tokio::time::timeout(
-        HELPER_TIMEOUT,
-        async {
-            let mut child = Command::new(&binary)
-                .arg("get")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .ok()?;
+    let result = tokio::time::timeout(HELPER_TIMEOUT, async {
+        let mut child = Command::new(&binary)
+            .arg("get")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
 
-            // Write registry to stdin
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                stdin.write_all(registry.as_bytes()).await.ok()?;
-                drop(stdin);
-            }
+        // Write registry to stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(registry.as_bytes()).await.ok()?;
+            drop(stdin);
+        }
 
-            let output = child.wait_with_output().await.ok()?;
-            if !output.status.success() {
-                return None;
-            }
+        let output = child.wait_with_output().await.ok()?;
+        if !output.status.success() {
+            return None;
+        }
 
-            let response: CredHelperResponse =
-                serde_json::from_slice(&output.stdout).ok()?;
+        let response: CredHelperResponse = serde_json::from_slice(&output.stdout).ok()?;
 
-            let username = response.username?;
-            let secret = response.secret?;
+        let username = response.username?;
+        let secret = response.secret?;
 
-            // Encode as base64 auth string
-            let auth = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                format!("{}:{}", username, secret),
-            );
+        // Encode as base64 auth string
+        let auth = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("{}:{}", username, secret),
+        );
 
-            Some(DockerAuth { auth })
-        },
-    )
+        Some(DockerAuth { auth })
+    })
     .await;
 
     match result {
         Ok(auth) => auth,
         Err(_) => {
-            tracing::warn!("Timeout calling docker-credential-{} for {}", helper, registry);
+            tracing::warn!(
+                "Timeout calling docker-credential-{} for {}",
+                helper,
+                registry
+            );
             None
         }
     }
@@ -310,10 +304,7 @@ async fn resolve_docker_credential_helper(
 /// Resolve a Git credential for a specific protocol+host.
 ///
 /// Calls `git credential fill` on the host.
-pub async fn resolve_git_credential(
-    protocol: &str,
-    host: &str,
-) -> Option<GitCredential> {
+pub async fn resolve_git_credential(protocol: &str, host: &str) -> Option<GitCredential> {
     let input = format!("protocol={}\nhost={}\n\n", protocol, host);
 
     let result = tokio::time::timeout(HELPER_TIMEOUT, async {
@@ -345,18 +336,18 @@ pub async fn resolve_git_credential(
     match result {
         Ok(cred) => cred,
         Err(_) => {
-            tracing::warn!("Timeout resolving git credential for {}://{}", protocol, host);
+            tracing::warn!(
+                "Timeout resolving git credential for {}://{}",
+                protocol,
+                host
+            );
             None
         }
     }
 }
 
 /// Parse git credential fill output into a GitCredential
-fn parse_git_credential_output(
-    output: &str,
-    protocol: &str,
-    host: &str,
-) -> Option<GitCredential> {
+fn parse_git_credential_output(output: &str, protocol: &str, host: &str) -> Option<GitCredential> {
     let mut username = None;
     let mut password = None;
 
@@ -481,17 +472,11 @@ pub fn build_docker_config_json(auths: &HashMap<String, DockerAuth>) -> String {
             "auth".to_string(),
             serde_json::Value::String(docker_auth.auth.clone()),
         );
-        auth_map.insert(
-            registry.clone(),
-            serde_json::Value::Object(entry),
-        );
+        auth_map.insert(registry.clone(), serde_json::Value::Object(entry));
     }
 
     let mut config = serde_json::Map::new();
-    config.insert(
-        "auths".to_string(),
-        serde_json::Value::Object(auth_map),
-    );
+    config.insert("auths".to_string(), serde_json::Value::Object(auth_map));
 
     serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".to_string())
 }
@@ -515,7 +500,10 @@ mod tests {
 
         let config: DockerCredConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.creds_store, Some("desktop".to_string()));
-        assert_eq!(config.cred_helpers.get("ecr.aws"), Some(&"ecr-login".to_string()));
+        assert_eq!(
+            config.cred_helpers.get("ecr.aws"),
+            Some(&"ecr-login".to_string())
+        );
         assert_eq!(
             config.auths.get("ghcr.io").unwrap().auth,
             Some("dXNlcjpwYXNz".to_string())
@@ -646,7 +634,10 @@ mod tests {
         );
         // SSH URLs should return None
         assert_eq!(extract_https_host("git@github.com:user/repo.git"), None);
-        assert_eq!(extract_https_host("ssh://git@github.com/user/repo.git"), None);
+        assert_eq!(
+            extract_https_host("ssh://git@github.com/user/repo.git"),
+            None
+        );
         // With userinfo in URL
         assert_eq!(
             extract_https_host("https://token@github.com/user/repo.git"),

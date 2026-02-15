@@ -9,7 +9,7 @@
 
 use devc_config::GlobalConfig;
 use devc_core::ContainerManager;
-use devc_provider::{CliProvider, ContainerProvider, ContainerId, ExecConfig};
+use devc_provider::{CliProvider, ContainerId, ContainerProvider, ExecConfig};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -34,7 +34,10 @@ async fn read_lifecycle_log(provider: &CliProvider, container_id: &str) -> Strin
         cmd: vec!["cat".to_string(), "/tmp/lifecycle.log".to_string()],
         ..Default::default()
     };
-    let result = provider.exec(&cid, &config).await.expect("cat lifecycle.log");
+    let result = provider
+        .exec(&cid, &config)
+        .await
+        .expect("cat lifecycle.log");
     result.output.trim().to_string()
 }
 
@@ -120,7 +123,10 @@ async fn create_test_manager(provider: CliProvider) -> ContainerManager {
 
 /// Parse lifecycle log lines into a Vec<&str>.
 fn parse_log_lines(log: &str) -> Vec<&str> {
-    log.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect()
+    log.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 #[tokio::test]
@@ -146,13 +152,20 @@ async fn test_e2e_image_lifecycle_events() {
     let mgr = create_test_manager(get_test_provider().await.unwrap()).await;
 
     // Phase 1: init + up (first create)
-    let cs = mgr.init_from_config(&config_path).await.expect("init").expect("new state");
+    let cs = mgr
+        .init_from_config(&config_path)
+        .await
+        .expect("init")
+        .expect("new state");
     let id = cs.id.clone();
 
     mgr.up(&id).await.expect("up should succeed");
 
     // Verify initializeCommand ran on host
-    assert!(host_marker.exists(), "initializeCommand should create host marker");
+    assert!(
+        host_marker.exists(),
+        "initializeCommand should create host marker"
+    );
 
     // Verify lifecycle log
     let cid = get_container_id(&mgr, &id).await;
@@ -160,7 +173,8 @@ async fn test_e2e_image_lifecycle_events() {
         // We need a fresh provider instance for direct exec
         &get_test_provider().await.unwrap(),
         &cid,
-    ).await;
+    )
+    .await;
     let lines = parse_log_lines(&log);
     assert_eq!(
         lines,
@@ -193,7 +207,11 @@ async fn test_e2e_image_lifecycle_events() {
         Some("post-start"),
         "Phase 3: last line should be post-start after restart"
     );
-    assert_eq!(lines.len(), 6, "Phase 3: should have 6 lines (5 prior + 1 new post-start)");
+    assert_eq!(
+        lines.len(),
+        6,
+        "Phase 3: should have 6 lines (5 prior + 1 new post-start)"
+    );
     // Verify no new on-create/update-content/post-create were added
     assert_eq!(
         lines.iter().filter(|&&l| l == "on-create").count(),
@@ -204,7 +222,10 @@ async fn test_e2e_image_lifecycle_events() {
     // Phase 4: rebuild (fresh container, fresh log)
     std::fs::remove_file(&host_marker).unwrap();
     mgr.rebuild(&id, false).await.expect("rebuild");
-    assert!(host_marker.exists(), "initializeCommand should run during rebuild");
+    assert!(
+        host_marker.exists(),
+        "initializeCommand should run during rebuild"
+    );
 
     let new_cid = get_container_id(&mgr, &id).await;
     let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &new_cid).await;
@@ -218,7 +239,10 @@ async fn test_e2e_image_lifecycle_events() {
     // Phase 5: down
     mgr.down(&id).await.expect("down");
     let cs = mgr.get(&id).await.expect("get").expect("state exists");
-    assert!(cs.container_id.is_none(), "container_id should be cleared after down");
+    assert!(
+        cs.container_id.is_none(),
+        "container_id should be cleared after down"
+    );
 
     // Clean up: remove from state
     mgr.remove(&id, true).await.ok();
@@ -248,12 +272,19 @@ async fn test_e2e_compose_lifecycle_events() {
     let mgr = create_test_manager(get_test_provider().await.unwrap()).await;
 
     // Phase 1: init + up
-    let cs = mgr.init_from_config(&config_path).await.expect("init").expect("new state");
+    let cs = mgr
+        .init_from_config(&config_path)
+        .await
+        .expect("init")
+        .expect("new state");
     let id = cs.id.clone();
 
     mgr.up(&id).await.expect("up should succeed");
 
-    assert!(host_marker.exists(), "initializeCommand should create host marker");
+    assert!(
+        host_marker.exists(),
+        "initializeCommand should create host marker"
+    );
 
     let cid = get_container_id(&mgr, &id).await;
     let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid).await;
@@ -291,7 +322,10 @@ async fn test_e2e_compose_lifecycle_events() {
     // Phase 4: rebuild
     std::fs::remove_file(&host_marker).unwrap();
     mgr.rebuild(&id, false).await.expect("rebuild");
-    assert!(host_marker.exists(), "initializeCommand should run during rebuild");
+    assert!(
+        host_marker.exists(),
+        "initializeCommand should run during rebuild"
+    );
 
     let rebuilt_cid = get_container_id(&mgr, &id).await;
     let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &rebuilt_cid).await;
@@ -305,7 +339,10 @@ async fn test_e2e_compose_lifecycle_events() {
     // Phase 5: down
     mgr.down(&id).await.expect("down");
     let cs = mgr.get(&id).await.expect("get").expect("state exists");
-    assert!(cs.container_id.is_none(), "container_id should be cleared after down");
+    assert!(
+        cs.container_id.is_none(),
+        "container_id should be cleared after down"
+    );
 
     // Clean up
     mgr.remove(&id, true).await.ok();

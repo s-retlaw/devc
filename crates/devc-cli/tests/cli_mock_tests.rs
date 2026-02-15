@@ -37,11 +37,7 @@ fn make_container(
 
 /// Build a ContainerManager backed by MockProvider with the given state.
 fn test_manager(mock: MockProvider, store: StateStore) -> devc_core::ContainerManager {
-    devc_core::ContainerManager::new_for_testing(
-        Box::new(mock),
-        GlobalConfig::default(),
-        store,
-    )
+    devc_core::ContainerManager::new_for_testing(Box::new(mock), GlobalConfig::default(), store)
 }
 
 /// Build a StateStore containing the given containers.
@@ -115,7 +111,10 @@ async fn test_remove_force_running() {
     // Verify that Remove was called on the provider
     let recorded = calls.lock().unwrap();
     assert!(
-        recorded.iter().any(|c| matches!(c, devc_core::test_support::MockCall::Remove { force: true, .. })),
+        recorded.iter().any(|c| matches!(
+            c,
+            devc_core::test_support::MockCall::Remove { force: true, .. }
+        )),
         "Expected a Remove call with force=true, got: {:?}",
         *recorded,
     );
@@ -195,7 +194,9 @@ async fn test_down_calls_provider() {
     // down should have called Stop on the provider
     let recorded = calls.lock().unwrap();
     assert!(
-        recorded.iter().any(|c| matches!(c, devc_core::test_support::MockCall::Stop { .. })),
+        recorded
+            .iter()
+            .any(|c| matches!(c, devc_core::test_support::MockCall::Stop { .. })),
         "Expected a Stop call, got: {:?}",
         *recorded,
     );
@@ -234,12 +235,16 @@ async fn test_find_container_by_name_through_start() {
 
     let recorded = calls.lock().unwrap();
     assert!(
-        recorded.iter().any(|c| matches!(c, devc_core::test_support::MockCall::Inspect { .. })),
+        recorded
+            .iter()
+            .any(|c| matches!(c, devc_core::test_support::MockCall::Inspect { .. })),
         "Expected an Inspect call, got: {:?}",
         *recorded,
     );
     assert!(
-        recorded.iter().any(|c| matches!(c, devc_core::test_support::MockCall::Start { .. })),
+        recorded
+            .iter()
+            .any(|c| matches!(c, devc_core::test_support::MockCall::Start { .. })),
         "Expected a Start call, got: {:?}",
         *recorded,
     );

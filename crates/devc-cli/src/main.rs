@@ -8,11 +8,13 @@ mod commands;
 mod selector;
 
 use clap::{Parser, Subcommand};
-use dialoguer::{theme::ColorfulTheme, Select};
-use selector::{select_container, SelectionContext};
 use devc_config::GlobalConfig;
 use devc_core::ContainerManager;
-use devc_provider::{create_default_provider, create_provider, detect_available_providers, ProviderType};
+use devc_provider::{
+    create_default_provider, create_provider, detect_available_providers, ProviderType,
+};
+use dialoguer::{theme::ColorfulTheme, Select};
+use selector::{select_container, SelectionContext};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser)]
@@ -250,7 +252,11 @@ async fn run() -> anyhow::Result<()> {
                         Some(name) => name,
                         None => {
                             let containers = get_containers().await?;
-                            select_container(&containers, SelectionContext::Running, "Select container to exec command in:")?
+                            select_container(
+                                &containers,
+                                SelectionContext::Running,
+                                "Select container to exec command in:",
+                            )?
                         }
                     };
                     let cmd = if cmd.is_empty() {
@@ -268,12 +274,19 @@ async fn run() -> anyhow::Result<()> {
                         Some(name) => name,
                         None => {
                             let containers = get_containers().await?;
-                            select_container(&containers, SelectionContext::Running, "Select container to connect to:")?
+                            select_container(
+                                &containers,
+                                SelectionContext::Running,
+                                "Select container to connect to:",
+                            )?
                         }
                     };
                     commands::shell(&manager, &name, cmd).await?;
                 }
-                Commands::Build { container, no_cache } => {
+                Commands::Build {
+                    container,
+                    no_cache,
+                } => {
                     commands::build(&manager, container, no_cache).await?;
                 }
                 Commands::Start { container } => {
@@ -281,7 +294,11 @@ async fn run() -> anyhow::Result<()> {
                         Some(name) => name,
                         None => {
                             let containers = get_containers().await?;
-                            select_container(&containers, SelectionContext::Startable, "Select container to start:")?
+                            select_container(
+                                &containers,
+                                SelectionContext::Startable,
+                                "Select container to start:",
+                            )?
                         }
                     };
                     commands::start(&manager, &name).await?;
@@ -291,7 +308,11 @@ async fn run() -> anyhow::Result<()> {
                         Some(name) => name,
                         None => {
                             let containers = get_containers().await?;
-                            select_container(&containers, SelectionContext::Running, "Select container to stop:")?
+                            select_container(
+                                &containers,
+                                SelectionContext::Running,
+                                "Select container to stop:",
+                            )?
                         }
                     };
                     commands::stop(&manager, &name).await?;
@@ -301,7 +322,11 @@ async fn run() -> anyhow::Result<()> {
                         Some(name) => name,
                         None => {
                             let containers = get_containers().await?;
-                            select_container(&containers, SelectionContext::Any, "Select container to remove:")?
+                            select_container(
+                                &containers,
+                                SelectionContext::Any,
+                                "Select container to remove:",
+                            )?
                         }
                     };
                     commands::remove(&manager, &name, force).await?;
@@ -318,12 +343,20 @@ async fn run() -> anyhow::Result<()> {
                         None => {
                             // up can work without selection (uses cwd), but offer selection if containers exist
                             let containers = get_containers().await?;
-                            let uppable: Vec<_> = containers.iter()
+                            let uppable: Vec<_> = containers
+                                .iter()
                                 .filter(|c| c.status != devc_core::DevcContainerStatus::Running)
                                 .collect();
-                            if !uppable.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                            if !uppable.is_empty()
+                                && std::io::IsTerminal::is_terminal(&std::io::stdin())
+                            {
                                 // Offer selection but allow fallback to cwd behavior
-                                select_container(&containers, SelectionContext::Uppable, "Select container to bring up (or Esc for current directory):").ok()
+                                select_container(
+                                    &containers,
+                                    SelectionContext::Uppable,
+                                    "Select container to bring up (or Esc for current directory):",
+                                )
+                                .ok()
                             } else {
                                 None
                             }
@@ -336,12 +369,20 @@ async fn run() -> anyhow::Result<()> {
                         Some(name) => name,
                         None => {
                             let containers = get_containers().await?;
-                            select_container(&containers, SelectionContext::Any, "Select container to bring down:")?
+                            select_container(
+                                &containers,
+                                SelectionContext::Any,
+                                "Select container to bring down:",
+                            )?
                         }
                     };
                     commands::down(&manager, &name).await?;
                 }
-                Commands::Resize { container, cols, rows } => {
+                Commands::Resize {
+                    container,
+                    cols,
+                    rows,
+                } => {
                     commands::resize(&manager, container, cols, rows).await?;
                 }
                 Commands::Config { .. } => unreachable!(), // Handled above
@@ -351,12 +392,20 @@ async fn run() -> anyhow::Result<()> {
                 Commands::Creds { container } => {
                     commands::creds(&manager, container).await?;
                 }
-                Commands::Rebuild { container, no_cache, yes } => {
+                Commands::Rebuild {
+                    container,
+                    no_cache,
+                    yes,
+                } => {
                     let name = match container {
                         Some(name) => name,
                         None => {
                             let containers = get_containers().await?;
-                            select_container(&containers, SelectionContext::Any, "Select container to rebuild:")?
+                            select_container(
+                                &containers,
+                                SelectionContext::Any,
+                                "Select container to rebuild:",
+                            )?
                         }
                     };
                     commands::rebuild(&manager, &name, no_cache, yes).await?;
@@ -374,11 +423,13 @@ async fn detect_and_select_provider(config: &GlobalConfig) -> anyhow::Result<Opt
 
     let available = detect_available_providers(config).await;
 
-    let docker_available = available.iter()
+    let docker_available = available
+        .iter()
         .find(|(t, _)| *t == ProviderType::Docker)
         .map(|(_, a)| *a)
         .unwrap_or(false);
-    let podman_available = available.iter()
+    let podman_available = available
+        .iter()
         .find(|(t, _)| *t == ProviderType::Podman)
         .map(|(_, a)| *a)
         .unwrap_or(false);

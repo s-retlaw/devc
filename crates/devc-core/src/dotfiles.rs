@@ -99,7 +99,8 @@ impl DotfilesManager {
         container_id: &ContainerId,
         user: Option<&str>,
     ) -> Result<()> {
-        self.inject_with_progress(provider, container_id, user, None).await
+        self.inject_with_progress(provider, container_id, user, None)
+            .await
     }
 
     /// Inject dotfiles into a container with progress updates
@@ -165,9 +166,7 @@ impl DotfilesManager {
         let target = expand_home(&self.target_path, user);
         let qt = shell_quote(&target);
         let qu = shell_quote(url);
-        let cmd = format!(
-            "if [ -d {qt} ]; then cd {qt} && git pull; else git clone {qu} {qt}; fi"
-        );
+        let cmd = format!("if [ -d {qt} ]; then cd {qt} && git pull; else git clone {qu} {qt}; fi");
 
         let config = ExecConfig {
             cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd],
@@ -213,9 +212,7 @@ impl DotfilesManager {
             .arg(&clone_path)
             .output()
             .await
-            .map_err(|e| {
-                CoreError::DotfilesError(format!("Failed to run git on host: {}", e))
-            })?;
+            .map_err(|e| CoreError::DotfilesError(format!("Failed to run git on host: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -312,7 +309,13 @@ impl DotfilesManager {
         container_id: &ContainerId,
         user: Option<&str>,
     ) -> Result<()> {
-        let install_scripts = ["install.sh", "install", "bootstrap.sh", "bootstrap", "setup.sh"];
+        let install_scripts = [
+            "install.sh",
+            "install",
+            "bootstrap.sh",
+            "bootstrap",
+            "setup.sh",
+        ];
         let target = expand_home(&self.target_path, user);
 
         for script in &install_scripts {
@@ -450,12 +453,18 @@ mod tests {
 
     #[test]
     fn test_expand_home_no_tilde() {
-        assert_eq!(expand_home("/absolute/path", Some("user")), "/absolute/path");
+        assert_eq!(
+            expand_home("/absolute/path", Some("user")),
+            "/absolute/path"
+        );
     }
 
     #[test]
     fn test_expand_home_tilde_subpath() {
-        assert_eq!(expand_home("~/.config/nvim", Some("bob")), "/home/bob/.config/nvim");
+        assert_eq!(
+            expand_home("~/.config/nvim", Some("bob")),
+            "/home/bob/.config/nvim"
+        );
     }
 
     #[test]
@@ -473,7 +482,9 @@ mod tests {
 
         let manager = DotfilesManager::from_devcontainer_config(&dc_config, &global);
         assert!(manager.is_configured());
-        assert!(matches!(manager.config, DotfilesSource::Repository(ref url) if url.contains("local/dots")));
+        assert!(
+            matches!(manager.config, DotfilesSource::Repository(ref url) if url.contains("local/dots"))
+        );
         assert_eq!(manager.target_path, "~/.mydots");
         assert_eq!(manager.install_command.as_deref(), Some("./install.sh"));
     }
@@ -487,13 +498,20 @@ mod tests {
         let container_id = ContainerId::new("test_container");
 
         let manager = DotfilesManager {
-            config: DotfilesSource::Repository("https://invalid.example.com/no-such-repo.git".to_string()),
+            config: DotfilesSource::Repository(
+                "https://invalid.example.com/no-such-repo.git".to_string(),
+            ),
             target_path: "~/.dotfiles".to_string(),
             install_command: None,
         };
 
         let result = manager
-            .inject_from_repo_host(&provider, &container_id, "https://invalid.example.com/no-such-repo.git", None)
+            .inject_from_repo_host(
+                &provider,
+                &container_id,
+                "https://invalid.example.com/no-such-repo.git",
+                None,
+            )
             .await;
 
         assert!(result.is_err());
@@ -637,7 +655,11 @@ mod tests {
         .inject_from_repo(&provider, &container_id, url, Some("bob"), None)
         .await;
 
-        assert!(result.is_ok(), "inject_from_repo should succeed via fallback: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "inject_from_repo should succeed via fallback: {:?}",
+            result
+        );
 
         let calls = provider.get_calls();
         // First call: the in-container exec (git clone) that failed

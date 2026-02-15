@@ -10,7 +10,10 @@ pub(super) fn draw_disconnection_warning(frame: &mut Frame, app: &App, area: Rec
         Span::styled(" ⚠ ", Style::default().fg(Color::Yellow).bold()),
         Span::styled("DISCONNECTED: ", Style::default().fg(Color::Yellow).bold()),
         Span::styled(message, Style::default().fg(Color::White)),
-        Span::styled(" - Go to Providers tab and press 'c' to retry connection", Style::default().fg(Color::Gray)),
+        Span::styled(
+            " - Go to Providers tab and press 'c' to retry connection",
+            Style::default().fg(Color::Gray),
+        ),
     ]))
     .block(
         Block::default()

@@ -61,11 +61,7 @@ pub trait ContainerProvider: Send + Sync {
     async fn exec(&self, id: &ContainerId, config: &ExecConfig) -> Result<ExecResult>;
 
     /// Execute a command with interactive I/O streams
-    async fn exec_interactive(
-        &self,
-        id: &ContainerId,
-        config: &ExecConfig,
-    ) -> Result<ExecStream>;
+    async fn exec_interactive(&self, id: &ContainerId, config: &ExecConfig) -> Result<ExecStream>;
 
     /// List containers managed by devc
     async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>>;
@@ -87,20 +83,10 @@ pub trait ContainerProvider: Send + Sync {
     async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>>;
 
     /// Copy files into a container
-    async fn copy_into(
-        &self,
-        id: &ContainerId,
-        src: &std::path::Path,
-        dest: &str,
-    ) -> Result<()>;
+    async fn copy_into(&self, id: &ContainerId, src: &std::path::Path, dest: &str) -> Result<()>;
 
     /// Copy files from a container
-    async fn copy_from(
-        &self,
-        id: &ContainerId,
-        src: &str,
-        dest: &std::path::Path,
-    ) -> Result<()>;
+    async fn copy_from(&self, id: &ContainerId, src: &str, dest: &std::path::Path) -> Result<()>;
 
     /// Start services defined in Docker Compose files
     async fn compose_up(

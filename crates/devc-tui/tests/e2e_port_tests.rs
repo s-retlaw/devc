@@ -62,7 +62,8 @@ async fn install_socat_via_exec(provider: &CliProvider, id: &devc_provider::Cont
         .await
         .expect("socat install should work");
     assert_eq!(
-        result.exit_code, 0,
+        result.exit_code,
+        0,
         "socat install failed: {}",
         result.output.trim()
     );
@@ -110,7 +111,10 @@ async fn test_e2e_port_detection_real_container() {
     };
 
     let _ = provider.remove_by_name("devc_test_port_detect").await;
-    let id = provider.create(&config).await.expect("create should succeed");
+    let id = provider
+        .create(&config)
+        .await
+        .expect("create should succeed");
     provider.start(&id).await.expect("start should succeed");
 
     // Start a netcat listener on port 3000 in the background
@@ -173,7 +177,10 @@ async fn test_e2e_socat_forwarding_roundtrip() {
     };
 
     let _ = provider.remove_by_name("devc_test_socat_fwd").await;
-    let id = provider.create(&config).await.expect("create should succeed");
+    let id = provider
+        .create(&config)
+        .await
+        .expect("create should succeed");
     provider.start(&id).await.expect("start should succeed");
 
     // Install socat via provider exec (works in all environments)
@@ -276,7 +283,9 @@ services:
 
     let container =
         devc_core::Container::from_workspace(workspace.path()).expect("should load config");
-    let compose_files = container.compose_files().expect("should have compose files");
+    let compose_files = container
+        .compose_files()
+        .expect("should have compose files");
     let compose_file_strs: Vec<&str> = compose_files.iter().map(|p| p.to_str().unwrap()).collect();
     let project_name = container.compose_project_name();
     let project_dir = container.config_path.parent().unwrap();
@@ -400,7 +409,9 @@ services:
 
     let container =
         devc_core::Container::from_workspace(workspace.path()).expect("should load config");
-    let compose_files = container.compose_files().expect("should have compose files");
+    let compose_files = container
+        .compose_files()
+        .expect("should have compose files");
     let compose_file_strs: Vec<&str> = compose_files.iter().map(|p| p.to_str().unwrap()).collect();
     let project_name = container.compose_project_name();
     let project_dir = container.config_path.parent().unwrap();
@@ -433,9 +444,21 @@ services:
     );
 
     let service_names: Vec<&str> = services.iter().map(|s| s.service_name.as_str()).collect();
-    assert!(service_names.iter().any(|n| n.contains("app")), "should find app service: {:?}", service_names);
-    assert!(service_names.iter().any(|n| n.contains("db")), "should find db service: {:?}", service_names);
-    assert!(service_names.iter().any(|n| n.contains("redis")), "should find redis service: {:?}", service_names);
+    assert!(
+        service_names.iter().any(|n| n.contains("app")),
+        "should find app service: {:?}",
+        service_names
+    );
+    assert!(
+        service_names.iter().any(|n| n.contains("db")),
+        "should find db service: {:?}",
+        service_names
+    );
+    assert!(
+        service_names.iter().any(|n| n.contains("redis")),
+        "should find redis service: {:?}",
+        service_names
+    );
 
     // 2. All services should be running
     for svc in &services {

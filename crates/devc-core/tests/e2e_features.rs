@@ -7,10 +7,12 @@
 //! Full e2e tests require a container runtime (Docker or Podman).
 
 use devc_core::features;
-use devc_core::features::resolve::{parse_feature_ref, FeatureSource};
 use devc_core::features::merge_feature_properties;
+use devc_core::features::resolve::{parse_feature_ref, FeatureSource};
 use devc_core::{Container, EnhancedBuildContext};
-use devc_provider::{BuildConfig, CliProvider, ContainerProvider, ContainerId, CreateContainerConfig, ExecConfig};
+use devc_provider::{
+    BuildConfig, CliProvider, ContainerId, ContainerProvider, CreateContainerConfig, ExecConfig,
+};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -102,13 +104,9 @@ async fn test_integration_oci_feature_download() {
         _ => panic!("Expected OCI source"),
     }
 
-    let result = features::download::download_feature(
-        &source,
-        config_dir.path(),
-        cache_dir.path(),
-        &None,
-    )
-    .await;
+    let result =
+        features::download::download_feature(&source, config_dir.path(), cache_dir.path(), &None)
+            .await;
 
     let feature_dir = result.expect("download should succeed");
 
@@ -127,13 +125,9 @@ async fn test_integration_oci_feature_download() {
     assert_eq!(metadata.id.as_deref(), Some("git"));
 
     // Verify caching: second download should be instant (returns cached path)
-    let result2 = features::download::download_feature(
-        &source,
-        config_dir.path(),
-        cache_dir.path(),
-        &None,
-    )
-    .await;
+    let result2 =
+        features::download::download_feature(&source, config_dir.path(), cache_dir.path(), &None)
+            .await;
     let feature_dir2 = result2.expect("cached download should succeed");
     assert_eq!(feature_dir, feature_dir2, "Should return same cached path");
 }
@@ -176,11 +170,7 @@ async fn test_e2e_multiple_features_install() {
         Container::from_workspace(workspace.path()).expect("should load container config");
 
     // Resolve and prepare features
-    let config_dir = container
-        .config_path
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let config_dir = container.config_path.parent().unwrap().to_path_buf();
 
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let progress = Some(progress_tx);
@@ -216,10 +206,7 @@ async fn test_e2e_multiple_features_install() {
     }
 
     // Build the enhanced image with features
-    let remote_user = container
-        .devcontainer
-        .effective_user()
-        .unwrap_or("root");
+    let remote_user = container.devcontainer.effective_user().unwrap_or("root");
     let enhanced_ctx = EnhancedBuildContext::from_image_with_features(
         "mcr.microsoft.com/devcontainers/base:ubuntu",
         &resolved,
@@ -229,10 +216,8 @@ async fn test_e2e_multiple_features_install() {
     .expect("enhanced build context should succeed");
 
     // Verify the Dockerfile looks right before building
-    let dockerfile = std::fs::read_to_string(
-        enhanced_ctx.context_path().join("Dockerfile"),
-    )
-    .unwrap();
+    let dockerfile =
+        std::fs::read_to_string(enhanced_ctx.context_path().join("Dockerfile")).unwrap();
     assert!(
         dockerfile.contains("FROM mcr.microsoft.com/devcontainers/base:ubuntu"),
         "Should have correct base image"
@@ -295,9 +280,7 @@ async fn test_e2e_multiple_features_install() {
         .exec(
             &cid,
             &ExecConfig {
-                cmd: vec![
-                    "node".into(), "--version".into(),
-                ],
+                cmd: vec!["node".into(), "--version".into()],
                 ..Default::default()
             },
         )
@@ -333,9 +316,7 @@ async fn test_e2e_multiple_features_install() {
         .exec(
             &cid,
             &ExecConfig {
-                cmd: vec![
-                    "go".into(), "version".into(),
-                ],
+                cmd: vec!["go".into(), "version".into()],
                 ..Default::default()
             },
         )
@@ -570,7 +551,10 @@ async fn test_e2e_feature_mounts() {
 
     // Merge feature properties — should pick up the mount
     let feature_props = merge_feature_properties(&resolved);
-    eprintln!("Merged feature properties mounts: {:?}", feature_props.mounts);
+    eprintln!(
+        "Merged feature properties mounts: {:?}",
+        feature_props.mounts
+    );
     assert_eq!(feature_props.mounts.len(), 1);
     match &feature_props.mounts[0] {
         Mount::Object(obj) => {
@@ -835,14 +819,13 @@ async fn test_e2e_feature_lifecycle_commands() {
         )
         .await
         .expect("should read feature marker");
-    let feature_ts: f64 = feature_marker
-        .output
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| panic!(
+    let feature_ts: f64 = feature_marker.output.trim().parse().unwrap_or_else(|e| {
+        panic!(
             "Feature marker should be a timestamp, got '{}': {}",
-            feature_marker.output.trim(), e
-        ));
+            feature_marker.output.trim(),
+            e
+        )
+    });
 
     // Verify the devcontainer.json timestamp marker exists
     let dc_marker = provider
@@ -855,21 +838,21 @@ async fn test_e2e_feature_lifecycle_commands() {
         )
         .await
         .expect("should read devcontainer marker");
-    let dc_ts: f64 = dc_marker
-        .output
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| panic!(
+    let dc_ts: f64 = dc_marker.output.trim().parse().unwrap_or_else(|e| {
+        panic!(
             "Devcontainer marker should be a timestamp, got '{}': {}",
-            dc_marker.output.trim(), e
-        ));
+            dc_marker.output.trim(),
+            e
+        )
+    });
 
     // Feature commands run before devcontainer.json commands per spec
     eprintln!("Feature ts: {}, Devcontainer ts: {}", feature_ts, dc_ts);
     assert!(
         feature_ts <= dc_ts,
         "Feature postCreateCommand ({}) should run before devcontainer postCreateCommand ({})",
-        feature_ts, dc_ts
+        feature_ts,
+        dc_ts
     );
 
     // Verify the updateContentCommand marker was created
@@ -986,7 +969,9 @@ services:
     );
 
     // Start compose services
-    let compose_files = container.compose_files().expect("should have compose files");
+    let compose_files = container
+        .compose_files()
+        .expect("should have compose files");
     let compose_file_strs: Vec<&str> = compose_files.iter().map(|p| p.to_str().unwrap()).collect();
     let project_name = container.compose_project_name();
     let project_dir = container.config_path.parent().unwrap();
@@ -1116,11 +1101,7 @@ async fn test_e2e_docker_in_docker_feature_install() {
         Container::from_workspace(workspace.path()).expect("should load container config");
 
     // Resolve and prepare features — exercises full OCI auth + manifest + blob download
-    let config_dir = container
-        .config_path
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let config_dir = container.config_path.parent().unwrap().to_path_buf();
 
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let progress = Some(progress_tx);
@@ -1164,10 +1145,7 @@ async fn test_e2e_docker_in_docker_feature_install() {
     );
 
     // Build the enhanced image with the feature
-    let remote_user = container
-        .devcontainer
-        .effective_user()
-        .unwrap_or("root");
+    let remote_user = container.devcontainer.effective_user().unwrap_or("root");
     let enhanced_ctx = EnhancedBuildContext::from_image_with_features(
         "mcr.microsoft.com/devcontainers/base:ubuntu",
         &resolved,
@@ -1200,8 +1178,7 @@ async fn test_e2e_docker_in_docker_feature_install() {
     let container_name = "devc-test-dind-e2e";
     let _ = provider.remove_by_name(container_name).await;
 
-    let mut create_config =
-        container.create_config_with_features(&image_tag, Some(&feature_props));
+    let mut create_config = container.create_config_with_features(&image_tag, Some(&feature_props));
     create_config.name = Some(container_name.to_string());
     create_config.cmd = Some(vec![
         "bash".to_string(),
@@ -1226,7 +1203,8 @@ async fn test_e2e_docker_in_docker_feature_install() {
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify privileged mode is actually set on the running container
-    let privileged_json = inspect_container_field(&provider, &cid, "{{json .HostConfig.Privileged}}");
+    let privileged_json =
+        inspect_container_field(&provider, &cid, "{{json .HostConfig.Privileged}}");
     eprintln!("Container Privileged: {}", privileged_json);
     assert!(
         privileged_json.contains("true"),
@@ -1335,10 +1313,7 @@ fn create_test_feature_tarball(feature_id: &str, install_script: &str) -> Vec<u8
         .append_data(&mut header, "install.sh", install_bytes)
         .unwrap();
 
-    let metadata = format!(
-        r#"{{"id": "{}", "version": "1.0.0"}}"#,
-        feature_id
-    );
+    let metadata = format!(r#"{{"id": "{}", "version": "1.0.0"}}"#, feature_id);
     let metadata_bytes = metadata.as_bytes();
     let mut header = tar::Header::new_gnu();
     header.set_size(metadata_bytes.len() as u64);
@@ -1403,13 +1378,9 @@ async fn test_integration_tarball_url_download() {
         _ => panic!("Expected TarballUrl source"),
     }
 
-    let result = features::download::download_feature(
-        &source,
-        config_dir.path(),
-        cache_dir.path(),
-        &None,
-    )
-    .await;
+    let result =
+        features::download::download_feature(&source, config_dir.path(), cache_dir.path(), &None)
+            .await;
 
     let feature_dir = result.expect("tarball download should succeed");
 
@@ -1428,13 +1399,9 @@ async fn test_integration_tarball_url_download() {
     assert_eq!(metadata.id.as_deref(), Some("url-test-feature"));
 
     // Verify caching — server won't accept another request if it already served 2
-    let result2 = features::download::download_feature(
-        &source,
-        config_dir.path(),
-        cache_dir.path(),
-        &None,
-    )
-    .await;
+    let result2 =
+        features::download::download_feature(&source, config_dir.path(), cache_dir.path(), &None)
+            .await;
     let feature_dir2 = result2.expect("cached download should succeed");
     assert_eq!(feature_dir, feature_dir2, "Should return same cached path");
 
@@ -1543,7 +1510,10 @@ async fn test_e2e_tarball_url_feature_install() {
         "sleep infinity".to_string(),
     ]);
 
-    let cid = provider.create(&config).await.expect("create should succeed");
+    let cid = provider
+        .create(&config)
+        .await
+        .expect("create should succeed");
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify the marker file was created by the feature's install.sh

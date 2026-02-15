@@ -8,10 +8,10 @@ mod output;
 mod ports;
 mod progress;
 
-use ansi_to_tui::IntoText;
 use crate::app::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
 use crate::settings::SettingsSection;
 use crate::widgets::{centered_rect, DialogBuilder};
+use ansi_to_tui::IntoText;
 use devc_core::DevcContainerStatus;
 use devc_provider::{ContainerStatus, DevcontainerSource};
 use ratatui::{
@@ -82,7 +82,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         View::ContainerDetail => {
             draw_main_content(frame, app, content_area);
-            let is_compose = app.selected_container()
+            let is_compose = app
+                .selected_container()
                 .map(|c| c.compose_project.is_some())
                 .unwrap_or(false);
             let popup = if is_compose {

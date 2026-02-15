@@ -10,11 +10,7 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 
 /// Check if socat is installed in a container
-pub async fn check_socat_installed(
-    program: &str,
-    prefix: &[String],
-    container_id: &str,
-) -> bool {
+pub async fn check_socat_installed(program: &str, prefix: &[String], container_id: &str) -> bool {
     let mut cmd = Command::new(program);
     cmd.args(prefix);
     cmd.args(["exec", container_id, "sh", "-c", "command -v socat"]);
@@ -46,16 +42,18 @@ pub const PACKAGE_MANAGERS: &[(&str, &str)] = &[
 ];
 
 /// Install socat in a container, detecting the appropriate package manager
-pub async fn install_socat(
-    program: &str,
-    prefix: &[String],
-    container_id: &str,
-) -> InstallResult {
+pub async fn install_socat(program: &str, prefix: &[String], container_id: &str) -> InstallResult {
     for (pkg_mgr, install_cmd) in PACKAGE_MANAGERS {
         // Check if this package manager exists
         let mut cmd = Command::new(program);
         cmd.args(prefix);
-        cmd.args(["exec", container_id, "sh", "-c", &format!("command -v {}", pkg_mgr)]);
+        cmd.args([
+            "exec",
+            container_id,
+            "sh",
+            "-c",
+            &format!("command -v {}", pkg_mgr),
+        ]);
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
         let check = cmd.status().await;
@@ -149,7 +147,10 @@ impl std::fmt::Display for ForwarderError {
             }
             ForwarderError::ExecFailed(msg) => write!(f, "Failed to connect to container: {}", msg),
             ForwarderError::SocatNotFound => {
-                write!(f, "socat not found in container. Install with: apt install socat")
+                write!(
+                    f,
+                    "socat not found in container. Install with: apt install socat"
+                )
             }
         }
     }
@@ -259,9 +260,8 @@ async fn handle_connection(
         result
     });
 
-    let mut stdout_task = tokio::spawn(async move {
-        tokio::io::copy(&mut child_stdout, &mut tcp_write).await
-    });
+    let mut stdout_task =
+        tokio::spawn(async move { tokio::io::copy(&mut child_stdout, &mut tcp_write).await });
 
     // Wait for either direction to complete, then abort the other
     tokio::select! {
@@ -285,7 +285,11 @@ async fn handle_connection(
 
 /// Open a URL in the default browser
 pub fn open_in_browser(port: u16, protocol: Option<&str>) -> Result<(), String> {
-    let scheme = if protocol == Some("https") { "https" } else { "http" };
+    let scheme = if protocol == Some("https") {
+        "https"
+    } else {
+        "http"
+    };
     let url = format!("{}://localhost:{}", scheme, port);
 
     #[cfg(target_os = "linux")]
@@ -341,15 +345,27 @@ mod tests {
         let port = 19876;
 
         // Port should be available before
-        assert!(port_is_available(port), "Port should be available before test");
+        assert!(
+            port_is_available(port),
+            "Port should be available before test"
+        );
 
         // Spawn forwarder (will fail to connect to container, but that's ok - we just want to test port binding)
-        let forwarder = spawn_forwarder("docker".to_string(), vec![], "fake-container".to_string(), port, 3000)
-            .await
-            .expect("Should bind port");
+        let forwarder = spawn_forwarder(
+            "docker".to_string(),
+            vec![],
+            "fake-container".to_string(),
+            port,
+            3000,
+        )
+        .await
+        .expect("Should bind port");
 
         // Port should no longer be available (forwarder has it)
-        assert!(!port_is_available(port), "Port should be bound by forwarder");
+        assert!(
+            !port_is_available(port),
+            "Port should be bound by forwarder"
+        );
 
         // Port should be listening
         assert!(port_is_listening(port), "Forwarder should be listening");
@@ -364,7 +380,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Port should be available again
-        assert!(port_is_available(port), "Port should be released after stop");
+        assert!(
+            port_is_available(port),
+            "Port should be released after stop"
+        );
     }
 
     #[tokio::test]
@@ -372,13 +391,22 @@ mod tests {
         // Use a different high port
         let port = 19877;
 
-        assert!(port_is_available(port), "Port should be available before test");
+        assert!(
+            port_is_available(port),
+            "Port should be available before test"
+        );
 
         {
             // Spawn forwarder in a scope
-            let forwarder = spawn_forwarder("docker".to_string(), vec![], "fake-container".to_string(), port, 3000)
-                .await
-                .expect("Should bind port");
+            let forwarder = spawn_forwarder(
+                "docker".to_string(),
+                vec![],
+                "fake-container".to_string(),
+                port,
+                3000,
+            )
+            .await
+            .expect("Should bind port");
 
             assert!(!port_is_available(port), "Port should be bound");
             assert!(forwarder.is_running());
@@ -390,7 +418,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Port should be released by Drop impl
-        assert!(port_is_available(port), "Port should be released after drop");
+        assert!(
+            port_is_available(port),
+            "Port should be released after drop"
+        );
     }
 
     #[tokio::test]
@@ -398,11 +429,18 @@ mod tests {
         let port = 19878;
 
         // Bind the port first
-        let _listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", port))
-            .expect("Should bind port");
+        let _listener =
+            std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).expect("Should bind port");
 
         // Try to spawn forwarder on same port
-        let result = spawn_forwarder("docker".to_string(), vec![], "fake-container".to_string(), port, 3000).await;
+        let result = spawn_forwarder(
+            "docker".to_string(),
+            vec![],
+            "fake-container".to_string(),
+            port,
+            3000,
+        )
+        .await;
 
         assert!(result.is_err(), "Should fail when port is in use");
         match result {
@@ -416,13 +454,25 @@ mod tests {
         let port1 = 19879;
         let port2 = 19880;
 
-        let forwarder1 = spawn_forwarder("docker".to_string(), vec![], "container1".to_string(), port1, 3000)
-            .await
-            .expect("Should bind port1");
+        let forwarder1 = spawn_forwarder(
+            "docker".to_string(),
+            vec![],
+            "container1".to_string(),
+            port1,
+            3000,
+        )
+        .await
+        .expect("Should bind port1");
 
-        let forwarder2 = spawn_forwarder("docker".to_string(), vec![], "container2".to_string(), port2, 8080)
-            .await
-            .expect("Should bind port2");
+        let forwarder2 = spawn_forwarder(
+            "docker".to_string(),
+            vec![],
+            "container2".to_string(),
+            port2,
+            8080,
+        )
+        .await
+        .expect("Should bind port2");
 
         assert!(forwarder1.is_running());
         assert!(forwarder2.is_running());
@@ -447,9 +497,15 @@ mod tests {
     async fn test_forwarder_accepts_connections() {
         let port = 19881;
 
-        let forwarder = spawn_forwarder("docker".to_string(), vec![], "fake-container".to_string(), port, 3000)
-            .await
-            .expect("Should bind port");
+        let forwarder = spawn_forwarder(
+            "docker".to_string(),
+            vec![],
+            "fake-container".to_string(),
+            port,
+            3000,
+        )
+        .await
+        .expect("Should bind port");
 
         // Connection should succeed (though it will fail to forward since there's no real container)
         let connect_result = TcpStream::connect_timeout(

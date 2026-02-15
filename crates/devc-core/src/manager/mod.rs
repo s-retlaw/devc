@@ -6,16 +6,15 @@ mod discovery;
 mod exec;
 mod lifecycle;
 
+use crate::features;
 use crate::{
     run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, ContainerState,
     CoreError, DevcContainerStatus, Result, StateStore,
 };
 use devc_config::GlobalConfig;
 use devc_provider::{
-    ContainerId, ContainerProvider, ContainerStatus, DevcontainerSource,
-    LogConfig, ProviderType,
+    ContainerId, ContainerProvider, ContainerStatus, DevcontainerSource, LogConfig, ProviderType,
 };
-use crate::features;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -190,9 +189,10 @@ impl ContainerManager {
 
     /// Get a provider for the given type
     fn require_provider_for(&self, pt: ProviderType) -> Result<&dyn ContainerProvider> {
-        self.providers.get(&pt).map(|p| p.as_ref()).ok_or_else(|| {
-            CoreError::NotConnected(format!("{} provider not available", pt))
-        })
+        self.providers
+            .get(&pt)
+            .map(|p| p.as_ref())
+            .ok_or_else(|| CoreError::NotConnected(format!("{} provider not available", pt)))
     }
 
     /// Get the provider matching a container's stored provider type
@@ -278,7 +278,8 @@ impl ContainerManager {
             .ok_or_else(|| CoreError::InvalidState("Container has no container ID".to_string()))?;
         let cid = ContainerId::new(container_id);
 
-        let user = self.load_container(&container_state.config_path)
+        let user = self
+            .load_container(&container_state.config_path)
             .ok()
             .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()));
 
@@ -331,9 +332,9 @@ impl ContainerManager {
 
     /// Initialize a new container from a workspace
     pub async fn init(&self, workspace_path: &Path) -> Result<ContainerState> {
-        let provider_type = self
-            .provider_type()
-            .ok_or_else(|| CoreError::NotConnected("Cannot init: no provider available".to_string()))?;
+        let provider_type = self.provider_type().ok_or_else(|| {
+            CoreError::NotConnected("Cannot init: no provider available".to_string())
+        })?;
 
         let container = Container::from_workspace(workspace_path)?;
 
@@ -372,9 +373,10 @@ impl ContainerManager {
 
         let provider = self.require_container_provider(&container_state)?;
 
-        let image_id = container_state.image_id.as_ref().ok_or_else(|| {
-            CoreError::InvalidState("Container image not built yet".to_string())
-        })?;
+        let image_id = container_state
+            .image_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container image not built yet".to_string()))?;
 
         let container = self.load_container(&container_state.config_path)?;
 
@@ -384,10 +386,8 @@ impl ContainerManager {
             .get("feature_properties")
             .and_then(|json| serde_json::from_str::<features::MergedFeatureProperties>(json).ok());
 
-        let mut create_config = container.create_config_with_features(
-            image_id,
-            feature_props.as_ref(),
-        );
+        let mut create_config =
+            container.create_config_with_features(image_id, feature_props.as_ref());
 
         // Add tmpfs mount for credential cache if credential forwarding is enabled
         if self.global_config.credentials.docker || self.global_config.credentials.git {
@@ -442,15 +442,15 @@ impl ContainerManager {
 
         // Handle compose start: bring up all services
         let is_compose = container_state.compose_project.is_some()
-            || self.load_container(&container_state.config_path)
+            || self
+                .load_container(&container_state.config_path)
                 .map(|c| c.is_compose())
                 .unwrap_or(false);
         if is_compose {
             let container = self.load_container(&container_state.config_path)?;
             if let Some(compose_files) = container.compose_files() {
                 let owned = compose_file_strs(&compose_files);
-                let compose_file_refs: Vec<&str> =
-                    owned.iter().map(|s| s.as_str()).collect();
+                let compose_file_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
                 let project_name = container.compose_project_name();
 
                 provider
@@ -467,9 +467,7 @@ impl ContainerManager {
                     .compose_ps(&compose_file_refs, &project_name, &container.workspace_path)
                     .await?;
                 let primary_service = container.compose_service().ok_or_else(|| {
-                    CoreError::InvalidState(
-                        "No service specified for compose project".to_string(),
-                    )
+                    CoreError::InvalidState("No service specified for compose project".to_string())
                 })?;
                 let svc = services
                     .iter()
@@ -492,8 +490,14 @@ impl ContainerManager {
                 self.set_status(id, DevcContainerStatus::Running).await?;
 
                 // Ensure SSH daemon is running if SSH was set up
-                if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
-                    self.ensure_ssh_daemon_running(provider, &svc.container_id).await?;
+                if container_state
+                    .metadata
+                    .get("ssh_available")
+                    .map(|v| v == "true")
+                    .unwrap_or(false)
+                {
+                    self.ensure_ssh_daemon_running(provider, &svc.container_id)
+                        .await?;
                 }
 
                 // Run post-start commands (feature commands first, then devcontainer.json)
@@ -529,9 +533,10 @@ impl ContainerManager {
             }
         }
 
-        let container_id = container_state.container_id.as_ref().ok_or_else(|| {
-            CoreError::InvalidState("Container not created yet".to_string())
-        })?;
+        let container_id = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container not created yet".to_string()))?;
 
         // Only call provider.start() if the container is not already running
         let details = provider.inspect(&ContainerId::new(container_id)).await?;
@@ -543,8 +548,14 @@ impl ContainerManager {
         self.set_status(id, DevcContainerStatus::Running).await?;
 
         // Ensure SSH daemon is running if SSH was set up for this container
-        if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
-            self.ensure_ssh_daemon_running(provider, &ContainerId::new(container_id)).await?;
+        if container_state
+            .metadata
+            .get("ssh_available")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
+            self.ensure_ssh_daemon_running(provider, &ContainerId::new(container_id))
+                .await?;
         }
 
         // Run post-start commands (feature commands first, then devcontainer.json)
@@ -582,7 +593,11 @@ impl ContainerManager {
     }
 
     /// Ensure the SSH daemon (dropbear) is running in the container
-    async fn ensure_ssh_daemon_running(&self, provider: &dyn ContainerProvider, container_id: &ContainerId) -> Result<()> {
+    async fn ensure_ssh_daemon_running(
+        &self,
+        provider: &dyn ContainerProvider,
+        container_id: &ContainerId,
+    ) -> Result<()> {
         let script = r#"
 if ! pgrep -x dropbear >/dev/null 2>&1; then
     /usr/sbin/dropbear -s -r /etc/dropbear/dropbear_ed25519_host_key -p 127.0.0.1:2222 2>/dev/null
@@ -635,8 +650,7 @@ fi
             let container = self.load_container(&container_state.config_path)?;
             if let Some(compose_files) = container.compose_files() {
                 let owned = compose_file_strs(&compose_files);
-                let compose_file_refs: Vec<&str> =
-                    owned.iter().map(|s| s.as_str()).collect();
+                let compose_file_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
 
                 provider
                     .compose_down(
@@ -661,9 +675,10 @@ fi
             }
         }
 
-        let container_id = container_state.container_id.as_ref().ok_or_else(|| {
-            CoreError::InvalidState("Container not created".to_string())
-        })?;
+        let container_id = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container not created".to_string()))?;
 
         provider
             .stop(&ContainerId::new(container_id), Some(10))
@@ -746,8 +761,7 @@ fi
                 let container = self.load_container(&container_state.config_path)?;
                 if let Some(compose_files) = container.compose_files() {
                     let owned = compose_file_strs(&compose_files);
-                    let compose_file_refs: Vec<&str> =
-                        owned.iter().map(|s| s.as_str()).collect();
+                    let compose_file_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
 
                     if let Err(e) = provider
                         .compose_down(
@@ -776,10 +790,7 @@ fi
 
                 // Remove the runtime container if it exists
                 if let Some(ref container_id) = container_state.container_id {
-                    if let Err(e) = provider
-                        .remove(&ContainerId::new(container_id), true)
-                        .await
-                    {
+                    if let Err(e) = provider.remove(&ContainerId::new(container_id), true).await {
                         tracing::warn!("Failed to remove container {}: {}", container_id, e);
                     }
                 }
@@ -831,7 +842,10 @@ fi
 
         let container = self.load_container(&container_state.config_path)?;
         if let Some(ref wait_for) = container.devcontainer.wait_for {
-            tracing::info!("waitFor is set to '{}' (async lifecycle deferral not yet implemented)", wait_for);
+            tracing::info!(
+                "waitFor is set to '{}' (async lifecycle deferral not yet implemented)",
+                wait_for
+            );
         }
 
         // Handle Docker Compose projects
@@ -874,23 +888,18 @@ fi
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
-        let container_id = ContainerId::new(
-            container_state
-                .container_id
-                .as_ref()
-                .ok_or_else(|| {
-                    CoreError::InvalidState(format!(
-                        "Container '{}' has no runtime container ID after create",
-                        id
-                    ))
-                })?,
-        );
+        let container_id =
+            ContainerId::new(container_state.container_id.as_ref().ok_or_else(|| {
+                CoreError::InvalidState(format!(
+                    "Container '{}' has no runtime container ID after create",
+                    id
+                ))
+            })?);
 
         // Run first-create lifecycle if this is a newly created container
         if container_state.status == DevcContainerStatus::Created {
-            self.run_first_create_lifecycle(
-                id, &container, provider, &container_id, progress,
-            ).await?;
+            self.run_first_create_lifecycle(id, &container, provider, &container_id, progress)
+                .await?;
         }
 
         // Start container (idempotent) and run post-start phase
@@ -1035,7 +1044,6 @@ fi
         let container = self.load_container(&state.config_path)?;
         Ok(container.devcontainer)
     }
-
 }
 
 /// Convert a slice of PathBuf compose files to owned Strings and borrowed &str refs.
@@ -1043,7 +1051,10 @@ fi
 /// Returns (owned, refs) where `refs` borrows from `owned`.
 /// Caller must keep `owned` alive while using `refs`.
 pub(crate) fn compose_file_strs(files: &[std::path::PathBuf]) -> Vec<String> {
-    files.iter().map(|f| f.to_string_lossy().to_string()).collect()
+    files
+        .iter()
+        .map(|f| f.to_string_lossy().to_string())
+        .collect()
 }
 
 /// Extract merged feature properties from container state metadata.
@@ -1099,20 +1110,12 @@ mod tests {
     /// Create a test manager with MockProvider, returning both manager and mock calls tracker
     fn test_manager(mock: MockProvider) -> ContainerManager {
         let state = StateStore::new();
-        ContainerManager::new_for_testing(
-            Box::new(mock),
-            GlobalConfig::default(),
-            state,
-        )
+        ContainerManager::new_for_testing(Box::new(mock), GlobalConfig::default(), state)
     }
 
     /// Create a test manager with a pre-existing container state
     fn test_manager_with_state(mock: MockProvider, state: StateStore) -> ContainerManager {
-        ContainerManager::new_for_testing(
-            Box::new(mock),
-            GlobalConfig::default(),
-            state,
-        )
+        ContainerManager::new_for_testing(Box::new(mock), GlobalConfig::default(), state)
     }
 
     /// Helper: create a ContainerState for use in StateStore
@@ -1122,8 +1125,7 @@ mod tests {
         image_id: Option<&str>,
         container_id: Option<&str>,
     ) -> ContainerState {
-        let config_path = workspace
-            .join(".devcontainer/devcontainer.json");
+        let config_path = workspace.join(".devcontainer/devcontainer.json");
         let mut cs = ContainerState::new(
             "test".to_string(),
             ProviderType::Docker,
@@ -1172,7 +1174,11 @@ mod tests {
         let result = mgr.stop(&id).await;
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("provider not available"), "Expected 'provider not available' but got: {}", err_msg);
+        assert!(
+            err_msg.contains("provider not available"),
+            "Expected 'provider not available' but got: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]
@@ -1287,8 +1293,7 @@ mod tests {
     async fn test_build_sets_failed_on_error() {
         let workspace = create_test_workspace();
         let mock = MockProvider::new(ProviderType::Docker);
-        *mock.pull_result.lock().unwrap() =
-            Err(ProviderError::RuntimeError("pull failed".into()));
+        *mock.pull_result.lock().unwrap() = Err(ProviderError::RuntimeError("pull failed".into()));
 
         let mut state = StateStore::new();
         let cs = make_container_state(
@@ -1904,8 +1909,7 @@ mod tests {
     async fn test_sync_container_disappeared() {
         let workspace = create_test_workspace();
         let mock = MockProvider::new(ProviderType::Docker);
-        *mock.inspect_result.lock().unwrap() =
-            Err(ProviderError::ContainerNotFound("gone".into()));
+        *mock.inspect_result.lock().unwrap() = Err(ProviderError::ContainerNotFound("gone".into()));
 
         let mut state = StateStore::new();
         let cs = make_container_state(
@@ -2052,8 +2056,12 @@ mod tests {
 
         // Verify compose_up was called
         let recorded = calls.lock().unwrap();
-        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposeUp { .. })));
-        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposePs { .. })));
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::ComposeUp { .. })));
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::ComposePs { .. })));
 
         // Verify state was updated with compose metadata
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2098,10 +2106,14 @@ mod tests {
 
         // Verify compose_down was called
         let recorded = calls.lock().unwrap();
-        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposeDown { .. })));
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::ComposeDown { .. })));
         // Should NOT call individual stop/remove
         assert!(!recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
-        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })));
+        assert!(!recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::Remove { .. })));
 
         // State should be cleaned up
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2132,8 +2144,12 @@ mod tests {
         // Should call stop + remove, NOT compose_down
         let recorded = calls.lock().unwrap();
         assert!(recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
-        assert!(recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })));
-        assert!(!recorded.iter().any(|c| matches!(c, MockCall::ComposeDown { .. })));
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::Remove { .. })));
+        assert!(!recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::ComposeDown { .. })));
     }
 
     // ==================== Compose Start / Stop ====================
@@ -2170,12 +2186,8 @@ mod tests {
 
         let mut state = StateStore::new();
         // Use Stopped status — can_start() requires Created or Stopped
-        let mut cs = make_container_state(
-            workspace.path(),
-            DevcContainerStatus::Stopped,
-            None,
-            None,
-        );
+        let mut cs =
+            make_container_state(workspace.path(), DevcContainerStatus::Stopped, None, None);
         cs.compose_project = Some("devc-test".to_string());
         cs.compose_service = Some("app".to_string());
         let id = cs.id.clone();
@@ -2186,8 +2198,12 @@ mod tests {
 
         // Verify compose_up and compose_ps were called
         let recorded = calls.lock().unwrap();
-        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposeUp { .. })));
-        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposePs { .. })));
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::ComposeUp { .. })));
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::ComposePs { .. })));
 
         // Verify container_id was set from the matched service
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2208,12 +2224,8 @@ mod tests {
         }]);
 
         let mut state = StateStore::new();
-        let mut cs = make_container_state(
-            workspace.path(),
-            DevcContainerStatus::Stopped,
-            None,
-            None,
-        );
+        let mut cs =
+            make_container_state(workspace.path(), DevcContainerStatus::Stopped, None, None);
         cs.compose_project = Some("devc-test".to_string());
         cs.compose_service = Some("app".to_string());
         let id = cs.id.clone();
@@ -2250,7 +2262,9 @@ mod tests {
 
         // Should call compose_down, NOT individual stop
         let recorded = calls.lock().unwrap();
-        assert!(recorded.iter().any(|c| matches!(c, MockCall::ComposeDown { .. })));
+        assert!(recorded
+            .iter()
+            .any(|c| matches!(c, MockCall::ComposeDown { .. })));
         assert!(!recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
 
         // container_id should be cleared
@@ -2303,21 +2317,13 @@ mod tests {
         let dc = tmp.path().join(".devcontainer");
         std::fs::create_dir_all(dc.join("python")).unwrap();
         std::fs::create_dir_all(dc.join("node")).unwrap();
-        std::fs::write(
-            dc.join("devcontainer.json"),
-            r#"{"image": "ubuntu:22.04"}"#,
-        )
-        .unwrap();
+        std::fs::write(dc.join("devcontainer.json"), r#"{"image": "ubuntu:22.04"}"#).unwrap();
         std::fs::write(
             dc.join("python/devcontainer.json"),
             r#"{"image": "python:3.12"}"#,
         )
         .unwrap();
-        std::fs::write(
-            dc.join("node/devcontainer.json"),
-            r#"{"image": "node:20"}"#,
-        )
-        .unwrap();
+        std::fs::write(dc.join("node/devcontainer.json"), r#"{"image": "node:20"}"#).unwrap();
 
         let mock = MockProvider::new(ProviderType::Docker);
         let mgr = test_manager(mock);
@@ -2335,11 +2341,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dc = tmp.path().join(".devcontainer");
         std::fs::create_dir_all(dc.join("python")).unwrap();
-        std::fs::write(
-            dc.join("devcontainer.json"),
-            r#"{"image": "ubuntu:22.04"}"#,
-        )
-        .unwrap();
+        std::fs::write(dc.join("devcontainer.json"), r#"{"image": "ubuntu:22.04"}"#).unwrap();
         std::fs::write(
             dc.join("python/devcontainer.json"),
             r#"{"image": "python:3.12"}"#,
@@ -2397,7 +2399,11 @@ mod tests {
         dc_env.insert("EDITOR".to_string(), "vim".to_string());
         dc_env.insert("DC_VAR".to_string(), "world".to_string());
         let result = merge_remote_env(Some(&dc_env), &feature_env).unwrap();
-        assert_eq!(result.get("EDITOR").unwrap(), "vim", "devcontainer.json should win");
+        assert_eq!(
+            result.get("EDITOR").unwrap(),
+            "vim",
+            "devcontainer.json should win"
+        );
         assert_eq!(result.get("FEATURE_VAR").unwrap(), "hello");
         assert_eq!(result.get("DC_VAR").unwrap(), "world");
         assert_eq!(result.len(), 3);
@@ -2479,7 +2485,10 @@ mod tests {
         mgr.up(&id).await.unwrap();
 
         // initializeCommand ran on host
-        assert!(marker.exists(), "initializeCommand marker file should exist");
+        assert!(
+            marker.exists(),
+            "initializeCommand marker file should exist"
+        );
 
         let recorded = calls.lock().unwrap();
 
@@ -2515,21 +2524,35 @@ mod tests {
         assert!(execs.len() >= 4, "Expected at least 4 exec calls (onCreate, updateContent, postCreate, postStart), got {}", execs.len());
 
         let lifecycle_cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
-        let on_create_idx = lifecycle_cmds.iter().position(|&c| c == "echo on-create")
+        let on_create_idx = lifecycle_cmds
+            .iter()
+            .position(|&c| c == "echo on-create")
             .expect("onCreateCommand should have run");
-        let update_content_idx = lifecycle_cmds.iter().position(|&c| c == "echo update-content")
+        let update_content_idx = lifecycle_cmds
+            .iter()
+            .position(|&c| c == "echo update-content")
             .expect("updateContentCommand should have run");
-        let post_create_idx = lifecycle_cmds.iter().position(|&c| c == "echo post-create")
+        let post_create_idx = lifecycle_cmds
+            .iter()
+            .position(|&c| c == "echo post-create")
             .expect("postCreateCommand should have run");
-        let post_start_idx = lifecycle_cmds.iter().position(|&c| c == "echo post-start")
+        let post_start_idx = lifecycle_cmds
+            .iter()
+            .position(|&c| c == "echo post-start")
             .expect("postStartCommand should have run");
 
-        assert!(on_create_idx < update_content_idx,
-            "onCreateCommand must run before updateContentCommand");
-        assert!(update_content_idx < post_create_idx,
-            "updateContentCommand must run before postCreateCommand");
-        assert!(post_create_idx < post_start_idx,
-            "postCreateCommand must run before postStartCommand");
+        assert!(
+            on_create_idx < update_content_idx,
+            "onCreateCommand must run before updateContentCommand"
+        );
+        assert!(
+            update_content_idx < post_create_idx,
+            "updateContentCommand must run before postCreateCommand"
+        );
+        assert!(
+            post_create_idx < post_start_idx,
+            "postCreateCommand must run before postStartCommand"
+        );
 
         // postAttachCommand must NOT run during up
         assert!(
@@ -2538,8 +2561,14 @@ mod tests {
         );
 
         // All execs happen after Create
-        let first_exec_overall = recorded.iter().position(|c| matches!(c, MockCall::Exec { .. })).unwrap();
-        assert!(create_idx < first_exec_overall, "Create must come before any Exec");
+        let first_exec_overall = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Exec { .. }))
+            .unwrap();
+        assert!(
+            create_idx < first_exec_overall,
+            "Create must come before any Exec"
+        );
     }
 
     #[tokio::test]
@@ -2562,17 +2591,32 @@ mod tests {
         mgr.rebuild(&id, false).await.unwrap();
 
         // initializeCommand marker must exist
-        assert!(marker.exists(), "initializeCommand marker file should exist");
+        assert!(
+            marker.exists(),
+            "initializeCommand marker file should exist"
+        );
 
         let recorded = calls.lock().unwrap();
 
         // Down phase (Stop + Remove) must come before Pull (build)
-        let stop_idx = recorded.iter().position(|c| matches!(c, MockCall::Stop { .. })).unwrap();
-        let remove_idx = recorded.iter().position(|c| matches!(c, MockCall::Remove { .. })).unwrap();
-        let pull_idx = recorded.iter().position(|c| matches!(c, MockCall::Pull { .. })).unwrap();
+        let stop_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Stop { .. }))
+            .unwrap();
+        let remove_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Remove { .. }))
+            .unwrap();
+        let pull_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Pull { .. }))
+            .unwrap();
 
         assert!(stop_idx < pull_idx, "Stop must come before Pull (build)");
-        assert!(remove_idx < pull_idx, "Remove must come before Pull (build)");
+        assert!(
+            remove_idx < pull_idx,
+            "Remove must come before Pull (build)"
+        );
     }
 
     #[tokio::test]
@@ -2596,17 +2640,32 @@ mod tests {
         mgr.rebuild_with_progress(&id, false, tx).await.unwrap();
 
         // initializeCommand marker must exist
-        assert!(marker.exists(), "initializeCommand marker file should exist");
+        assert!(
+            marker.exists(),
+            "initializeCommand marker file should exist"
+        );
 
         let recorded = calls.lock().unwrap();
 
         // Down phase (Stop + Remove) must come before Pull (build)
-        let stop_idx = recorded.iter().position(|c| matches!(c, MockCall::Stop { .. })).unwrap();
-        let remove_idx = recorded.iter().position(|c| matches!(c, MockCall::Remove { .. })).unwrap();
-        let pull_idx = recorded.iter().position(|c| matches!(c, MockCall::Pull { .. })).unwrap();
+        let stop_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Stop { .. }))
+            .unwrap();
+        let remove_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Remove { .. }))
+            .unwrap();
+        let pull_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Pull { .. }))
+            .unwrap();
 
         assert!(stop_idx < pull_idx, "Stop must come before Pull (build)");
-        assert!(remove_idx < pull_idx, "Remove must come before Pull (build)");
+        assert!(
+            remove_idx < pull_idx,
+            "Remove must come before Pull (build)"
+        );
     }
 
     #[tokio::test]
@@ -2628,19 +2687,34 @@ mod tests {
         let mgr = test_manager_no_creds(mock, state);
         mgr.rebuild(&id, false).await.unwrap();
 
-        assert!(marker.exists(), "initializeCommand marker file should exist");
+        assert!(
+            marker.exists(),
+            "initializeCommand marker file should exist"
+        );
 
         let recorded = calls.lock().unwrap();
 
         // Phase 1: Down
-        let stop_idx = recorded.iter().position(|c| matches!(c, MockCall::Stop { .. })).unwrap();
-        let remove_idx = recorded.iter().position(|c| matches!(c, MockCall::Remove { .. })).unwrap();
+        let stop_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Stop { .. }))
+            .unwrap();
+        let remove_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Remove { .. }))
+            .unwrap();
 
         // Phase 2: Build (Pull)
-        let pull_idx = recorded.iter().position(|c| matches!(c, MockCall::Pull { .. })).unwrap();
+        let pull_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Pull { .. }))
+            .unwrap();
 
         // Phase 3: Create
-        let create_idx = recorded.iter().position(|c| matches!(c, MockCall::Create { .. })).unwrap();
+        let create_idx = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Create { .. }))
+            .unwrap();
 
         // Verify overall phase ordering: Down → Build → Create → lifecycle execs
         assert!(stop_idx < remove_idx, "Stop before Remove");
@@ -2651,18 +2725,35 @@ mod tests {
         let execs = exec_commands(&recorded);
         let lifecycle_cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
 
-        let on_create_idx = lifecycle_cmds.iter().position(|&c| c == "echo on-create")
+        let on_create_idx = lifecycle_cmds
+            .iter()
+            .position(|&c| c == "echo on-create")
             .expect("onCreateCommand should have run");
-        let update_content_idx = lifecycle_cmds.iter().position(|&c| c == "echo update-content")
+        let update_content_idx = lifecycle_cmds
+            .iter()
+            .position(|&c| c == "echo update-content")
             .expect("updateContentCommand should have run");
-        let post_create_idx = lifecycle_cmds.iter().position(|&c| c == "echo post-create")
+        let post_create_idx = lifecycle_cmds
+            .iter()
+            .position(|&c| c == "echo post-create")
             .expect("postCreateCommand should have run");
-        let post_start_idx = lifecycle_cmds.iter().position(|&c| c == "echo post-start")
+        let post_start_idx = lifecycle_cmds
+            .iter()
+            .position(|&c| c == "echo post-start")
             .expect("postStartCommand should have run");
 
-        assert!(on_create_idx < update_content_idx, "onCreate before updateContent");
-        assert!(update_content_idx < post_create_idx, "updateContent before postCreate");
-        assert!(post_create_idx < post_start_idx, "postCreate before postStart");
+        assert!(
+            on_create_idx < update_content_idx,
+            "onCreate before updateContent"
+        );
+        assert!(
+            update_content_idx < post_create_idx,
+            "updateContent before postCreate"
+        );
+        assert!(
+            post_create_idx < post_start_idx,
+            "postCreate before postStart"
+        );
 
         // postAttachCommand must NOT run during rebuild
         assert!(
@@ -2671,8 +2762,14 @@ mod tests {
         );
 
         // All execs must come after Create
-        let first_exec_overall = recorded.iter().position(|c| matches!(c, MockCall::Exec { .. })).unwrap();
-        assert!(create_idx < first_exec_overall, "Create must come before any Exec");
+        let first_exec_overall = recorded
+            .iter()
+            .position(|c| matches!(c, MockCall::Exec { .. }))
+            .unwrap();
+        assert!(
+            create_idx < first_exec_overall,
+            "Create must come before any Exec"
+        );
     }
 
     #[tokio::test]
@@ -2791,11 +2888,23 @@ mod tests {
         let execs_after_up = exec_commands(&recorded_after_up);
         let cmds_after_up: Vec<&str> = execs_after_up.iter().map(|cmd| shell_cmd(cmd)).collect();
 
-        assert!(cmds_after_up.contains(&"echo on-create"), "onCreate should run on first up");
-        assert!(cmds_after_up.contains(&"echo post-create"), "postCreate should run on first up");
+        assert!(
+            cmds_after_up.contains(&"echo on-create"),
+            "onCreate should run on first up"
+        );
+        assert!(
+            cmds_after_up.contains(&"echo post-create"),
+            "postCreate should run on first up"
+        );
 
-        let on_create_count = cmds_after_up.iter().filter(|&&c| c == "echo on-create").count();
-        assert_eq!(on_create_count, 1, "onCreateCommand should run exactly once during up");
+        let on_create_count = cmds_after_up
+            .iter()
+            .filter(|&&c| c == "echo on-create")
+            .count();
+        assert_eq!(
+            on_create_count, 1,
+            "onCreateCommand should run exactly once during up"
+        );
 
         // Now call start — should NOT re-run onCreate/postCreate
         calls.lock().unwrap().clear();
@@ -2803,7 +2912,8 @@ mod tests {
 
         let recorded_after_start = calls.lock().unwrap().clone();
         let execs_after_start = exec_commands(&recorded_after_start);
-        let cmds_after_start: Vec<&str> = execs_after_start.iter().map(|cmd| shell_cmd(cmd)).collect();
+        let cmds_after_start: Vec<&str> =
+            execs_after_start.iter().map(|cmd| shell_cmd(cmd)).collect();
 
         assert!(
             !cmds_after_start.contains(&"echo on-create"),
@@ -2843,7 +2953,11 @@ mod tests {
 
         let recorded = calls.lock().unwrap();
         let execs = exec_commands(&recorded);
-        assert!(execs.is_empty(), "stop should not run any lifecycle Exec calls, got {:?}", execs);
+        assert!(
+            execs.is_empty(),
+            "stop should not run any lifecycle Exec calls, got {:?}",
+            execs
+        );
     }
 
     #[tokio::test]
@@ -2867,7 +2981,11 @@ mod tests {
 
         let recorded = calls.lock().unwrap();
         let execs = exec_commands(&recorded);
-        assert!(execs.is_empty(), "down should not run any lifecycle Exec calls, got {:?}", execs);
+        assert!(
+            execs.is_empty(),
+            "down should not run any lifecycle Exec calls, got {:?}",
+            execs
+        );
     }
 
     #[tokio::test]
@@ -2890,13 +3008,19 @@ mod tests {
         mgr.up(&id).await.unwrap();
 
         // initializeCommand should NOT run (image already built)
-        assert!(!marker.exists(), "initializeCommand should NOT run on already-running container");
+        assert!(
+            !marker.exists(),
+            "initializeCommand should NOT run on already-running container"
+        );
 
         let recorded = calls.lock().unwrap();
 
         // No Build/Pull/Create calls
         assert!(
-            !recorded.iter().any(|c| matches!(c, MockCall::Pull { .. } | MockCall::Build { .. } | MockCall::Create { .. })),
+            !recorded.iter().any(|c| matches!(
+                c,
+                MockCall::Pull { .. } | MockCall::Build { .. } | MockCall::Create { .. }
+            )),
             "Should not build/pull/create for already-running container"
         );
 
@@ -2904,8 +3028,14 @@ mod tests {
         let execs = exec_commands(&recorded);
         let cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
         assert!(!cmds.contains(&"echo on-create"), "onCreate should NOT run");
-        assert!(!cmds.contains(&"echo update-content"), "updateContent should NOT run");
-        assert!(!cmds.contains(&"echo post-create"), "postCreate should NOT run");
+        assert!(
+            !cmds.contains(&"echo update-content"),
+            "updateContent should NOT run"
+        );
+        assert!(
+            !cmds.contains(&"echo post-create"),
+            "postCreate should NOT run"
+        );
 
         // postStart should run
         assert!(cmds.contains(&"echo post-start"), "postStart should run");
@@ -2931,13 +3061,19 @@ mod tests {
         mgr.up(&id).await.unwrap();
 
         // initializeCommand should NOT run (image already built)
-        assert!(!marker.exists(), "initializeCommand should NOT run on stopped container with image");
+        assert!(
+            !marker.exists(),
+            "initializeCommand should NOT run on stopped container with image"
+        );
 
         let recorded = calls.lock().unwrap();
 
         // No Build/Pull/Create
         assert!(
-            !recorded.iter().any(|c| matches!(c, MockCall::Pull { .. } | MockCall::Build { .. } | MockCall::Create { .. })),
+            !recorded.iter().any(|c| matches!(
+                c,
+                MockCall::Pull { .. } | MockCall::Build { .. } | MockCall::Create { .. }
+            )),
             "Should not build/pull/create for stopped container with existing image"
         );
 
@@ -2945,11 +3081,20 @@ mod tests {
         let execs = exec_commands(&recorded);
         let cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
         assert!(!cmds.contains(&"echo on-create"), "onCreate should NOT run");
-        assert!(!cmds.contains(&"echo update-content"), "updateContent should NOT run");
-        assert!(!cmds.contains(&"echo post-create"), "postCreate should NOT run");
+        assert!(
+            !cmds.contains(&"echo update-content"),
+            "updateContent should NOT run"
+        );
+        assert!(
+            !cmds.contains(&"echo post-create"),
+            "postCreate should NOT run"
+        );
 
         // postStart should run (via start phase)
-        assert!(cmds.contains(&"echo post-start"), "postStart should run on stopped->running");
+        assert!(
+            cmds.contains(&"echo post-start"),
+            "postStart should run on stopped->running"
+        );
     }
 
     #[tokio::test]
@@ -2971,19 +3116,26 @@ mod tests {
 
         // First up: marker should be created (initializeCommand runs before build)
         mgr.up(&id).await.unwrap();
-        assert!(marker.exists(), "initializeCommand should create marker on first up");
+        assert!(
+            marker.exists(),
+            "initializeCommand should create marker on first up"
+        );
 
         // Delete marker and call up again (container already has image + container_id)
         std::fs::remove_file(&marker).unwrap();
         mgr.up(&id).await.unwrap();
 
         // Marker should NOT be recreated (initializeCommand skipped on subsequent up)
-        assert!(!marker.exists(), "initializeCommand should NOT run on subsequent up");
+        assert!(
+            !marker.exists(),
+            "initializeCommand should NOT run on subsequent up"
+        );
     }
 
     /// Create a workspace with devcontainer.json commands prefixed "dc-" and
     /// feature properties with commands prefixed "feat-", stored in metadata.
-    fn create_lifecycle_workspace_with_features() -> (tempfile::TempDir, std::path::PathBuf, String) {
+    fn create_lifecycle_workspace_with_features() -> (tempfile::TempDir, std::path::PathBuf, String)
+    {
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("init_marker");
         let devcontainer_dir = tmp.path().join(".devcontainer");
@@ -3006,11 +3158,21 @@ mod tests {
 
         // Build feature properties JSON
         let feature_props = crate::features::MergedFeatureProperties {
-            on_create_commands: vec![devc_config::Command::String("echo feat-on-create".to_string())],
-            update_content_commands: vec![devc_config::Command::String("echo feat-update-content".to_string())],
-            post_create_commands: vec![devc_config::Command::String("echo feat-post-create".to_string())],
-            post_start_commands: vec![devc_config::Command::String("echo feat-post-start".to_string())],
-            post_attach_commands: vec![devc_config::Command::String("echo feat-post-attach".to_string())],
+            on_create_commands: vec![devc_config::Command::String(
+                "echo feat-on-create".to_string(),
+            )],
+            update_content_commands: vec![devc_config::Command::String(
+                "echo feat-update-content".to_string(),
+            )],
+            post_create_commands: vec![devc_config::Command::String(
+                "echo feat-post-create".to_string(),
+            )],
+            post_start_commands: vec![devc_config::Command::String(
+                "echo feat-post-start".to_string(),
+            )],
+            post_attach_commands: vec![devc_config::Command::String(
+                "echo feat-post-attach".to_string(),
+            )],
             ..Default::default()
         };
         let feature_json = serde_json::to_string(&feature_props).unwrap();
@@ -3026,7 +3188,8 @@ mod tests {
         feature_json: &str,
     ) -> ContainerState {
         let mut cs = make_container_state(workspace, status, image_id, container_id);
-        cs.metadata.insert("feature_properties".to_string(), feature_json.to_string());
+        cs.metadata
+            .insert("feature_properties".to_string(), feature_json.to_string());
         cs
     }
 
@@ -3058,32 +3221,60 @@ mod tests {
         let cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
 
         // Feature onCreate before devcontainer onCreate
-        let feat_on_create = cmds.iter().position(|&c| c == "echo feat-on-create")
+        let feat_on_create = cmds
+            .iter()
+            .position(|&c| c == "echo feat-on-create")
             .expect("feature onCreateCommand should run");
-        let dc_on_create = cmds.iter().position(|&c| c == "echo dc-on-create")
+        let dc_on_create = cmds
+            .iter()
+            .position(|&c| c == "echo dc-on-create")
             .expect("devcontainer onCreateCommand should run");
-        assert!(feat_on_create < dc_on_create, "feature onCreate should run before dc onCreate");
+        assert!(
+            feat_on_create < dc_on_create,
+            "feature onCreate should run before dc onCreate"
+        );
 
         // Feature updateContent before devcontainer updateContent
-        let feat_update = cmds.iter().position(|&c| c == "echo feat-update-content")
+        let feat_update = cmds
+            .iter()
+            .position(|&c| c == "echo feat-update-content")
             .expect("feature updateContentCommand should run");
-        let dc_update = cmds.iter().position(|&c| c == "echo dc-update-content")
+        let dc_update = cmds
+            .iter()
+            .position(|&c| c == "echo dc-update-content")
             .expect("devcontainer updateContentCommand should run");
-        assert!(feat_update < dc_update, "feature updateContent should run before dc updateContent");
+        assert!(
+            feat_update < dc_update,
+            "feature updateContent should run before dc updateContent"
+        );
 
         // Feature postCreate before devcontainer postCreate
-        let feat_post_create = cmds.iter().position(|&c| c == "echo feat-post-create")
+        let feat_post_create = cmds
+            .iter()
+            .position(|&c| c == "echo feat-post-create")
             .expect("feature postCreateCommand should run");
-        let dc_post_create = cmds.iter().position(|&c| c == "echo dc-post-create")
+        let dc_post_create = cmds
+            .iter()
+            .position(|&c| c == "echo dc-post-create")
             .expect("devcontainer postCreateCommand should run");
-        assert!(feat_post_create < dc_post_create, "feature postCreate should run before dc postCreate");
+        assert!(
+            feat_post_create < dc_post_create,
+            "feature postCreate should run before dc postCreate"
+        );
 
         // Feature postStart before devcontainer postStart
-        let feat_post_start = cmds.iter().position(|&c| c == "echo feat-post-start")
+        let feat_post_start = cmds
+            .iter()
+            .position(|&c| c == "echo feat-post-start")
             .expect("feature postStartCommand should run");
-        let dc_post_start = cmds.iter().position(|&c| c == "echo dc-post-start")
+        let dc_post_start = cmds
+            .iter()
+            .position(|&c| c == "echo dc-post-start")
             .expect("devcontainer postStartCommand should run");
-        assert!(feat_post_start < dc_post_start, "feature postStart should run before dc postStart");
+        assert!(
+            feat_post_start < dc_post_start,
+            "feature postStart should run before dc postStart"
+        );
     }
 
     #[tokio::test]
@@ -3110,11 +3301,18 @@ mod tests {
         let execs = exec_commands(&recorded);
         let cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
 
-        let feat_idx = cmds.iter().position(|&c| c == "echo feat-post-start")
+        let feat_idx = cmds
+            .iter()
+            .position(|&c| c == "echo feat-post-start")
             .expect("feature postStartCommand should run");
-        let dc_idx = cmds.iter().position(|&c| c == "echo dc-post-start")
+        let dc_idx = cmds
+            .iter()
+            .position(|&c| c == "echo dc-post-start")
             .expect("devcontainer postStartCommand should run");
-        assert!(feat_idx < dc_idx, "feature postStart should run before dc postStart");
+        assert!(
+            feat_idx < dc_idx,
+            "feature postStart should run before dc postStart"
+        );
     }
 
     #[tokio::test]
@@ -3141,11 +3339,18 @@ mod tests {
         let execs = exec_commands(&recorded);
         let cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
 
-        let feat_idx = cmds.iter().position(|&c| c == "echo feat-post-attach")
+        let feat_idx = cmds
+            .iter()
+            .position(|&c| c == "echo feat-post-attach")
             .expect("feature postAttachCommand should run");
-        let dc_idx = cmds.iter().position(|&c| c == "echo dc-post-attach")
+        let dc_idx = cmds
+            .iter()
+            .position(|&c| c == "echo dc-post-attach")
             .expect("devcontainer postAttachCommand should run");
-        assert!(feat_idx < dc_idx, "feature postAttach should run before dc postAttach");
+        assert!(
+            feat_idx < dc_idx,
+            "feature postAttach should run before dc postAttach"
+        );
     }
 
     #[tokio::test]
@@ -3323,8 +3528,10 @@ mod tests {
         let podman_calls = podman_mock.calls.clone();
 
         // Set up Docker mock with inspect result so sync_status works
-        *docker_mock.inspect_result.lock().unwrap() =
-            Ok(mock_container_details("docker_ctr_123", ContainerStatus::Running));
+        *docker_mock.inspect_result.lock().unwrap() = Ok(mock_container_details(
+            "docker_ctr_123",
+            ContainerStatus::Running,
+        ));
 
         let mut state = StateStore::new();
         let mut cs = make_container_state(
@@ -3351,12 +3558,16 @@ mod tests {
         // Docker mock should have been called with Inspect, not the Podman mock
         let docker_recorded = docker_calls.lock().unwrap();
         assert!(
-            docker_recorded.iter().any(|c| matches!(c, MockCall::Inspect { .. })),
+            docker_recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Inspect { .. })),
             "Docker provider should have been used for inspect"
         );
         let podman_recorded = podman_calls.lock().unwrap();
         assert!(
-            !podman_recorded.iter().any(|c| matches!(c, MockCall::Inspect { .. })),
+            !podman_recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Inspect { .. })),
             "Podman provider should NOT have been used for inspect"
         );
     }
@@ -3394,12 +3605,16 @@ mod tests {
 
         let docker_recorded = docker_calls.lock().unwrap();
         assert!(
-            docker_recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })),
+            docker_recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Stop { .. })),
             "Docker provider should have been used for stop"
         );
         let podman_recorded = podman_calls.lock().unwrap();
         assert!(
-            !podman_recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })),
+            !podman_recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Stop { .. })),
             "Podman provider should NOT have been used for stop"
         );
     }
@@ -3468,7 +3683,10 @@ mod tests {
         std::fs::create_dir_all(&devcontainer_dir).unwrap();
         std::fs::write(
             devcontainer_dir.join("devcontainer.json"),
-            format!(r#"{{"image": "ubuntu:22.04", "workspaceFolder": "{}"}}"#, folder),
+            format!(
+                r#"{{"image": "ubuntu:22.04", "workspaceFolder": "{}"}}"#,
+                folder
+            ),
         )
         .unwrap();
         tmp
@@ -3622,8 +3840,10 @@ mod tests {
 
         let mock = MockProvider::new(ProviderType::Docker);
         // Container is stopped
-        *mock.inspect_result.lock().unwrap() =
-            Ok(mock_container_details("mock_container_id", ContainerStatus::Exited));
+        *mock.inspect_result.lock().unwrap() = Ok(mock_container_details(
+            "mock_container_id",
+            ContainerStatus::Exited,
+        ));
         let calls = Arc::clone(&mock.calls);
         let mgr = test_manager(mock);
 
@@ -3671,7 +3891,10 @@ mod tests {
                 ProviderType::Docker,
             )
             .await;
-        assert!(result.is_ok(), "Adopt should succeed even when lifecycle fails");
+        assert!(
+            result.is_ok(),
+            "Adopt should succeed even when lifecycle fails"
+        );
     }
 
     // ==================== Delete safety for adopted containers ====================
@@ -3699,14 +3922,19 @@ mod tests {
 
         let recorded = calls.lock().unwrap();
         assert!(
-            !recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })),
+            !recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Remove { .. })),
             "Should NOT call provider.remove() for adopted container, got: {:?}",
             *recorded,
         );
 
         // Verify removed from state
         let state = mgr.state.read().await;
-        assert!(state.get(&id).is_none(), "Should be removed from state tracking");
+        assert!(
+            state.get(&id).is_none(),
+            "Should be removed from state tracking"
+        );
     }
 
     #[tokio::test]
@@ -3731,7 +3959,9 @@ mod tests {
 
         let recorded = calls.lock().unwrap();
         assert!(
-            recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })),
+            recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Remove { .. })),
             "Should call provider.remove() for devc-created container, got: {:?}",
             *recorded,
         );
@@ -3764,7 +3994,9 @@ mod tests {
             *recorded,
         );
         assert!(
-            !recorded.iter().any(|c| matches!(c, MockCall::Remove { .. })),
+            !recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Remove { .. })),
             "Should NOT call provider.remove() for adopted container, got: {:?}",
             *recorded,
         );
@@ -3852,8 +4084,14 @@ mod tests {
             "postCreateCommand should run; got {:?}",
             cmds
         );
-        assert!(!cmds.contains(&"echo on-create"), "onCreateCommand should NOT run when absent");
-        assert!(!cmds.contains(&"echo update-content"), "updateContentCommand should NOT run when absent");
+        assert!(
+            !cmds.contains(&"echo on-create"),
+            "onCreateCommand should NOT run when absent"
+        );
+        assert!(
+            !cmds.contains(&"echo update-content"),
+            "updateContentCommand should NOT run when absent"
+        );
     }
 
     #[tokio::test]
@@ -3879,7 +4117,11 @@ mod tests {
 
         let recorded = calls.lock().unwrap();
         let execs = exec_commands(&recorded);
-        assert!(execs.is_empty(), "No postAttachCommand → no execs; got {:?}", execs);
+        assert!(
+            execs.is_empty(),
+            "No postAttachCommand → no execs; got {:?}",
+            execs
+        );
     }
 
     // ==================== Compose: edge cases ====================
@@ -3909,7 +4151,10 @@ mod tests {
 
         let cs = mgr.get(&id).await.unwrap().unwrap();
         assert_eq!(cs.container_id, Some("compose_meta_abc".to_string()));
-        assert!(cs.compose_project.is_some(), "compose_project should be stored");
+        assert!(
+            cs.compose_project.is_some(),
+            "compose_project should be stored"
+        );
         assert_eq!(cs.compose_service, Some("app".to_string()));
         assert_eq!(cs.status, DevcContainerStatus::Running);
     }
@@ -3939,7 +4184,11 @@ mod tests {
         let result = mgr.up(&id).await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("not found"), "Expected 'not found' in: {}", err);
+        assert!(
+            err.contains("not found"),
+            "Expected 'not found' in: {}",
+            err
+        );
     }
 
     // ==================== MockProvider assertion helpers ====================
@@ -3947,10 +4196,10 @@ mod tests {
     #[tokio::test]
     async fn test_mock_exec_responses_queue() {
         let mock = MockProvider::new(ProviderType::Docker);
-        mock.exec_responses.lock().unwrap().extend(vec![
-            (0, "first".to_string()),
-            (1, "second".to_string()),
-        ]);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .extend(vec![(0, "first".to_string()), (1, "second".to_string())]);
 
         let cid = ContainerId::new("test");
         let cfg = devc_provider::ExecConfig {
@@ -3980,9 +4229,13 @@ mod tests {
     #[tokio::test]
     async fn test_mock_inspect_responses_queue() {
         let mock = MockProvider::new(ProviderType::Docker);
-        mock.inspect_responses.lock().unwrap().push(
-            Ok(mock_container_details("queued_id", ContainerStatus::Exited)),
-        );
+        mock.inspect_responses
+            .lock()
+            .unwrap()
+            .push(Ok(mock_container_details(
+                "queued_id",
+                ContainerStatus::Exited,
+            )));
 
         let cid = ContainerId::new("test");
         let r1 = mock.inspect(&cid).await.unwrap();
@@ -3997,9 +4250,19 @@ mod tests {
     fn test_mock_call_count() {
         let mock = MockProvider::new(ProviderType::Docker);
         mock.calls.lock().unwrap().extend(vec![
-            MockCall::Exec { id: "a".into(), cmd: vec![], working_dir: None, user: None },
+            MockCall::Exec {
+                id: "a".into(),
+                cmd: vec![],
+                working_dir: None,
+                user: None,
+            },
             MockCall::Start { id: "a".into() },
-            MockCall::Exec { id: "b".into(), cmd: vec![], working_dir: None, user: None },
+            MockCall::Exec {
+                id: "b".into(),
+                cmd: vec![],
+                working_dir: None,
+                user: None,
+            },
         ]);
 
         assert_eq!(mock.call_count(|c| matches!(c, MockCall::Exec { .. })), 2);
@@ -4012,9 +4275,17 @@ mod tests {
         let mock = MockProvider::new(ProviderType::Docker);
         mock.calls.lock().unwrap().extend(vec![
             MockCall::Build { tag: "t".into() },
-            MockCall::Create { image: "i".into(), name: None },
+            MockCall::Create {
+                image: "i".into(),
+                name: None,
+            },
             MockCall::Start { id: "x".into() },
-            MockCall::Exec { id: "x".into(), cmd: vec![], working_dir: None, user: None },
+            MockCall::Exec {
+                id: "x".into(),
+                cmd: vec![],
+                working_dir: None,
+                user: None,
+            },
         ]);
 
         // This should pass — subsequence matches
@@ -4028,8 +4299,18 @@ mod tests {
         let mock = MockProvider::new(ProviderType::Docker);
         mock.calls.lock().unwrap().extend(vec![
             MockCall::Start { id: "a".into() },
-            MockCall::Exec { id: "a".into(), cmd: vec!["echo".into(), "hello".into()], working_dir: None, user: None },
-            MockCall::Exec { id: "b".into(), cmd: vec!["ls".into()], working_dir: None, user: None },
+            MockCall::Exec {
+                id: "a".into(),
+                cmd: vec!["echo".into(), "hello".into()],
+                working_dir: None,
+                user: None,
+            },
+            MockCall::Exec {
+                id: "b".into(),
+                cmd: vec!["ls".into()],
+                working_dir: None,
+                user: None,
+            },
         ]);
 
         let cmds = mock.exec_commands();

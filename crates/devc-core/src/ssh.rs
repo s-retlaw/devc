@@ -143,15 +143,15 @@ impl SshManager {
         );
 
         // Read and validate public key
-        let pub_key = std::fs::read_to_string(&self.pub_key_path).map_err(|e| {
-            CoreError::SshSetupError(format!("Failed to read public key: {}", e))
-        })?;
+        let pub_key = std::fs::read_to_string(&self.pub_key_path)
+            .map_err(|e| CoreError::SshSetupError(format!("Failed to read public key: {}", e)))?;
 
         // Validate that the key looks like an SSH public key
         Self::validate_ssh_public_key(&pub_key)?;
 
         // Check if dropbear and socat are installed (should be, from enhanced build)
-        let check_script = "command -v dropbear >/dev/null 2>&1 && command -v socat >/dev/null 2>&1";
+        let check_script =
+            "command -v dropbear >/dev/null 2>&1 && command -v socat >/dev/null 2>&1";
         let tools_installed = self
             .exec_in_container(provider, container_id, check_script, Some("root"))
             .await
@@ -189,7 +189,9 @@ fi
 
             self.exec_in_container(provider, container_id, install_script, Some("root"))
                 .await
-                .map_err(|e| CoreError::SshSetupError(format!("Failed to install SSH tools: {}", e)))?;
+                .map_err(|e| {
+                    CoreError::SshSetupError(format!("Failed to install SSH tools: {}", e))
+                })?;
         }
 
         // Generate dropbear host key and start daemon
@@ -209,9 +211,7 @@ fi
 
         self.exec_in_container(provider, container_id, hostkey_script, Some("root"))
             .await
-            .map_err(|e| {
-                CoreError::SshSetupError(format!("Failed to setup dropbear: {}", e))
-            })?;
+            .map_err(|e| CoreError::SshSetupError(format!("Failed to setup dropbear: {}", e)))?;
 
         // Setup authorized_keys for the user
         // Use base64 encoding to safely pass the key content without shell escaping issues
@@ -223,7 +223,8 @@ fi
 
         // Base64 encode the key to avoid any shell injection issues
         use std::io::Write;
-        let mut encoder = base64::write::EncoderStringWriter::new(&base64::engine::general_purpose::STANDARD);
+        let mut encoder =
+            base64::write::EncoderStringWriter::new(&base64::engine::general_purpose::STANDARD);
         encoder.write_all(pub_key.trim().as_bytes()).unwrap();
         let pub_key_b64 = encoder.into_inner();
 

@@ -136,7 +136,7 @@ impl StateStore {
     }
 
     /// Load state from a specific path
-    pub fn load_from(path: &PathBuf) -> Result<Self> {
+    pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::new());
         }
@@ -163,7 +163,7 @@ impl StateStore {
     }
 
     /// Save state to a specific path
-    pub fn save_to(&self, path: &PathBuf) -> Result<()> {
+    pub fn save_to(&self, path: &Path) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -208,13 +208,15 @@ impl StateStore {
     }
 
     /// Find a container by workspace path
-    pub fn find_by_workspace(&self, path: &PathBuf) -> Option<&ContainerState> {
-        self.containers.values().find(|c| &c.workspace_path == path)
+    pub fn find_by_workspace(&self, path: &Path) -> Option<&ContainerState> {
+        self.containers.values().find(|c| c.workspace_path == path)
     }
 
     /// Find a container by config path
     pub fn find_by_config_path(&self, config_path: &Path) -> Option<&ContainerState> {
-        self.containers.values().find(|c| c.config_path == config_path)
+        self.containers
+            .values()
+            .find(|c| c.config_path == config_path)
     }
 
     /// Remove a container state
@@ -351,11 +353,7 @@ mod tests {
             .collect();
         for entry in &entries {
             let name = entry.file_name().to_string_lossy().to_string();
-            assert!(
-                !name.contains(".tmp"),
-                "Temp file left behind: {}",
-                name
-            );
+            assert!(!name.contains(".tmp"), "Temp file left behind: {}", name);
         }
     }
 
@@ -430,7 +428,10 @@ mod tests {
         let loaded = StateStore::load_from(&path).unwrap();
         assert!(loaded.get(&id).is_some());
         assert_eq!(loaded.get(&id).unwrap().name, "roundtrip");
-        assert_eq!(loaded.get(&id).unwrap().status, DevcContainerStatus::Running);
+        assert_eq!(
+            loaded.get(&id).unwrap().status,
+            DevcContainerStatus::Running
+        );
     }
 
     #[test]
@@ -455,11 +456,7 @@ mod tests {
     fn test_load_future_version_still_loads() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("future.json");
-        std::fs::write(
-            &path,
-            r#"{"version": 999, "containers": {}}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"version": 999, "containers": {}}"#).unwrap();
 
         let store = StateStore::load_from(&path).unwrap();
         assert_eq!(store.version, 999);
@@ -565,7 +562,9 @@ mod tests {
         store.add(cs1);
         store.add(cs2);
 
-        let found = store.find_by_config_path(Path::new("/workspace/.devcontainer/python/devcontainer.json"));
+        let found = store.find_by_config_path(Path::new(
+            "/workspace/.devcontainer/python/devcontainer.json",
+        ));
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, "proj2");
 

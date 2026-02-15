@@ -3,7 +3,7 @@
 use crate::{CoreError, DevcContainerStatus, Result};
 use devc_provider::{ContainerId, ContainerProvider, ExecStream};
 
-use super::{ExecContext, ContainerManager};
+use super::{ContainerManager, ExecContext};
 
 impl ContainerManager {
     /// Shared preamble for exec/shell operations.
@@ -85,15 +85,31 @@ impl ContainerManager {
     }
 
     /// Shared exec implementation
-    async fn exec_inner(&self, id: &str, cmd: Vec<String>, tty: bool) -> Result<devc_provider::ExecResult> {
+    async fn exec_inner(
+        &self,
+        id: &str,
+        cmd: Vec<String>,
+        tty: bool,
+    ) -> Result<devc_provider::ExecResult> {
         let ctx = self.prepare_exec(id).await?;
 
         // Try loading config for remoteEnv/user/workdir; fall back to a basic config
         // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
         let (config, user_for_creds) = match self.load_container(&ctx.container_state.config_path) {
             Ok(container) => {
-                let user = container.devcontainer.effective_user().map(|s| s.to_string());
-                (container.exec_config_with_feature_env(cmd, tty, tty, ctx.feature_props.remote_env_option()), user)
+                let user = container
+                    .devcontainer
+                    .effective_user()
+                    .map(|s| s.to_string());
+                (
+                    container.exec_config_with_feature_env(
+                        cmd,
+                        tty,
+                        tty,
+                        ctx.feature_props.remote_env_option(),
+                    ),
+                    user,
+                )
             }
             Err(_) => {
                 let mut env = std::collections::HashMap::new();
@@ -101,15 +117,18 @@ impl ContainerManager {
                 env.insert("COLORTERM".to_string(), "truecolor".to_string());
                 env.insert("LANG".to_string(), "C.UTF-8".to_string());
                 env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
-                (devc_provider::ExecConfig {
-                    cmd,
-                    env,
-                    working_dir: None,
-                    user: None,
-                    tty,
-                    stdin: tty,
-                    privileged: false,
-                }, None)
+                (
+                    devc_provider::ExecConfig {
+                        cmd,
+                        env,
+                        working_dir: None,
+                        user: None,
+                        tty,
+                        stdin: tty,
+                        privileged: false,
+                    },
+                    None,
+                )
             }
         };
 
@@ -118,11 +137,10 @@ impl ContainerManager {
             &ctx.cid,
             user_for_creds.as_deref(),
             &ctx.container_state.workspace_path,
-        ).await;
+        )
+        .await;
 
-        let result = ctx.provider
-            .exec(&ctx.cid, &config)
-            .await?;
+        let result = ctx.provider.exec(&ctx.cid, &config).await?;
 
         self.touch_last_used(id).await?;
 
@@ -139,12 +157,16 @@ impl ContainerManager {
             &ctx.cid,
             container.devcontainer.effective_user(),
             &ctx.container_state.workspace_path,
-        ).await;
+        )
+        .await;
 
-        let config = container.exec_config_with_feature_env(cmd, true, true, ctx.feature_props.remote_env_option());
-        let stream = ctx.provider
-            .exec_interactive(&ctx.cid, &config)
-            .await?;
+        let config = container.exec_config_with_feature_env(
+            cmd,
+            true,
+            true,
+            ctx.feature_props.remote_env_option(),
+        );
+        let stream = ctx.provider.exec_interactive(&ctx.cid, &config).await?;
 
         self.touch_last_used(id).await?;
 
@@ -161,12 +183,11 @@ impl ContainerManager {
             &ctx.cid,
             container.devcontainer.effective_user(),
             &ctx.container_state.workspace_path,
-        ).await;
+        )
+        .await;
 
         let config = container.shell_config_with_feature_env(ctx.feature_props.remote_env_option());
-        let stream = ctx.provider
-            .exec_interactive(&ctx.cid, &config)
-            .await?;
+        let stream = ctx.provider.exec_interactive(&ctx.cid, &config).await?;
 
         self.touch_last_used(id).await?;
 

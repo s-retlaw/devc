@@ -82,7 +82,10 @@ pub fn generate_all_feature_layers(
 ///
 /// Wraps in single quotes and escapes any internal single quotes.
 fn shell_escape(value: &str) -> String {
-    if value.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/') {
+    if value
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
+    {
         // Safe to use unquoted
         value.to_string()
     } else {

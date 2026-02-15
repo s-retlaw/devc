@@ -48,7 +48,8 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
     };
 
     // Build runtime args for direct spawn with inherited stdio
-    let (program, prefix) = manager.runtime_args_for(&state)
+    let (program, prefix) = manager
+        .runtime_args_for(&state)
         .map_err(|e| anyhow!("{}", e))?;
 
     let mut args: Vec<String> = prefix;
@@ -97,21 +98,29 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
 
     if state.status != DevcContainerStatus::Running {
         // Try to start it first
-        if state.status == DevcContainerStatus::Stopped || state.status == DevcContainerStatus::Created {
+        if state.status == DevcContainerStatus::Stopped
+            || state.status == DevcContainerStatus::Created
+        {
             println!("Starting container '{}'...", state.name);
             manager.start(&state.id).await?;
             // Re-fetch state after starting
             let state = find_container(manager, container).await?;
-            let (program, prefix) = manager.runtime_args_for(&state)
+            let (program, prefix) = manager
+                .runtime_args_for(&state)
                 .map_err(|e| anyhow!("{}", e))?;
             print_credential_status(manager, &state).await;
             return ssh_to_container(&state, &cmd, &program, &prefix).await;
         } else {
-            bail!("Container '{}' is not running (status: {})", state.name, state.status);
+            bail!(
+                "Container '{}' is not running (status: {})",
+                state.name,
+                state.status
+            );
         }
     }
 
-    let (program, prefix) = manager.runtime_args_for(&state)
+    let (program, prefix) = manager
+        .runtime_args_for(&state)
         .map_err(|e| anyhow!("{}", e))?;
     print_credential_status(manager, &state).await;
     ssh_to_container(&state, &cmd, &program, &prefix).await
@@ -136,21 +145,36 @@ async fn print_credential_status(manager: &ContainerManager, state: &ContainerSt
 }
 
 /// Connect to container, preferring SSH over stdio when available
-async fn ssh_to_container(state: &ContainerState, cmd: &[String], program: &str, prefix: &[String]) -> Result<()> {
-    let container_id = state.container_id.as_ref()
+async fn ssh_to_container(
+    state: &ContainerState,
+    cmd: &[String],
+    program: &str,
+    prefix: &[String],
+) -> Result<()> {
+    let container_id = state
+        .container_id
+        .as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
     // Check if SSH is available for this container
-    let ssh_available = state.metadata.get("ssh_available")
+    let ssh_available = state
+        .metadata
+        .get("ssh_available")
         .map(|v| v == "true")
         .unwrap_or(false);
 
     // Resolve effective user and workspace_folder from metadata or devcontainer.json
     let parsed = Container::from_config(&state.config_path).ok();
-    let effective_user = state.metadata.get("remote_user").cloned()
-        .or_else(|| parsed.as_ref().and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string())));
-    let workspace_folder = state.metadata.get("workspace_folder").cloned()
-        .or_else(|| parsed.as_ref().and_then(|c| c.devcontainer.workspace_folder.clone()));
+    let effective_user = state.metadata.get("remote_user").cloned().or_else(|| {
+        parsed
+            .as_ref()
+            .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()))
+    });
+    let workspace_folder = state.metadata.get("workspace_folder").cloned().or_else(|| {
+        parsed
+            .as_ref()
+            .and_then(|c| c.devcontainer.workspace_folder.clone())
+    });
 
     if ssh_available {
         match ssh_via_dropbear(state, cmd, program, prefix, workspace_folder.as_deref()).await {
@@ -160,7 +184,10 @@ async fn ssh_to_container(state: &ContainerState, cmd: &[String], program: &str,
                 std::process::exit(status.code().unwrap_or(1));
             }
             Err(e) => {
-                eprintln!("Warning: SSH connection failed ({}), falling back to exec", e);
+                eprintln!(
+                    "Warning: SSH connection failed ({}), falling back to exec",
+                    e
+                );
                 if cmd.is_empty() {
                     eprintln!("Note: Terminal resize will not work with exec fallback");
                 }
@@ -169,15 +196,33 @@ async fn ssh_to_container(state: &ContainerState, cmd: &[String], program: &str,
     }
 
     // Fallback to exec -it
-    exec_shell_fallback(program, prefix, container_id, cmd, effective_user.as_deref(), workspace_folder.as_deref()).await
+    exec_shell_fallback(
+        program,
+        prefix,
+        container_id,
+        cmd,
+        effective_user.as_deref(),
+        workspace_folder.as_deref(),
+    )
+    .await
 }
 
 /// Connect via SSH over stdio using dropbear in inetd mode
-async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str, prefix: &[String], working_dir: Option<&str>) -> Result<std::process::ExitStatus> {
-    let container_id = state.container_id.as_ref()
+async fn ssh_via_dropbear(
+    state: &ContainerState,
+    cmd: &[String],
+    program: &str,
+    prefix: &[String],
+    working_dir: Option<&str>,
+) -> Result<std::process::ExitStatus> {
+    let container_id = state
+        .container_id
+        .as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
-    let user = state.metadata.get("remote_user")
+    let user = state
+        .metadata
+        .get("remote_user")
         .map(|s| s.as_str())
         .unwrap_or("root");
 
@@ -204,7 +249,8 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str,
         program, prefix_str, quoted_id
     );
 
-    let key_path_str = key_path.to_str()
+    let key_path_str = key_path
+        .to_str()
         .ok_or_else(|| anyhow!("SSH key path contains invalid UTF-8"))?;
 
     // Get terminal environment from host to pass through
@@ -212,14 +258,23 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str,
     let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "truecolor".to_string());
 
     let mut args = vec![
-        "-o".to_string(), format!("ProxyCommand={}", proxy_cmd),
-        "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
-        "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
-        "-o".to_string(), "LogLevel=ERROR".to_string(),
+        "-o".to_string(),
+        format!("ProxyCommand={}", proxy_cmd),
+        "-o".to_string(),
+        "StrictHostKeyChecking=no".to_string(),
+        "-o".to_string(),
+        "UserKnownHostsFile=/dev/null".to_string(),
+        "-o".to_string(),
+        "LogLevel=ERROR".to_string(),
         // Pass through terminal and locale settings for proper rendering
-        "-o".to_string(), format!("SetEnv=TERM={} COLORTERM={} LANG=C.UTF-8 LC_ALL=C.UTF-8", term, colorterm),
-        "-i".to_string(), key_path_str.to_string(),
-        "-t".to_string(),  // Force PTY allocation
+        "-o".to_string(),
+        format!(
+            "SetEnv=TERM={} COLORTERM={} LANG=C.UTF-8 LC_ALL=C.UTF-8",
+            term, colorterm
+        ),
+        "-i".to_string(),
+        key_path_str.to_string(),
+        "-t".to_string(), // Force PTY allocation
         format!("{}@localhost", user),
     ];
 
@@ -230,7 +285,7 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str,
     } else if let Some(wd) = working_dir {
         // For interactive shells, cd to the workspace folder
         args.push("--".to_string());
-        args.push(format!("cd {} && exec $SHELL -l", shell_words::join(&[wd])));
+        args.push(format!("cd {} && exec $SHELL -l", shell_words::join([wd])));
     }
 
     let status = std::process::Command::new("ssh")
@@ -242,7 +297,14 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str,
 }
 
 /// Fallback to exec -it (doesn't support terminal resize)
-async fn exec_shell_fallback(program: &str, prefix: &[String], container_id: &str, cmd: &[String], user: Option<&str>, working_dir: Option<&str>) -> Result<()> {
+async fn exec_shell_fallback(
+    program: &str,
+    prefix: &[String],
+    container_id: &str,
+    cmd: &[String],
+    user: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<()> {
     // Build the shell command: interactive shell, or `bash -lc "cmd"` for commands
     let shell_args: Vec<String> = if cmd.is_empty() {
         vec!["/bin/bash".to_string()]
@@ -291,14 +353,14 @@ pub async fn resize(
     let state_store = devc_core::StateStore::load()?;
 
     let state = match container {
-        Some(ref name) => {
-            state_store.get(name)
-                .or_else(|| state_store.find_by_name(name))
-                .ok_or_else(|| anyhow!("Container '{}' not found", name))?
-        }
+        Some(ref name) => state_store
+            .get(name)
+            .or_else(|| state_store.find_by_name(name))
+            .ok_or_else(|| anyhow!("Container '{}' not found", name))?,
         None => {
             let cwd = std::env::current_dir()?;
-            state_store.find_by_workspace(&cwd)
+            state_store
+                .find_by_workspace(&cwd)
                 .ok_or_else(|| anyhow!("No container found for current directory"))?
         }
     };
@@ -307,17 +369,22 @@ pub async fn resize(
         bail!("Container '{}' is not running", state.name);
     }
 
-    let container_id = state.container_id.as_ref()
+    let container_id = state
+        .container_id
+        .as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
     // Get runtime args from the container's provider
-    let (program, prefix) = manager.runtime_args_for(state)
+    let (program, prefix) = manager
+        .runtime_args_for(state)
         .map_err(|e| anyhow!("{}", e))?;
 
     // Get terminal size - use args if provided, otherwise detect
     let (cols, rows) = match (cols, rows) {
         (Some(c), Some(r)) => (c, r),
-        _ => crossterm::terminal::size().context("Could not determine terminal size. Use --cols and --rows to specify manually.")?,
+        _ => crossterm::terminal::size().context(
+            "Could not determine terminal size. Use --cols and --rows to specify manually.",
+        )?,
     };
 
     // Build the resize command
@@ -327,7 +394,13 @@ pub async fn resize(
     );
 
     let mut args: Vec<String> = prefix;
-    args.extend(["exec".to_string(), container_id.to_string(), "bash".to_string(), "-c".to_string(), resize_cmd]);
+    args.extend([
+        "exec".to_string(),
+        container_id.to_string(),
+        "bash".to_string(),
+        "-c".to_string(),
+        resize_cmd,
+    ]);
 
     let status = std::process::Command::new(&program)
         .args(&args)
@@ -344,7 +417,11 @@ pub async fn resize(
 }
 
 /// Build a container
-pub async fn build(manager: &ContainerManager, container: Option<String>, no_cache: bool) -> Result<()> {
+pub async fn build(
+    manager: &ContainerManager,
+    container: Option<String>,
+    no_cache: bool,
+) -> Result<()> {
     let state = match container {
         Some(name) => find_container(manager, &name).await?,
         None => {

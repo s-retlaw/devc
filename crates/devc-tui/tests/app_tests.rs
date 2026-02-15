@@ -67,7 +67,10 @@ fn test_selection_wraps_around() {
     assert_eq!(app.selected, 0);
 
     // Wrap around going up (manual calculation like the app does)
-    app.selected = app.selected.checked_sub(1).unwrap_or(app.containers.len() - 1);
+    app.selected = app
+        .selected
+        .checked_sub(1)
+        .unwrap_or(app.containers.len() - 1);
     assert_eq!(app.selected, 2);
 }
 
@@ -140,10 +143,7 @@ fn test_delete_shows_confirm_dialog() {
     app.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
     app.view = View::Confirm;
 
-    assert!(matches!(
-        app.confirm_action,
-        Some(ConfirmAction::Delete(_))
-    ));
+    assert!(matches!(app.confirm_action, Some(ConfirmAction::Delete(_))));
     assert_eq!(app.view, View::Confirm);
 }
 
@@ -337,7 +337,11 @@ fn test_container_operation_labels() {
 
     for status in statuses {
         let display = format!("{}", status);
-        assert!(!display.is_empty(), "Status {:?} should have display string", status);
+        assert!(
+            !display.is_empty(),
+            "Status {:?} should have display string",
+            status
+        );
     }
 
     // Verify we can create test containers with each status
@@ -356,13 +360,15 @@ fn test_ports_view_cleanup() {
     // Set up ports view state
     app.view = View::Ports;
     app.port_state.container_id = Some("container123".to_string());
-    app.port_state.detected_ports.push(devc_tui::ports::DetectedPort {
-        port: 8080,
-        protocol: "tcp".to_string(),
-        process: Some("node".to_string()),
-        is_new: false,
-        is_forwarded: false,
-    });
+    app.port_state
+        .detected_ports
+        .push(devc_tui::ports::DetectedPort {
+            port: 8080,
+            protocol: "tcp".to_string(),
+            process: Some("node".to_string()),
+            is_new: false,
+            is_forwarded: false,
+        });
 
     // Close ports view manually
     app.port_state.container_id = None;

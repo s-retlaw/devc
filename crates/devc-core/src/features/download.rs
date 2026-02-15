@@ -28,10 +28,7 @@ fn safe_unpack<R: std::io::Read>(
         // Reject path traversal (.. components)
         for component in path.components() {
             if matches!(component, Component::ParentDir) {
-                return Err(format!(
-                    "Tar contains path traversal: {}",
-                    path.display()
-                ));
+                return Err(format!("Tar contains path traversal: {}", path.display()));
             }
         }
 
@@ -89,9 +86,7 @@ pub async fn download_feature(
             namespace,
             name,
             tag,
-        } => {
-            download_oci_feature(registry, namespace, name, tag, cache_dir, progress).await
-        }
+        } => download_oci_feature(registry, namespace, name, tag, cache_dir, progress).await,
         FeatureSource::Local { path } => {
             let resolved = if path.is_relative() {
                 config_dir.join(path)
@@ -126,7 +121,11 @@ async fn download_oci_feature(
     cache_dir: &Path,
     progress: &Option<mpsc::UnboundedSender<String>>,
 ) -> Result<PathBuf> {
-    let feature_cache = cache_dir.join(registry).join(namespace).join(name).join(tag);
+    let feature_cache = cache_dir
+        .join(registry)
+        .join(namespace)
+        .join(name)
+        .join(tag);
 
     // Check cache
     if feature_cache.join("install.sh").exists() {
@@ -145,22 +144,19 @@ async fn download_oci_feature(
     let client = reqwest::Client::new();
 
     // Step 1: Get auth token
-    let token = get_auth_token(&client, &base_url, &repo, registry).await.map_err(|e| {
-        CoreError::FeatureDownloadFailed {
+    let token = get_auth_token(&client, &base_url, &repo, registry)
+        .await
+        .map_err(|e| CoreError::FeatureDownloadFailed {
             feature: format!("{}/{}/{}:{}", registry, namespace, name, tag),
             reason: format!("Auth failed: {}", e),
-        }
-    })?;
+        })?;
 
     // Step 2: Get manifest
     let manifest_url = format!("{}/v2/{}/manifests/{}", base_url, repo, tag);
     let manifest_resp = client
         .get(&manifest_url)
         .header("Authorization", format!("Bearer {}", token))
-        .header(
-            "Accept",
-            "application/vnd.oci.image.manifest.v1+json",
-        )
+        .header("Accept", "application/vnd.oci.image.manifest.v1+json")
         .send()
         .await
         .map_err(|e| CoreError::FeatureDownloadFailed {
@@ -175,12 +171,14 @@ async fn download_oci_feature(
         });
     }
 
-    let manifest: OciManifest = manifest_resp.json().await.map_err(|e| {
-        CoreError::FeatureDownloadFailed {
-            feature: format!("{}/{}:{}", namespace, name, tag),
-            reason: format!("Failed to parse manifest: {}", e),
-        }
-    })?;
+    let manifest: OciManifest =
+        manifest_resp
+            .json()
+            .await
+            .map_err(|e| CoreError::FeatureDownloadFailed {
+                feature: format!("{}/{}:{}", namespace, name, tag),
+                reason: format!("Failed to parse manifest: {}", e),
+            })?;
 
     // Step 3: Find the feature layer
     let layer = manifest
@@ -245,12 +243,13 @@ async fn download_oci_feature(
         });
     }
 
-    let blob_bytes = blob_resp.bytes().await.map_err(|e| {
-        CoreError::FeatureDownloadFailed {
+    let blob_bytes = blob_resp
+        .bytes()
+        .await
+        .map_err(|e| CoreError::FeatureDownloadFailed {
             feature: format!("{}/{}:{}", namespace, name, tag),
             reason: format!("Failed to read blob: {}", e),
-        }
-    })?;
+        })?;
 
     // Step 5: Extract tarball to cache directory
     std::fs::create_dir_all(&feature_cache)?;
@@ -347,10 +346,13 @@ async fn download_tarball_feature(
         });
     }
 
-    let bytes = resp.bytes().await.map_err(|e| CoreError::FeatureDownloadFailed {
-        feature: url.to_string(),
-        reason: format!("Failed to read response body: {}", e),
-    })?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| CoreError::FeatureDownloadFailed {
+            feature: url.to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
     // Extract tarball (auto-detect gzip)
     std::fs::create_dir_all(&feature_cache)?;
@@ -436,7 +438,9 @@ async fn get_auth_token(
     let creds = read_docker_credentials(registry);
 
     let scope = format!("repository:{}:pull", repo);
-    let mut token_req = client.get(&realm).query(&[("service", &service), ("scope", &scope)]);
+    let mut token_req = client
+        .get(&realm)
+        .query(&[("service", &service), ("scope", &scope)]);
 
     if let Some((user, pass)) = creds {
         token_req = token_req.basic_auth(user, Some(pass));
@@ -448,10 +452,7 @@ async fn get_auth_token(
         .map_err(|e| format!("Token request failed: {}", e))?;
 
     if !token_resp.status().is_success() {
-        return Err(format!(
-            "Token endpoint returned {}",
-            token_resp.status()
-        ));
+        return Err(format!("Token endpoint returned {}", token_resp.status()));
     }
 
     let token_json: serde_json::Value = token_resp
@@ -505,17 +506,10 @@ fn read_docker_credentials(registry: &str) -> Option<(String, String)> {
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    let auth_str = config
-        .get("auths")?
-        .get(registry)?
-        .get("auth")?
-        .as_str()?;
+    let auth_str = config.get("auths")?.get(registry)?.get("auth")?.as_str()?;
 
-    let decoded = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        auth_str,
-    )
-    .ok()?;
+    let decoded =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, auth_str).ok()?;
     let decoded_str = String::from_utf8(decoded).ok()?;
     let (user, pass) = decoded_str.split_once(':')?;
     Some((user.to_string(), pass.to_string()))
@@ -555,8 +549,7 @@ mod tests {
 
     #[test]
     fn test_parse_www_authenticate() {
-        let header =
-            r#"Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:devcontainers/features/node:pull""#;
+        let header = r#"Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:devcontainers/features/node:pull""#;
         let (realm, service) = parse_www_authenticate(header).unwrap();
         assert_eq!(realm, "https://ghcr.io/token");
         assert_eq!(service, "ghcr.io");
@@ -589,10 +582,7 @@ mod tests {
         let meta = read_feature_metadata(tmp.path());
         assert_eq!(meta.id.as_deref(), Some("node"));
         assert_eq!(meta.version.as_deref(), Some("1.2.3"));
-        assert_eq!(
-            meta.install_after,
-            Some(vec!["common-utils".to_string()])
-        );
+        assert_eq!(meta.install_after, Some(vec!["common-utils".to_string()]));
     }
 
     #[test]
@@ -646,7 +636,10 @@ mod tests {
     fn test_tarball_cache_key_different_urls() {
         let key1 = tarball_cache_key("https://example.com/feature-a.tar.gz");
         let key2 = tarball_cache_key("https://example.com/feature-b.tar.gz");
-        assert_ne!(key1, key2, "Different URLs should produce different cache keys");
+        assert_ne!(
+            key1, key2,
+            "Different URLs should produce different cache keys"
+        );
     }
 
     #[test]
@@ -825,13 +818,19 @@ mod tests {
             download_tarball_feature("http://localhost:8080/f.tar.gz", cache_dir.path(), &None)
                 .await;
         let err = format!("{:?}", result.unwrap_err());
-        assert!(!err.contains("HTTPS"), "localhost should be allowed over HTTP");
+        assert!(
+            !err.contains("HTTPS"),
+            "localhost should be allowed over HTTP"
+        );
 
         let result =
             download_tarball_feature("http://127.0.0.1:8080/f.tar.gz", cache_dir.path(), &None)
                 .await;
         let err = format!("{:?}", result.unwrap_err());
-        assert!(!err.contains("HTTPS"), "127.0.0.1 should be allowed over HTTP");
+        assert!(
+            !err.contains("HTTPS"),
+            "127.0.0.1 should be allowed over HTTP"
+        );
     }
 
     #[tokio::test]
@@ -861,11 +860,7 @@ mod tests {
             header.set_mode(0o644);
             header.set_cksum();
             archive
-                .append_data(
-                    &mut header,
-                    "devcontainer-feature.json",
-                    &metadata[..],
-                )
+                .append_data(&mut header, "devcontainer-feature.json", &metadata[..])
                 .unwrap();
 
             archive.into_inner().unwrap().finish().unwrap()

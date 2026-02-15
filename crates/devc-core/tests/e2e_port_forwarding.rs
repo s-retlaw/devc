@@ -116,13 +116,8 @@ async fn test_e2e_auto_forward_config_full_spec() {
 
     // 8080: object in forwardPorts with label/protocol/action
     assert!(
-        fwd.iter().any(|p| *p
-            == pfc(
-                8080,
-                AutoForwardAction::Silent,
-                Some("API"),
-                Some("https")
-            )),
+        fwd.iter()
+            .any(|p| *p == pfc(8080, AutoForwardAction::Silent, Some("API"), Some("https"))),
         "port 8080 should have label=API, protocol=https, action=Silent: {:?}",
         fwd.iter().find(|p| p.port == 8080)
     );
@@ -205,7 +200,9 @@ services:
     assert!(container.is_compose(), "should be compose project");
     assert_eq!(container.compose_service(), Some("app"));
 
-    let compose_files = container.compose_files().expect("should have compose files");
+    let compose_files = container
+        .compose_files()
+        .expect("should have compose files");
     let compose_file_strs: Vec<&str> = compose_files.iter().map(|p| p.to_str().unwrap()).collect();
     let project_name = container.compose_project_name();
     let project_dir = container.config_path.parent().unwrap();
@@ -307,7 +304,9 @@ services:
 
     let container =
         Container::from_workspace(workspace.path()).expect("should load container config");
-    let compose_files = container.compose_files().expect("should have compose files");
+    let compose_files = container
+        .compose_files()
+        .expect("should have compose files");
     let compose_file_strs: Vec<&str> = compose_files.iter().map(|p| p.to_str().unwrap()).collect();
     let project_name = container.compose_project_name();
     let project_dir = container.config_path.parent().unwrap();
@@ -351,7 +350,8 @@ services:
         .await
         .expect("nc probe should work");
     assert_eq!(
-        result.exit_code, 0,
+        result.exit_code,
+        0,
         "nc probe should succeed (port 3000 is listening), output: {}",
         result.output.trim()
     );

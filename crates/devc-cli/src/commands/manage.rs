@@ -87,9 +87,12 @@ pub async fn list(manager: &ContainerManager, discover: bool, sync: bool) -> Res
         println!(
             "{} {}{} {}{} {}{} {}",
             status_symbol,
-            container.name, " ".repeat(name_padding),
-            status_str, " ".repeat(status_padding),
-            provider_str, " ".repeat(provider_padding),
+            container.name,
+            " ".repeat(name_padding),
+            status_str,
+            " ".repeat(status_padding),
+            provider_str,
+            " ".repeat(provider_padding),
             workspace
         );
     }
@@ -147,9 +150,12 @@ async fn list_discovered(manager: &ContainerManager) -> Result<()> {
         println!(
             "{} {}{} {}{} {}{} {}",
             status_symbol,
-            container.name, " ".repeat(name_padding),
-            status_str, " ".repeat(status_padding),
-            source_str, " ".repeat(source_padding),
+            container.name,
+            " ".repeat(name_padding),
+            status_str,
+            " ".repeat(status_padding),
+            source_str,
+            " ".repeat(source_padding),
             workspace
         );
     }
@@ -186,7 +192,10 @@ pub async fn init(manager: &ContainerManager) -> Result<()> {
     println!("\nNext steps:");
     println!("  devc build {}    # Build the container image", state.name);
     println!("  devc up {}       # Build, create, and start", state.name);
-    println!("  devc shell {}      # Connect to the container", state.name);
+    println!(
+        "  devc shell {}      # Connect to the container",
+        state.name
+    );
 
     Ok(())
 }
@@ -237,8 +246,7 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
     println!("======================\n");
 
     // Docker config
-    let home = directories::BaseDirs::new()
-        .map(|b| b.home_dir().to_path_buf());
+    let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
     if let Some(ref home) = home {
         let config_path = host::docker_config_path(home);
         if config_path.exists() {
@@ -260,7 +268,11 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
         println!(
             "Configured credsStore: {} ({})",
             store,
-            if found { "found in PATH" } else { "NOT found in PATH" }
+            if found {
+                "found in PATH"
+            } else {
+                "NOT found in PATH"
+            }
         );
     } else {
         println!("Configured credsStore: (none)");
@@ -279,17 +291,22 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
     }
 
     // Resolve Docker credentials
-    let effective_store = explicit_store
-        .map(|s| s.to_string())
-        .or(default_store);
+    let effective_store = explicit_store.map(|s| s.to_string()).or(default_store);
 
     println!();
     if let Some(ref store) = effective_store {
         let registries = host::list_credential_helper_registries(store).await;
         if registries.is_empty() {
-            println!("Docker registries: (none found via docker-credential-{})", store);
+            println!(
+                "Docker registries: (none found via docker-credential-{})",
+                store
+            );
         } else {
-            println!("Docker registries ({} via docker-credential-{}):", registries.len(), store);
+            println!(
+                "Docker registries ({} via docker-credential-{}):",
+                registries.len(),
+                store
+            );
             for reg in &registries {
                 println!("  - {}", reg);
             }
@@ -298,8 +315,10 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
 
     // Inline auths
     if !config.auths.is_empty() {
-        let with_auth: Vec<_> = config.auths.iter()
-            .filter(|(_, entry)| entry.auth.as_ref().map_or(false, |a| !a.is_empty()))
+        let with_auth: Vec<_> = config
+            .auths
+            .iter()
+            .filter(|(_, entry)| entry.auth.as_ref().is_some_and(|a| !a.is_empty()))
             .collect();
         if !with_auth.is_empty() {
             println!("Inline auths ({}):", with_auth.len());
@@ -317,7 +336,8 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
             let found = host::which_exists(&binary);
             println!(
                 "  - {} -> {} ({})",
-                reg, helper,
+                reg,
+                helper,
                 if found { "found" } else { "NOT found" }
             );
         }
@@ -360,17 +380,30 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
             return Ok(());
         }
 
-        let container_id = state.container_id.as_ref()
+        let container_id = state
+            .container_id
+            .as_ref()
             .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
-        let provider = manager.provider_for_type(state.provider)
+        let provider = manager
+            .provider_for_type(state.provider)
             .ok_or_else(|| anyhow!("{} provider not available", state.provider))?;
         let cid = devc_provider::ContainerId::new(container_id);
 
-        let user = state.metadata.get("remote_user").map(|s| s.as_str()).unwrap_or("root");
+        let user = state
+            .metadata
+            .get("remote_user")
+            .map(|s| s.as_str())
+            .unwrap_or("root");
 
         // Check tmpfs mount
-        let output = exec_check(provider, &cid, "test -d /run/devc-creds && echo yes || echo no", None).await;
+        let output = exec_check(
+            provider,
+            &cid,
+            "test -d /run/devc-creds && echo yes || echo no",
+            None,
+        )
+        .await;
         if output.as_deref().map(str::trim) == Some("yes") {
             println!("  tmpfs mount: /run/devc-creds (present)");
         } else {
@@ -379,13 +412,16 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
 
         // Check cached config.json
         let output = exec_check(
-            provider, &cid,
+            provider,
+            &cid,
             "if [ -f /run/devc-creds/config.json ]; then cat /run/devc-creds/config.json; fi",
             None,
-        ).await;
+        )
+        .await;
         if let Some(ref json) = output {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) {
-                let count = parsed.get("auths")
+                let count = parsed
+                    .get("auths")
                     .and_then(|a| a.as_object())
                     .map(|m| m.len())
                     .unwrap_or(0);
@@ -406,7 +442,8 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
         ).await;
         if let Some(ref json) = output {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json) {
-                let store = parsed.get("credsStore")
+                let store = parsed
+                    .get("credsStore")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(not set)");
                 println!("  credsStore: {}", store);
@@ -418,14 +455,26 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
         }
 
         // Check helper scripts
-        let output = exec_check(provider, &cid, "test -x /usr/local/bin/docker-credential-devc && echo yes || echo no", None).await;
+        let output = exec_check(
+            provider,
+            &cid,
+            "test -x /usr/local/bin/docker-credential-devc && echo yes || echo no",
+            None,
+        )
+        .await;
         if output.as_deref().map(str::trim) == Some("yes") {
             println!("  docker-credential-devc: installed");
         } else {
             println!("  docker-credential-devc: NOT installed");
         }
 
-        let output = exec_check(provider, &cid, "test -x /usr/local/bin/git-credential-devc && echo yes || echo no", None).await;
+        let output = exec_check(
+            provider,
+            &cid,
+            "test -x /usr/local/bin/git-credential-devc && echo yes || echo no",
+            None,
+        )
+        .await;
         if output.as_deref().map(str::trim) == Some("yes") {
             println!("  git-credential-devc: installed");
         } else {
@@ -438,7 +487,11 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
             "if [ -f /run/devc-creds/git-credentials ]; then wc -l < /run/devc-creds/git-credentials; else echo 0; fi",
             None,
         ).await;
-        let count: usize = output.as_deref().map(str::trim).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let count: usize = output
+            .as_deref()
+            .map(str::trim)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         if count > 0 {
             println!("  cached git credentials: {} hosts", count);
         } else {
@@ -518,7 +571,10 @@ pub async fn adopt(manager: &ContainerManager, container: Option<String>) -> Res
 
             let idx: usize = input.parse().context("Invalid selection")?;
             if idx == 0 || idx > unmanaged.len() {
-                bail!("Invalid selection. Enter a number between 1 and {}", unmanaged.len());
+                bail!(
+                    "Invalid selection. Enter a number between 1 and {}",
+                    unmanaged.len()
+                );
             }
 
             unmanaged[idx - 1]
@@ -528,11 +584,21 @@ pub async fn adopt(manager: &ContainerManager, container: Option<String>) -> Res
     println!("Adopting '{}'...", to_adopt.name);
 
     // Adopt the container
-    let state = manager.adopt(&to_adopt.id.0, to_adopt.workspace_path.as_deref(), to_adopt.source.clone(), to_adopt.provider).await?;
+    let state = manager
+        .adopt(
+            &to_adopt.id.0,
+            to_adopt.workspace_path.as_deref(),
+            to_adopt.source.clone(),
+            to_adopt.provider,
+        )
+        .await?;
 
     println!("Adopted container: {}", state.name);
     println!("\nYou can now use devc commands with this container:");
-    println!("  devc shell {}       # Connect to the container", state.name);
+    println!(
+        "  devc shell {}       # Connect to the container",
+        state.name
+    );
     println!("  devc stop {}      # Stop the container", state.name);
     println!("  devc rm {}        # Remove the container", state.name);
 

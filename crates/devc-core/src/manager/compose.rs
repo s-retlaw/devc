@@ -1,8 +1,8 @@
 //! Docker Compose orchestration for ContainerManager
 
 use crate::{
-    features, run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container,
-    CoreError, DevcContainerStatus, Result, SshManager,
+    features, run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, CoreError,
+    DevcContainerStatus, Result, SshManager,
 };
 use devc_provider::ContainerProvider;
 use std::path::Path;
@@ -34,9 +34,9 @@ impl ContainerManager {
             }
         }
 
-        let compose_files = container.compose_files().ok_or_else(|| {
-            CoreError::InvalidState("No dockerComposeFile specified".to_string())
-        })?;
+        let compose_files = container
+            .compose_files()
+            .ok_or_else(|| CoreError::InvalidState("No dockerComposeFile specified".to_string()))?;
         let service_name = container.compose_service().ok_or_else(|| {
             CoreError::InvalidState("No service specified for compose project".to_string())
         })?;
@@ -50,7 +50,7 @@ impl ContainerManager {
             .parent()
             .unwrap_or(Path::new("."))
             .to_path_buf();
-        let progress_opt: Option<mpsc::UnboundedSender<String>> = progress.map(|p| p.clone());
+        let progress_opt: Option<mpsc::UnboundedSender<String>> = progress.cloned();
         let resolved_features = if let Some(ref feature_map) = container.devcontainer.features {
             features::resolve_and_prepare_features(feature_map, &config_dir, &progress_opt).await?
         } else {
@@ -60,10 +60,8 @@ impl ContainerManager {
 
         // Generate compose override file if features declare container properties
         let override_file = if feature_props.has_container_properties() {
-            let yaml = features::compose_override::generate_compose_override(
-                service_name,
-                &feature_props,
-            );
+            let yaml =
+                features::compose_override::generate_compose_override(service_name, &feature_props);
             if let Some(yaml) = yaml {
                 let path = container.workspace_path.join(".devc-compose-override.yml");
                 std::fs::write(&path, &yaml)?;
@@ -183,7 +181,12 @@ impl ContainerManager {
         if let Some(ref cmd) = container.devcontainer.on_create_command {
             send_progress(progress, "Running onCreate command...");
             run_lifecycle_command_with_env(
-                provider, &container_id, cmd, user, workspace_folder, remote_env,
+                provider,
+                &container_id,
+                cmd,
+                user,
+                workspace_folder,
+                remote_env,
             )
             .await?;
         }
@@ -204,7 +207,12 @@ impl ContainerManager {
         if let Some(ref cmd) = container.devcontainer.update_content_command {
             send_progress(progress, "Running updateContentCommand...");
             run_lifecycle_command_with_env(
-                provider, &container_id, cmd, user, workspace_folder, remote_env,
+                provider,
+                &container_id,
+                cmd,
+                user,
+                workspace_folder,
+                remote_env,
             )
             .await?;
         }
@@ -225,7 +233,12 @@ impl ContainerManager {
         if let Some(ref cmd) = container.devcontainer.post_create_command {
             send_progress(progress, "Running postCreateCommand...");
             run_lifecycle_command_with_env(
-                provider, &container_id, cmd, user, workspace_folder, remote_env,
+                provider,
+                &container_id,
+                cmd,
+                user,
+                workspace_folder,
+                remote_env,
             )
             .await?;
         }
@@ -248,8 +261,7 @@ impl ContainerManager {
                             cs.metadata
                                 .insert("ssh_available".to_string(), "true".to_string());
                             if let Some(u) = user {
-                                cs.metadata
-                                    .insert("remote_user".to_string(), u.to_string());
+                                cs.metadata.insert("remote_user".to_string(), u.to_string());
                             }
                         }
                     }
@@ -285,7 +297,12 @@ impl ContainerManager {
         if let Some(ref cmd) = container.devcontainer.post_start_command {
             send_progress(progress, "Running postStartCommand...");
             run_lifecycle_command_with_env(
-                provider, &container_id, cmd, user, workspace_folder, remote_env,
+                provider,
+                &container_id,
+                cmd,
+                user,
+                workspace_folder,
+                remote_env,
             )
             .await?;
         }

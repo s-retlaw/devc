@@ -37,10 +37,16 @@ pub(super) fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     lines.push(Line::from(vec![
-        Span::styled(format!("{:<16}", socket_label), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:<16}", socket_label),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(socket_value, socket_style),
         if !detail_state.editing {
-            Span::styled("  [e] to edit", Style::default().fg(Color::DarkGray).italic())
+            Span::styled(
+                "  [e] to edit",
+                Style::default().fg(Color::DarkGray).italic(),
+            )
         } else {
             Span::raw("")
         },
@@ -54,7 +60,10 @@ pub(super) fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("● Connected", Style::default().fg(Color::Green).bold()),
         ]),
         Some(false) => {
-            let error_msg = detail_state.connection_error.as_deref().unwrap_or("Unknown error");
+            let error_msg = detail_state
+                .connection_error
+                .as_deref()
+                .unwrap_or("Unknown error");
             Line::from(vec![
                 Span::styled("Connection:     ", Style::default().fg(Color::DarkGray)),
                 Span::styled("✗ Failed: ", Style::default().fg(Color::Red).bold()),
@@ -67,13 +76,19 @@ pub(super) fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(vec![
                     Span::styled("Connection:     ", Style::default().fg(Color::DarkGray)),
                     Span::styled("● Connected", Style::default().fg(Color::Green)),
-                    Span::styled("  [t] to test", Style::default().fg(Color::DarkGray).italic()),
+                    Span::styled(
+                        "  [t] to test",
+                        Style::default().fg(Color::DarkGray).italic(),
+                    ),
                 ])
             } else {
                 Line::from(vec![
                     Span::styled("Connection:     ", Style::default().fg(Color::DarkGray)),
                     Span::styled("○ Not tested", Style::default().fg(Color::Yellow)),
-                    Span::styled("  [t] to test", Style::default().fg(Color::DarkGray).italic()),
+                    Span::styled(
+                        "  [t] to test",
+                        Style::default().fg(Color::DarkGray).italic(),
+                    ),
                 ])
             }
         }
@@ -92,7 +107,10 @@ pub(super) fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
         devc_provider::ProviderType::Docker => {
             lines.push(Line::from(vec![
                 Span::styled("  • Start Docker: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("sudo systemctl start docker", Style::default().fg(Color::White)),
+                Span::styled(
+                    "sudo systemctl start docker",
+                    Style::default().fg(Color::White),
+                ),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("  • Default socket: ", Style::default().fg(Color::DarkGray)),
@@ -102,11 +120,17 @@ pub(super) fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
         devc_provider::ProviderType::Podman => {
             lines.push(Line::from(vec![
                 Span::styled("  • Start Podman: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("systemctl --user start podman.socket", Style::default().fg(Color::White)),
+                Span::styled(
+                    "systemctl --user start podman.socket",
+                    Style::default().fg(Color::White),
+                ),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("  • Default socket: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("$XDG_RUNTIME_DIR/podman/podman.sock", Style::default().fg(Color::White)),
+                Span::styled(
+                    "$XDG_RUNTIME_DIR/podman/podman.sock",
+                    Style::default().fg(Color::White),
+                ),
             ]));
         }
     }
@@ -163,7 +187,10 @@ pub(super) fn build_detail_text(
         ]),
         Line::from(vec![
             Span::raw("Source:      "),
-            Span::styled(format!("{:?}", container.source), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:?}", container.source),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(vec![
             Span::raw("ID:          "),
@@ -181,11 +208,23 @@ pub(super) fn build_detail_text(
         Line::from(""),
         Line::from(vec![
             Span::raw("Image ID:    "),
-            Span::raw(container.image_id.as_deref().unwrap_or("Not built").to_string()),
+            Span::raw(
+                container
+                    .image_id
+                    .as_deref()
+                    .unwrap_or("Not built")
+                    .to_string(),
+            ),
         ]),
         Line::from(vec![
             Span::raw("Container:   "),
-            Span::raw(container.container_id.as_deref().unwrap_or("Not created").to_string()),
+            Span::raw(
+                container
+                    .container_id
+                    .as_deref()
+                    .unwrap_or("Not created")
+                    .to_string(),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -211,9 +250,15 @@ pub(super) fn build_detail_text(
         // Ports
         if !details.ports.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("─── Ports ───", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(
+                "─── Ports ───",
+                Style::default().fg(Color::DarkGray),
+            )));
             for p in &details.ports {
-                let host = p.host_port.map(|hp| hp.to_string()).unwrap_or_else(|| "-".to_string());
+                let host = p
+                    .host_port
+                    .map(|hp| hp.to_string())
+                    .unwrap_or_else(|| "-".to_string());
                 lines.push(Line::from(format!(
                     "  {}:{} → {}",
                     host, p.container_port, p.protocol,
@@ -224,7 +269,10 @@ pub(super) fn build_detail_text(
         // Mounts (all types)
         if !details.mounts.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("─── Mounts ───", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(
+                "─── Mounts ───",
+                Style::default().fg(Color::DarkGray),
+            )));
             for m in &details.mounts {
                 let ro = if m.read_only { " (ro)" } else { "" };
                 lines.push(Line::from(format!(
@@ -240,7 +288,10 @@ pub(super) fn build_detail_text(
             || !details.network_settings.networks.is_empty();
         if has_network {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("─── Network ───", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(
+                "─── Network ───",
+                Style::default().fg(Color::DarkGray),
+            )));
             if let Some(ip) = &details.network_settings.ip_address {
                 lines.push(Line::from(vec![
                     Span::raw("IP:          "),
@@ -262,7 +313,10 @@ pub(super) fn build_detail_text(
                     parts.push(Span::raw(format!(" {}", ip)));
                 }
                 if let Some(gw) = &net_info.gateway {
-                    parts.push(Span::styled(format!(" (gw {})", gw), Style::default().fg(Color::DarkGray)));
+                    parts.push(Span::styled(
+                        format!(" (gw {})", gw),
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
                 lines.push(Line::from(parts));
             }
@@ -271,7 +325,10 @@ pub(super) fn build_detail_text(
         // Labels
         if !details.labels.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("─── Labels ───", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(
+                "─── Labels ───",
+                Style::default().fg(Color::DarkGray),
+            )));
 
             let well_known = [
                 "devcontainer.local_folder",
@@ -291,8 +348,12 @@ pub(super) fn build_detail_text(
                 }
             }
 
-            let mut remaining: Vec<_> = details.labels.iter()
-                .filter(|(k, _)| !well_known.contains(&k.as_str()) && k.as_str() != "devcontainer.metadata")
+            let mut remaining: Vec<_> = details
+                .labels
+                .iter()
+                .filter(|(k, _)| {
+                    !well_known.contains(&k.as_str()) && k.as_str() != "devcontainer.metadata"
+                })
                 .collect();
             remaining.sort_by_key(|(k, _)| (*k).clone());
             for (key, val) in remaining {
@@ -303,12 +364,27 @@ pub(super) fn build_detail_text(
         // Environment
         if !details.env.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("─── Environment ───", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(
+                "─── Environment ───",
+                Style::default().fg(Color::DarkGray),
+            )));
 
             let skip_prefixes = [
-                "PATH=", "HOME=", "HOSTNAME=", "TERM=", "LANG=", "SHELL=",
-                "USER=", "SHLVL=", "PWD=", "OLDPWD=", "LC_", "LESSOPEN=",
-                "LESSCLOSE=", "LS_COLORS=", "_=",
+                "PATH=",
+                "HOME=",
+                "HOSTNAME=",
+                "TERM=",
+                "LANG=",
+                "SHELL=",
+                "USER=",
+                "SHLVL=",
+                "PWD=",
+                "OLDPWD=",
+                "LC_",
+                "LESSOPEN=",
+                "LESSCLOSE=",
+                "LS_COLORS=",
+                "_=",
             ];
             let mut env_sorted = details.env.clone();
             env_sorted.sort();
@@ -345,8 +421,8 @@ pub(super) fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(12),  // Info paragraph
-                Constraint::Min(6),   // Services table
+                Constraint::Min(12), // Info paragraph
+                Constraint::Min(6),  // Services table
             ])
             .split(inner_area);
 
@@ -392,7 +468,10 @@ pub(super) fn build_discover_detail_text(
     };
 
     let mut lines = vec![
-        Line::from(Span::styled("─── Identity ───", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            "─── Identity ───",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(vec![
             Span::raw("Name:        "),
             Span::styled(details.name.clone(), Style::default().bold()),
@@ -421,7 +500,10 @@ pub(super) fn build_discover_detail_text(
         ]),
         Line::from(vec![
             Span::raw("Source:      "),
-            Span::styled(format!("{:?}", discovered.source), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("{:?}", discovered.source),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
     ];
     if let Some(ws) = &discovered.workspace_path {
@@ -432,10 +514,16 @@ pub(super) fn build_discover_detail_text(
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("─── Status ───", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled(
+        "─── Status ───",
+        Style::default().fg(Color::DarkGray),
+    )));
     lines.push(Line::from(vec![
         Span::raw("Status:      "),
-        Span::styled(format!("{:?}", details.status), Style::default().fg(status_color).bold()),
+        Span::styled(
+            format!("{:?}", details.status),
+            Style::default().fg(status_color).bold(),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::raw("Created:     "),
@@ -465,14 +553,18 @@ pub(super) fn build_discover_detail_text(
     // Ports
     if !details.ports.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("─── Ports ───", Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(
+            "─── Ports ───",
+            Style::default().fg(Color::DarkGray),
+        )));
         for p in &details.ports {
-            let host = p.host_port.map(|hp| hp.to_string()).unwrap_or_else(|| "-".to_string());
+            let host = p
+                .host_port
+                .map(|hp| hp.to_string())
+                .unwrap_or_else(|| "-".to_string());
             lines.push(Line::from(format!(
                 "  {}:{} → {}",
-                host,
-                p.container_port,
-                p.protocol,
+                host, p.container_port, p.protocol,
             )));
         }
     }
@@ -480,7 +572,10 @@ pub(super) fn build_discover_detail_text(
     // Mounts (all types)
     if !details.mounts.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("─── Mounts ───", Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(
+            "─── Mounts ───",
+            Style::default().fg(Color::DarkGray),
+        )));
         for m in &details.mounts {
             let ro = if m.read_only { " (ro)" } else { "" };
             lines.push(Line::from(format!(
@@ -496,7 +591,10 @@ pub(super) fn build_discover_detail_text(
         || !details.network_settings.networks.is_empty();
     if has_network {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("─── Network ───", Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(
+            "─── Network ───",
+            Style::default().fg(Color::DarkGray),
+        )));
         if let Some(ip) = &details.network_settings.ip_address {
             lines.push(Line::from(vec![
                 Span::raw("IP:          "),
@@ -518,7 +616,10 @@ pub(super) fn build_discover_detail_text(
                 parts.push(Span::raw(format!(" {}", ip)));
             }
             if let Some(gw) = &net_info.gateway {
-                parts.push(Span::styled(format!(" (gw {})", gw), Style::default().fg(Color::DarkGray)));
+                parts.push(Span::styled(
+                    format!(" (gw {})", gw),
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
             lines.push(Line::from(parts));
         }
@@ -527,7 +628,10 @@ pub(super) fn build_discover_detail_text(
     // Labels
     if !details.labels.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("─── Labels ───", Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(
+            "─── Labels ───",
+            Style::default().fg(Color::DarkGray),
+        )));
 
         let well_known = [
             "devcontainer.local_folder",
@@ -547,8 +651,12 @@ pub(super) fn build_discover_detail_text(
             }
         }
 
-        let mut remaining: Vec<_> = details.labels.iter()
-            .filter(|(k, _)| !well_known.contains(&k.as_str()) && k.as_str() != "devcontainer.metadata")
+        let mut remaining: Vec<_> = details
+            .labels
+            .iter()
+            .filter(|(k, _)| {
+                !well_known.contains(&k.as_str()) && k.as_str() != "devcontainer.metadata"
+            })
             .collect();
         remaining.sort_by_key(|(k, _)| (*k).clone());
         for (key, val) in remaining {
@@ -559,12 +667,27 @@ pub(super) fn build_discover_detail_text(
     // Environment
     if !details.env.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("─── Environment ───", Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(
+            "─── Environment ───",
+            Style::default().fg(Color::DarkGray),
+        )));
 
         let skip_prefixes = [
-            "PATH=", "HOME=", "HOSTNAME=", "TERM=", "LANG=", "SHELL=",
-            "USER=", "SHLVL=", "PWD=", "OLDPWD=", "LC_", "LESSOPEN=",
-            "LESSCLOSE=", "LS_COLORS=", "_=",
+            "PATH=",
+            "HOME=",
+            "HOSTNAME=",
+            "TERM=",
+            "LANG=",
+            "SHELL=",
+            "USER=",
+            "SHLVL=",
+            "PWD=",
+            "OLDPWD=",
+            "LC_",
+            "LESSOPEN=",
+            "LESSCLOSE=",
+            "LS_COLORS=",
+            "_=",
         ];
         let mut env_sorted = details.env.clone();
         env_sorted.sort();
@@ -587,10 +710,12 @@ pub(super) fn draw_discover_detail(frame: &mut Frame, app: &App, area: Rect) {
         _ => vec![Line::from("Loading...")],
     };
     let detail = Paragraph::new(lines)
-        .block(Block::default()
-            .title(format!(" {} ", name))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)))
+        .block(
+            Block::default()
+                .title(format!(" {} ", name))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
         .wrap(Wrap { trim: true })
         .scroll((app.discover_detail_scroll as u16, 0));
     frame.render_widget(detail, area);
@@ -641,7 +766,11 @@ pub(super) fn draw_compose_services(
         Cell::from("Service"),
         Cell::from("Status"),
     ])
-    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
     .bottom_margin(0);
 
     let rows: Vec<Row> = services
@@ -674,9 +803,9 @@ pub(super) fn draw_compose_services(
         .collect();
 
     let widths = [
-        Constraint::Length(3),   // Status icon
-        Constraint::Length(18),  // Service name
-        Constraint::Min(10),     // Status
+        Constraint::Length(3),  // Status icon
+        Constraint::Length(18), // Service name
+        Constraint::Min(10),    // Status
     ];
 
     let table = Table::new(rows, widths)

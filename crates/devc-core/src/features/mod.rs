@@ -38,7 +38,7 @@ pub async fn resolve_and_prepare_features(
     // Determine cache directory
     let cache_dir = directories::BaseDirs::new()
         .map(|d| d.cache_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir())
+        .unwrap_or_else(std::env::temp_dir)
         .join("devc/features");
     std::fs::create_dir_all(&cache_dir)?;
 
@@ -78,8 +78,7 @@ pub async fn resolve_and_prepare_features(
             let progress = progress.clone();
             download_futures.push(async move {
                 let dir =
-                    download::download_feature(&source, &config_dir, &cache_dir, &progress)
-                        .await?;
+                    download::download_feature(&source, &config_dir, &cache_dir, &progress).await?;
                 Ok::<(String, std::path::PathBuf), CoreError>((id, dir))
             });
         }
@@ -191,16 +190,9 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut features = HashMap::new();
-        features.insert(
-            "./my-feature".to_string(),
-            FeatureConfig::Bool(true),
-        );
+        features.insert("./my-feature".to_string(), FeatureConfig::Bool(true));
 
-        let result = rt.block_on(resolve_and_prepare_features(
-            &features,
-            tmp.path(),
-            &None,
-        ));
+        let result = rt.block_on(resolve_and_prepare_features(&features, tmp.path(), &None));
         assert!(result.is_ok());
         let resolved = result.unwrap();
         assert_eq!(resolved.len(), 1);
@@ -208,11 +200,7 @@ mod tests {
     }
 
     /// Helper to create a local feature directory with metadata JSON
-    fn create_local_feature(
-        base: &Path,
-        name: &str,
-        metadata_json: &str,
-    ) {
+    fn create_local_feature(base: &Path, name: &str, metadata_json: &str) {
         let dir = base.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("install.sh"), "#!/bin/bash\necho ok").unwrap();
@@ -233,29 +221,29 @@ mod tests {
                 "dependsOn": {"./feature-e": {}}
             }"#,
         );
-        create_local_feature(
-            tmp.path(),
-            "feature-e",
-            r#"{"id": "feature-e"}"#,
-        );
+        create_local_feature(tmp.path(), "feature-e", r#"{"id": "feature-e"}"#);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut features = HashMap::new();
         features.insert("./feature-a".to_string(), FeatureConfig::Bool(true));
 
-        let result = rt.block_on(resolve_and_prepare_features(
-            &features,
-            tmp.path(),
-            &None,
-        ));
+        let result = rt.block_on(resolve_and_prepare_features(&features, tmp.path(), &None));
         assert!(result.is_ok());
         let resolved = result.unwrap();
-        assert_eq!(resolved.len(), 2, "Both feature-a and feature-e should be resolved");
+        assert_eq!(
+            resolved.len(),
+            2,
+            "Both feature-a and feature-e should be resolved"
+        );
 
         let ids: Vec<&str> = resolved.iter().map(|f| f.id.as_str()).collect();
         let pos_a = ids.iter().position(|&x| x == "./feature-a").unwrap();
         let pos_e = ids.iter().position(|&x| x == "./feature-e").unwrap();
-        assert!(pos_e < pos_a, "feature-e must come before feature-a, got {:?}", ids);
+        assert!(
+            pos_e < pos_a,
+            "feature-e must come before feature-a, got {:?}",
+            ids
+        );
     }
 
     #[test]
@@ -280,21 +268,13 @@ mod tests {
                 "dependsOn": {"./feature-c": {}}
             }"#,
         );
-        create_local_feature(
-            tmp.path(),
-            "feature-c",
-            r#"{"id": "feature-c"}"#,
-        );
+        create_local_feature(tmp.path(), "feature-c", r#"{"id": "feature-c"}"#);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut features = HashMap::new();
         features.insert("./feature-a".to_string(), FeatureConfig::Bool(true));
 
-        let result = rt.block_on(resolve_and_prepare_features(
-            &features,
-            tmp.path(),
-            &None,
-        ));
+        let result = rt.block_on(resolve_and_prepare_features(&features, tmp.path(), &None));
         assert!(result.is_ok());
         let resolved = result.unwrap();
         assert_eq!(resolved.len(), 3);
@@ -320,11 +300,7 @@ mod tests {
                 "dependsOn": {"./feature-b": {"magicNumber": "50"}}
             }"#,
         );
-        create_local_feature(
-            tmp.path(),
-            "feature-b",
-            r#"{"id": "feature-b"}"#,
-        );
+        create_local_feature(tmp.path(), "feature-b", r#"{"id": "feature-b"}"#);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut features = HashMap::new();
@@ -336,11 +312,7 @@ mod tests {
         );
         features.insert("./feature-b".to_string(), FeatureConfig::Options(b_opts));
 
-        let result = rt.block_on(resolve_and_prepare_features(
-            &features,
-            tmp.path(),
-            &None,
-        ));
+        let result = rt.block_on(resolve_and_prepare_features(&features, tmp.path(), &None));
         assert!(result.is_ok());
         let resolved = result.unwrap();
 

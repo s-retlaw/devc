@@ -15,26 +15,69 @@ use tokio::sync::mpsc;
 /// Records which methods were called on the mock
 #[derive(Debug, Clone, PartialEq)]
 pub enum MockCall {
-    Build { tag: String },
-    BuildWithProgress { tag: String },
-    Pull { image: String },
-    Create { image: String, name: Option<String> },
-    Start { id: String },
-    Stop { id: String },
-    Remove { id: String, force: bool },
-    RemoveByName { name: String },
-    Exec { id: String, cmd: Vec<String>, working_dir: Option<String>, user: Option<String> },
-    ExecInteractive { id: String },
-    Inspect { id: String },
-    List { all: bool },
-    Logs { id: String },
+    Build {
+        tag: String,
+    },
+    BuildWithProgress {
+        tag: String,
+    },
+    Pull {
+        image: String,
+    },
+    Create {
+        image: String,
+        name: Option<String>,
+    },
+    Start {
+        id: String,
+    },
+    Stop {
+        id: String,
+    },
+    Remove {
+        id: String,
+        force: bool,
+    },
+    RemoveByName {
+        name: String,
+    },
+    Exec {
+        id: String,
+        cmd: Vec<String>,
+        working_dir: Option<String>,
+        user: Option<String>,
+    },
+    ExecInteractive {
+        id: String,
+    },
+    Inspect {
+        id: String,
+    },
+    List {
+        all: bool,
+    },
+    Logs {
+        id: String,
+    },
     Ping,
-    ComposeUp { project: String },
-    ComposeDown { project: String },
-    ComposePs { project: String },
+    ComposeUp {
+        project: String,
+    },
+    ComposeDown {
+        project: String,
+    },
+    ComposePs {
+        project: String,
+    },
     Discover,
-    CopyInto { id: String, dest: String },
-    CopyFrom { id: String, src: String },
+    CopyInto {
+        id: String,
+        dest: String,
+    },
+    CopyFrom {
+        id: String,
+        src: String,
+    },
 }
 
 /// Configurable mock container provider for testing
@@ -134,7 +177,12 @@ impl MockProvider {
 
     /// Count calls matching a predicate
     pub fn call_count<F: Fn(&MockCall) -> bool>(&self, filter: F) -> usize {
-        self.calls.lock().unwrap().iter().filter(|c| filter(c)).count()
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| filter(c))
+            .count()
     }
 
     /// Get all exec command vecs (convenience)
@@ -369,11 +417,7 @@ impl ContainerProvider for MockProvider {
         })
     }
 
-    async fn exec_interactive(
-        &self,
-        id: &ContainerId,
-        _config: &ExecConfig,
-    ) -> Result<ExecStream> {
+    async fn exec_interactive(&self, id: &ContainerId, _config: &ExecConfig) -> Result<ExecStream> {
         self.record(MockCall::ExecInteractive { id: id.0.clone() });
         Ok(ExecStream {
             stdin: Some(Box::pin(EmptyWriter)),
@@ -485,5 +529,4 @@ impl ContainerProvider for MockProvider {
         });
         clone_result(&self.compose_ps_result)
     }
-
 }

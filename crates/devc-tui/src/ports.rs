@@ -71,7 +71,10 @@ pub async fn detect_ports(
         privileged: false,
     };
 
-    let result = provider.exec(container_id, &config).await.map_err(|e| e.to_string())?;
+    let result = provider
+        .exec(container_id, &config)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if result.exit_code != 0 {
         return Err(format!("exec failed with code {}", result.exit_code));
@@ -116,7 +119,8 @@ pub fn spawn_port_detector(
             match detect_ports(provider.as_ref(), &container_id).await {
                 Ok(ports) => {
                     let current: HashSet<u16> = ports.iter().copied().collect();
-                    let new_ports: HashSet<u16> = current.difference(&last_ports).copied().collect();
+                    let new_ports: HashSet<u16> =
+                        current.difference(&last_ports).copied().collect();
 
                     // Only mark as new on first detection after initial scan
                     let detected: Vec<DetectedPort> = ports

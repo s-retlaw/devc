@@ -36,8 +36,7 @@ fn test_containers_view_with_items() {
         App::create_test_container("frontend-app", DevcContainerStatus::Building),
     ];
     app.selected = 0;
-    app.containers_table_state
-        .select(Some(0));
+    app.containers_table_state.select(Some(0));
 
     let output = render_app(&mut app, 80, 24);
     insta::assert_snapshot!(output);
@@ -426,18 +425,27 @@ fn test_discover_detail_view() {
 
     // Set up inspect details
     let mut labels = HashMap::new();
-    labels.insert("devcontainer.local_folder".to_string(), "/home/user/project".to_string());
+    labels.insert(
+        "devcontainer.local_folder".to_string(),
+        "/home/user/project".to_string(),
+    );
     labels.insert("devc.managed".to_string(), "true".to_string());
-    labels.insert("com.docker.compose.service".to_string(), "devcontainer".to_string());
+    labels.insert(
+        "com.docker.compose.service".to_string(),
+        "devcontainer".to_string(),
+    );
     labels.insert("maintainer".to_string(), "dev-team".to_string());
     labels.insert("devcontainer.metadata".to_string(), "{}".to_string());
 
     let mut networks = HashMap::new();
-    networks.insert("bridge".to_string(), NetworkInfo {
-        network_id: "net123".to_string(),
-        ip_address: Some("172.17.0.2".to_string()),
-        gateway: Some("172.17.0.1".to_string()),
-    });
+    networks.insert(
+        "bridge".to_string(),
+        NetworkInfo {
+            network_id: "net123".to_string(),
+            ip_address: Some("172.17.0.2".to_string()),
+            gateway: Some("172.17.0.1".to_string()),
+        },
+    );
 
     app.discover_detail = Some(ContainerDetails {
         id: ContainerId("abc123def456".to_string()),

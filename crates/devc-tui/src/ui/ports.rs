@@ -9,15 +9,24 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or("Unknown");
 
     // Show socat warning if not installed
-    let socat_warning = match (app.port_state.socat_installed, app.port_state.socat_installing) {
+    let socat_warning = match (
+        app.port_state.socat_installed,
+        app.port_state.socat_installing,
+    ) {
         (_, true) => Some(("Installing socat...", Color::Yellow)),
-        (Some(false), _) => Some(("⚠ socat not installed - press 'i' to install", Color::Yellow)),
+        (Some(false), _) => Some((
+            "⚠ socat not installed - press 'i' to install",
+            Color::Yellow,
+        )),
         _ => None,
     };
 
     if app.port_state.detected_ports.is_empty() {
         let message = if let Some((warning, _)) = socat_warning {
-            format!("{}\n\nNo ports detected.\n\nWaiting for port detection...", warning)
+            format!(
+                "{}\n\nNo ports detected.\n\nWaiting for port detection...",
+                warning
+            )
         } else {
             "No ports detected.\n\nWaiting for port detection...".to_string()
         };
@@ -42,12 +51,17 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .as_ref()
         .and_then(|cid| app.port_state.auto_forward_configs.get(cid));
     let rows: Vec<Row> = app
-        .port_state.detected_ports
+        .port_state
+        .detected_ports
         .iter()
         .map(|port| {
             let is_auto = container_id_for_auto
                 .as_ref()
-                .map(|cid| app.port_state.auto_forwarded_ports.contains(&(cid.clone(), port.port)))
+                .map(|cid| {
+                    app.port_state
+                        .auto_forwarded_ports
+                        .contains(&(cid.clone(), port.port))
+                })
                 .unwrap_or(false);
             let status = if port.is_forwarded && is_auto {
                 "● Forwarded [auto]"
@@ -66,7 +80,10 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
 
             // Look up label from auto_forward_configs
             let label = auto_configs.and_then(|configs| {
-                configs.iter().find(|c| c.port == port.port).and_then(|c| c.label.as_deref())
+                configs
+                    .iter()
+                    .find(|c| c.port == port.port)
+                    .and_then(|c| c.label.as_deref())
             });
             let port_cell = if let Some(label) = label {
                 format!("{} ({})", port.port, label)

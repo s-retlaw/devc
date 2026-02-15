@@ -4,8 +4,8 @@ use crate::features::MergedFeatureProperties;
 use crate::{CoreError, Result};
 use devc_config::{DevContainerConfig, GlobalConfig, ImageSource, SubstitutionContext};
 use devc_provider::{
-    BuildConfig, ContainerId, ContainerProvider, CreateContainerConfig, ExecConfig,
-    MountConfig, MountType, PortConfig,
+    BuildConfig, ContainerId, ContainerProvider, CreateContainerConfig, ExecConfig, MountConfig,
+    MountType, PortConfig,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -154,9 +154,10 @@ impl Container {
                         return None;
                     }
                     // Verify there's a .devcontainer ancestor
-                    parent.ancestors().any(|a| {
-                        a.file_name().map(|n| n == ".devcontainer").unwrap_or(false)
-                    }).then(|| parent_name.to_string_lossy().to_string())
+                    parent
+                        .ancestors()
+                        .any(|a| a.file_name().map(|n| n == ".devcontainer").unwrap_or(false))
+                        .then(|| parent_name.to_string_lossy().to_string())
                 });
                 match subdir_name {
                     Some(sub) => Some(format!("{}-{}", workspace_name, sub)),
@@ -214,12 +215,11 @@ impl Container {
                     image
                 )));
             }
-            ImageSource::Dockerfile { path, args, .. } => {
-                (path, args.unwrap_or_default(), None)
-            }
+            ImageSource::Dockerfile { path, args, .. } => (path, args.unwrap_or_default(), None),
             ImageSource::Compose => {
                 return Err(CoreError::InvalidState(
-                    "Cannot build standalone image for Compose project (use 'up' instead)".to_string(),
+                    "Cannot build standalone image for Compose project (use 'up' instead)"
+                        .to_string(),
                 ));
             }
             ImageSource::None => {
@@ -261,10 +261,7 @@ impl Container {
         image: &str,
         feature_props: Option<&MergedFeatureProperties>,
     ) -> CreateContainerConfig {
-        let _workspace_mount = format!(
-            "{}:/workspace",
-            self.workspace_path.to_string_lossy()
-        );
+        let _workspace_mount = format!("{}:/workspace", self.workspace_path.to_string_lossy());
 
         let mut mounts = vec![MountConfig {
             mount_type: MountType::Bind,
@@ -310,7 +307,10 @@ impl Container {
 
             let sub_ctx = SubstitutionContext::new(
                 self.workspace_path.to_string_lossy().to_string(),
-                self.devcontainer.workspace_folder.clone().unwrap_or_else(|| "/workspace".to_string()),
+                self.devcontainer
+                    .workspace_folder
+                    .clone()
+                    .unwrap_or_else(|| "/workspace".to_string()),
             )
             .with_devcontainer_id(self.devcontainer_id.clone());
 
@@ -328,7 +328,9 @@ impl Container {
                             Some("tmpfs") => MountType::Tmpfs,
                             _ => MountType::Bind,
                         };
-                        let source = obj.source.as_deref()
+                        let source = obj
+                            .source
+                            .as_deref()
                             .map(|s| subst_var(s, &sub_ctx))
                             .unwrap_or_default();
                         mounts.push(MountConfig {
@@ -423,7 +425,7 @@ impl Container {
             stdin_open: true,
             network_mode: None,
             privileged: self.devcontainer.privileged.unwrap_or(false)
-                || feature_props.map_or(false, |p| p.privileged),
+                || feature_props.is_some_and(|p| p.privileged),
             cap_add: {
                 let mut caps = self.devcontainer.cap_add.clone().unwrap_or_default();
                 if let Some(props) = feature_props {
@@ -447,8 +449,7 @@ impl Container {
                 }
                 opts
             },
-            init: self.devcontainer.init.unwrap_or(false)
-                || feature_props.map_or(false, |p| p.init),
+            init: self.devcontainer.init.unwrap_or(false) || feature_props.is_some_and(|p| p.init),
             extra_args: self.devcontainer.run_args.clone().unwrap_or_default(),
         }
     }
@@ -531,22 +532,14 @@ impl Container {
     /// Resolve compose file paths relative to the config directory
     pub fn compose_files(&self) -> Option<Vec<PathBuf>> {
         let compose_ref = self.devcontainer.docker_compose_file.as_ref()?;
-        let config_dir = self
-            .config_path
-            .parent()
-            .unwrap_or(Path::new("."));
+        let config_dir = self.config_path.parent().unwrap_or(Path::new("."));
 
         let files: Vec<String> = match compose_ref {
             devc_config::StringOrArray::String(s) => vec![s.clone()],
             devc_config::StringOrArray::Array(arr) => arr.clone(),
         };
 
-        Some(
-            files
-                .iter()
-                .map(|f| config_dir.join(f))
-                .collect(),
-        )
+        Some(files.iter().map(|f| config_dir.join(f)).collect())
     }
 }
 
@@ -607,9 +600,9 @@ async fn run_single_host_command(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| {
-            CoreError::ExecFailed(format!("Failed to run host command: {}", e))
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| CoreError::ExecFailed(format!("Failed to run host command: {}", e)))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -653,9 +646,7 @@ async fn run_single_host_command(
             .args(args)
             .current_dir(working_dir)
             .status()
-            .map_err(|e| {
-                CoreError::ExecFailed(format!("Failed to run host command: {}", e))
-            })?;
+            .map_err(|e| CoreError::ExecFailed(format!("Failed to run host command: {}", e)))?;
         if !status.success() {
             return Err(CoreError::ExecFailed(format!(
                 "Host command '{}' exited with code {}",
@@ -705,7 +696,11 @@ pub async fn run_host_command(
                                 args[1..].iter().map(|s| s.as_str()).collect();
                             let label = format!("{:?}", args);
                             run_single_host_command(
-                                &args[0], &str_args, working_dir, &label, output,
+                                &args[0],
+                                &str_args,
+                                working_dir,
+                                &label,
+                                output,
                             )
                             .await?;
                         }
@@ -855,7 +850,8 @@ mod tests {
 
     #[test]
     fn test_parse_mount_string() {
-        let mount = parse_mount_string("type=bind,source=/host/path,target=/container/path,readonly=true");
+        let mount =
+            parse_mount_string("type=bind,source=/host/path,target=/container/path,readonly=true");
         assert!(mount.is_some());
         let mount = mount.unwrap();
         assert!(matches!(mount.mount_type, MountType::Bind));
@@ -883,7 +879,9 @@ mod tests {
 
         let name = container.container_name();
         // Must be valid Docker name: lowercase alphanumeric, hyphen, underscore
-        assert!(name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
+        assert!(name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
         assert_eq!(name, "devc_my_project_____");
     }
 
@@ -934,7 +932,10 @@ mod tests {
         };
 
         let create = container.create_config("ubuntu:22.04");
-        assert!(create.cmd.is_none(), "overrideCommand=false should yield cmd=None");
+        assert!(
+            create.cmd.is_none(),
+            "overrideCommand=false should yield cmd=None"
+        );
     }
 
     #[test]
@@ -1155,8 +1156,14 @@ mod tests {
     async fn test_run_host_command_object() {
         let dir = std::env::temp_dir();
         let mut commands = HashMap::new();
-        commands.insert("first".to_string(), devc_config::StringOrArray::String("echo one".to_string()));
-        commands.insert("second".to_string(), devc_config::StringOrArray::String("echo two".to_string()));
+        commands.insert(
+            "first".to_string(),
+            devc_config::StringOrArray::String("echo one".to_string()),
+        );
+        commands.insert(
+            "second".to_string(),
+            devc_config::StringOrArray::String("echo two".to_string()),
+        );
         let cmd = devc_config::Command::Object(commands);
         let result = run_host_command(&cmd, &dir, None).await;
         assert!(result.is_ok());
@@ -1195,7 +1202,10 @@ mod tests {
         let dir = std::env::temp_dir();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut commands = HashMap::new();
-        commands.insert("mystep".to_string(), devc_config::StringOrArray::String("echo one".to_string()));
+        commands.insert(
+            "mystep".to_string(),
+            devc_config::StringOrArray::String("echo one".to_string()),
+        );
         let cmd = devc_config::Command::Object(commands);
         run_host_command(&cmd, &dir, Some(&tx)).await.unwrap();
         drop(tx);
@@ -1232,9 +1242,17 @@ mod tests {
         let workspace_name = tmp.path().file_name().unwrap().to_string_lossy();
         let expected_prefix = sanitize_name(&workspace_name);
         // Name should be "{sanitized_workspace}-python"
-        assert!(container.name.ends_with("-python"), "name was: {}", container.name);
-        assert!(container.name.starts_with(&expected_prefix),
-            "name was: {}, expected to start with: {}", container.name, expected_prefix);
+        assert!(
+            container.name.ends_with("-python"),
+            "name was: {}",
+            container.name
+        );
+        assert!(
+            container.name.starts_with(&expected_prefix),
+            "name was: {}, expected to start with: {}",
+            container.name,
+            expected_prefix
+        );
     }
 
     #[test]
@@ -1249,8 +1267,11 @@ mod tests {
         let workspace_name = tmp.path().file_name().unwrap().to_string_lossy();
         // Name should just be workspace name (no subdir suffix)
         assert_eq!(container.name, sanitize_name(&workspace_name));
-        assert!(!container.name.contains('-') || workspace_name.contains('-'),
-            "name should not have subdir suffix: {}", container.name);
+        assert!(
+            !container.name.contains('-') || workspace_name.contains('-'),
+            "name should not have subdir suffix: {}",
+            container.name
+        );
     }
 
     #[test]
@@ -1259,7 +1280,11 @@ mod tests {
         let dc = tmp.path().join(".devcontainer/python");
         std::fs::create_dir_all(&dc).unwrap();
         let config_path = dc.join("devcontainer.json");
-        std::fs::write(&config_path, r#"{"name": "My App", "image": "python:3.12"}"#).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{"name": "My App", "image": "python:3.12"}"#,
+        )
+        .unwrap();
 
         let container = Container::from_config(&config_path).unwrap();
         // Explicit name takes precedence
@@ -1380,9 +1405,9 @@ mod tests {
         };
 
         let feature_props = MergedFeatureProperties {
-            mounts: vec![
-                Mount::String("type=volume,source=feat-vol,target=/feat-data".to_string()),
-            ],
+            mounts: vec![Mount::String(
+                "type=volume,source=feat-vol,target=/feat-data".to_string(),
+            )],
             ..Default::default()
         };
 

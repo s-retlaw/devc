@@ -88,8 +88,7 @@ mod pty {
             };
 
             // Open a PTY pair
-            let pty = openpty(Some(&winsize), None)
-                .map_err(io::Error::other)?;
+            let pty = openpty(Some(&winsize), None).map_err(io::Error::other)?;
 
             let master_fd = pty.master;
             let slave_fd = pty.slave;
@@ -240,7 +239,8 @@ mod pty {
                             }
                         }
                     }
-                    if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
+                    if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR)
+                    {
                         // Drain any remaining data
                         loop {
                             match nix::unistd::read(master_raw, &mut buf) {
@@ -267,12 +267,12 @@ mod pty {
                             }
                             Ok(n) => {
                                 // Scan for Ctrl+\ (0x1c)
-                                if let Some(pos) = buf[..n].iter().position(|&b| b == CTRL_BACKSLASH)
+                                if let Some(pos) =
+                                    buf[..n].iter().position(|&b| b == CTRL_BACKSLASH)
                                 {
                                     // Write bytes before the detach key to master
                                     if pos > 0 {
-                                        let _ =
-                                            nix::unistd::write(&self.master_fd, &buf[..pos]);
+                                        let _ = nix::unistd::write(&self.master_fd, &buf[..pos]);
                                     }
                                     return ShellExitReason::Detached;
                                 }

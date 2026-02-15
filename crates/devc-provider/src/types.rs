@@ -419,9 +419,18 @@ mod tests {
 
     #[test]
     fn test_provider_type_from_str() {
-        assert_eq!("docker".parse::<ProviderType>().unwrap(), ProviderType::Docker);
-        assert_eq!("podman".parse::<ProviderType>().unwrap(), ProviderType::Podman);
-        assert_eq!("DOCKER".parse::<ProviderType>().unwrap(), ProviderType::Docker);
+        assert_eq!(
+            "docker".parse::<ProviderType>().unwrap(),
+            ProviderType::Docker
+        );
+        assert_eq!(
+            "podman".parse::<ProviderType>().unwrap(),
+            ProviderType::Podman
+        );
+        assert_eq!(
+            "DOCKER".parse::<ProviderType>().unwrap(),
+            ProviderType::Docker
+        );
         assert!("invalid".parse::<ProviderType>().is_err());
     }
 
@@ -432,7 +441,10 @@ mod tests {
         assert_eq!(ContainerStatus::from("created"), ContainerStatus::Created);
         assert_eq!(ContainerStatus::from("paused"), ContainerStatus::Paused);
         assert_eq!(ContainerStatus::from("dead"), ContainerStatus::Dead);
-        assert_eq!(ContainerStatus::from("restarting"), ContainerStatus::Restarting);
+        assert_eq!(
+            ContainerStatus::from("restarting"),
+            ContainerStatus::Restarting
+        );
         assert_eq!(ContainerStatus::from("removing"), ContainerStatus::Removing);
         assert_eq!(ContainerStatus::from("garbage"), ContainerStatus::Unknown);
     }

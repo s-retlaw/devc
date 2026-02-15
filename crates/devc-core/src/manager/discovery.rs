@@ -1,8 +1,6 @@
 //! Container discovery and adoption for ContainerManager
 
-use crate::{
-    Container, ContainerState, CoreError, DevcContainerStatus, Result,
-};
+use crate::{Container, ContainerState, CoreError, DevcContainerStatus, Result};
 use devc_provider::{
     ContainerId, ContainerStatus, DevcontainerSource, DiscoveredContainer, ProviderType,
 };
@@ -46,10 +44,7 @@ impl ContainerManager {
     /// Auto-discover all devcontainer.json configs in a workspace directory
     /// and register any that aren't already tracked.
     /// Returns the list of newly registered container states.
-    pub async fn auto_discover_configs(
-        &self,
-        workspace_dir: &Path,
-    ) -> Result<Vec<ContainerState>> {
+    pub async fn auto_discover_configs(&self, workspace_dir: &Path) -> Result<Vec<ContainerState>> {
         use devc_config::DevContainerConfig;
 
         let all_configs = DevContainerConfig::load_all_from_dir(workspace_dir);
@@ -210,8 +205,7 @@ impl ContainerManager {
         };
 
         // Create state entry
-        let mut container_state =
-            ContainerState::new(name, provider_type, config_path, workspace);
+        let mut container_state = ContainerState::new(name, provider_type, config_path, workspace);
         container_state.container_id = Some(container_id.to_string());
         container_state.image_id = Some(details.image_id.clone());
         container_state.status = status;
@@ -266,10 +260,7 @@ impl ContainerManager {
                     if let Err(e) =
                         crate::run_host_command(cmd, &container_state.workspace_path, None).await
                     {
-                        tracing::warn!(
-                            "initializeCommand failed during adopt (non-fatal): {}",
-                            e
-                        );
+                        tracing::warn!("initializeCommand failed during adopt (non-fatal): {}", e);
                     }
                 }
 
@@ -278,10 +269,7 @@ impl ContainerManager {
                     .run_first_create_lifecycle(&state_id, &container, provider, &cid, None)
                     .await
                 {
-                    tracing::warn!(
-                        "Lifecycle commands failed during adopt (non-fatal): {}",
-                        e
-                    );
+                    tracing::warn!("Lifecycle commands failed during adopt (non-fatal): {}", e);
                 }
 
                 // Start (runs postStartCommand, SSH daemon)

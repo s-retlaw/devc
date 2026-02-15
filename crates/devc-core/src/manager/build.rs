@@ -1,8 +1,6 @@
 //! Build and rebuild operations for ContainerManager
 
-use crate::{
-    features, CoreError, DevcContainerStatus, EnhancedBuildContext, Result,
-};
+use crate::{features, CoreError, DevcContainerStatus, EnhancedBuildContext, Result};
 use devc_config::ImageSource;
 use devc_provider::ContainerProvider;
 use std::path::Path;
@@ -91,39 +89,66 @@ impl ContainerManager {
 
         // Log SSH injection status
         if inject_ssh {
-            emit(&progress, "SSH support: Injecting dropbear into image...".to_string());
+            emit(
+                &progress,
+                "SSH support: Injecting dropbear into image...".to_string(),
+            );
         } else {
-            emit(&progress, "SSH support: Disabled (not injecting dropbear)".to_string());
+            emit(
+                &progress,
+                "SSH support: Disabled (not injecting dropbear)".to_string(),
+            );
         }
 
         // Resolve devcontainer features
-        let config_dir = container.config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let config_dir = container
+            .config_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
         let progress_for_features = progress.clone();
         let resolved_features = if let Some(ref feature_map) = container.devcontainer.features {
-            features::resolve_and_prepare_features(feature_map, &config_dir, &progress_for_features).await?
+            features::resolve_and_prepare_features(feature_map, &config_dir, &progress_for_features)
+                .await?
         } else {
             vec![]
         };
         let has_features = !resolved_features.is_empty();
         let feature_properties = features::merge_feature_properties(&resolved_features);
-        let remote_user = container.devcontainer.effective_user().unwrap_or("root").to_string();
+        let remote_user = container
+            .devcontainer
+            .effective_user()
+            .unwrap_or("root")
+            .to_string();
 
         if has_features {
-            emit(&progress, format!("Installing {} devcontainer feature(s)...", resolved_features.len()));
+            emit(
+                &progress,
+                format!(
+                    "Installing {} devcontainer feature(s)...",
+                    resolved_features.len()
+                ),
+            );
         }
 
         // Check if we need to build or pull
         let image_id = match container.devcontainer.image_source() {
             ImageSource::Image(image) => {
                 if has_features || inject_ssh {
-                    emit(&progress, format!(
-                        "Building enhanced image from {} (features: {}, SSH: {})",
-                        image, has_features, inject_ssh
-                    ));
+                    emit(
+                        &progress,
+                        format!(
+                            "Building enhanced image from {} (features: {}, SSH: {})",
+                            image, has_features, inject_ssh
+                        ),
+                    );
 
                     let enhanced_ctx = if has_features {
                         EnhancedBuildContext::from_image_with_features(
-                            &image, &resolved_features, inject_ssh, &remote_user,
+                            &image,
+                            &resolved_features,
+                            inject_ssh,
+                            &remote_user,
                         )?
                     } else {
                         EnhancedBuildContext::from_image(&image)?
@@ -170,10 +195,13 @@ impl ContainerManager {
                 build_config.no_cache = no_cache;
 
                 if has_features || inject_ssh {
-                    emit(&progress, format!(
-                        "Building enhanced image: {} (features: {}, SSH: {}, no_cache: {})",
-                        build_config.tag, has_features, inject_ssh, no_cache
-                    ));
+                    emit(
+                        &progress,
+                        format!(
+                            "Building enhanced image: {} (features: {}, SSH: {}, no_cache: {})",
+                            build_config.tag, has_features, inject_ssh, no_cache
+                        ),
+                    );
 
                     let enhanced_ctx = if has_features {
                         EnhancedBuildContext::from_dockerfile_with_features(
@@ -202,10 +230,13 @@ impl ContainerManager {
                         }
                     }
                 } else {
-                    emit(&progress, format!(
-                        "Building image: {} (no_cache: {})",
-                        build_config.tag, no_cache
-                    ));
+                    emit(
+                        &progress,
+                        format!(
+                            "Building image: {} (no_cache: {})",
+                            build_config.tag, no_cache
+                        ),
+                    );
 
                     let result = dispatch_build(provider, &build_config, &progress).await;
                     match result {
@@ -219,14 +250,18 @@ impl ContainerManager {
             }
             ImageSource::Compose => {
                 // Compose builds happen during `compose up`, mark as built
-                emit(&progress, "Compose project: build will happen during 'up'".to_string());
+                emit(
+                    &progress,
+                    "Compose project: build will happen during 'up'".to_string(),
+                );
                 {
                     let mut state = self.state.write().await;
                     if let Some(cs) = state.get_mut(id) {
                         cs.image_id = Some("compose".to_string());
                         cs.status = DevcContainerStatus::Built;
                         if let Ok(props_json) = serde_json::to_string(&feature_properties) {
-                            cs.metadata.insert("feature_properties".to_string(), props_json);
+                            cs.metadata
+                                .insert("feature_properties".to_string(), props_json);
                         }
                     }
                 }
@@ -248,7 +283,8 @@ impl ContainerManager {
                 cs.image_id = Some(image_id.clone());
                 cs.status = DevcContainerStatus::Built;
                 if let Ok(props_json) = serde_json::to_string(&feature_properties) {
-                    cs.metadata.insert("feature_properties".to_string(), props_json);
+                    cs.metadata
+                        .insert("feature_properties".to_string(), props_json);
                 }
             }
         }
@@ -290,9 +326,9 @@ impl ContainerManager {
         no_cache: bool,
         progress: Option<mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
-        let new_provider = self
-            .provider_type()
-            .ok_or_else(|| CoreError::NotConnected("Cannot rebuild: no provider available".to_string()))?;
+        let new_provider = self.provider_type().ok_or_else(|| {
+            CoreError::NotConnected("Cannot rebuild: no provider available".to_string())
+        })?;
 
         let container_state = {
             let state = self.state.read().await;
@@ -313,10 +349,10 @@ impl ContainerManager {
 
         // 2. Handle provider migration
         if provider_changed {
-            emit(&progress, format!(
-                "Migrating provider: {} -> {}",
-                old_provider, new_provider
-            ));
+            emit(
+                &progress,
+                format!("Migrating provider: {} -> {}", old_provider, new_provider),
+            );
             {
                 let mut state = self.state.write().await;
                 if let Some(cs) = state.get_mut(id) {
@@ -332,7 +368,10 @@ impl ContainerManager {
         // 3. Run initializeCommand on host before build (per spec)
         let container = self.load_container(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.initialize_command {
-            emit(&progress, "Running initializeCommand on host...".to_string());
+            emit(
+                &progress,
+                "Running initializeCommand on host...".to_string(),
+            );
             let output = progress.as_ref();
             crate::run_host_command(cmd, &container.workspace_path, output).await?;
         }
@@ -342,7 +381,8 @@ impl ContainerManager {
 
         // 5. Create and start container
         let progress_ref = progress.as_ref();
-        self.up_with_progress(id, progress_ref, progress_ref).await?;
+        self.up_with_progress(id, progress_ref, progress_ref)
+            .await?;
 
         emit(&progress, "Build complete.".to_string());
         Ok(())

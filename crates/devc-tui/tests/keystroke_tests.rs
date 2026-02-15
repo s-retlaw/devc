@@ -245,13 +245,19 @@ async fn test_d_toggles_discover_mode() {
     app.send_key(KeyCode::Char('D'), KeyModifiers::SHIFT)
         .await
         .unwrap();
-    assert!(app.discover_mode, "Discover mode should be enabled after pressing D");
+    assert!(
+        app.discover_mode,
+        "Discover mode should be enabled after pressing D"
+    );
 
     // 'D' again toggles it off
     app.send_key(KeyCode::Char('D'), KeyModifiers::SHIFT)
         .await
         .unwrap();
-    assert!(!app.discover_mode, "Discover mode should be disabled after pressing D again");
+    assert!(
+        !app.discover_mode,
+        "Discover mode should be disabled after pressing D again"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +333,10 @@ async fn test_rebuild_dialog_checkbox() {
     app.send_key(KeyCode::Enter, KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_ne!(app.rebuild_no_cache, before, "Checkbox should toggle on Enter");
+    assert_ne!(
+        app.rebuild_no_cache, before,
+        "Checkbox should toggle on Enter"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -381,19 +390,28 @@ async fn test_compose_detail_service_navigation() {
     app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_eq!(app.compose_state.selected_service, 1, "j should move to service index 1");
+    assert_eq!(
+        app.compose_state.selected_service, 1,
+        "j should move to service index 1"
+    );
 
     // 'j' again moves to the third service
     app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_eq!(app.compose_state.selected_service, 2, "j should move to service index 2");
+    assert_eq!(
+        app.compose_state.selected_service, 2,
+        "j should move to service index 2"
+    );
 
     // 'k' moves back up
     app.send_key(KeyCode::Char('k'), KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_eq!(app.compose_state.selected_service, 1, "k should move back to service index 1");
+    assert_eq!(
+        app.compose_state.selected_service, 1,
+        "k should move back to service index 1"
+    );
 
     // 'j' wraps around to the first service
     app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
@@ -402,5 +420,8 @@ async fn test_compose_detail_service_navigation() {
     app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_eq!(app.compose_state.selected_service, 0, "j should wrap around to first service");
+    assert_eq!(
+        app.compose_state.selected_service, 0,
+        "j should wrap around to first service"
+    );
 }

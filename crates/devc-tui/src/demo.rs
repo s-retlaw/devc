@@ -40,7 +40,9 @@ impl DemoApp {
                 id: "abc123def456".to_string(),
                 name: "my-rust-project".to_string(),
                 provider: ProviderType::Docker,
-                config_path: PathBuf::from("/home/user/projects/rust-app/.devcontainer/devcontainer.json"),
+                config_path: PathBuf::from(
+                    "/home/user/projects/rust-app/.devcontainer/devcontainer.json",
+                ),
                 image_id: Some("sha256:abc123...".to_string()),
                 container_id: Some("container123".to_string()),
                 status: DevcContainerStatus::Running,
@@ -56,7 +58,9 @@ impl DemoApp {
                 id: "def456ghi789".to_string(),
                 name: "python-api".to_string(),
                 provider: ProviderType::Docker,
-                config_path: PathBuf::from("/home/user/projects/api/.devcontainer/devcontainer.json"),
+                config_path: PathBuf::from(
+                    "/home/user/projects/api/.devcontainer/devcontainer.json",
+                ),
                 image_id: Some("sha256:def456...".to_string()),
                 container_id: Some("container456".to_string()),
                 status: DevcContainerStatus::Stopped,
@@ -72,7 +76,9 @@ impl DemoApp {
                 id: "ghi789jkl012".to_string(),
                 name: "frontend-app".to_string(),
                 provider: ProviderType::Docker,
-                config_path: PathBuf::from("/home/user/projects/frontend/.devcontainer/devcontainer.json"),
+                config_path: PathBuf::from(
+                    "/home/user/projects/frontend/.devcontainer/devcontainer.json",
+                ),
                 image_id: None,
                 container_id: None,
                 status: DevcContainerStatus::Building,
@@ -88,7 +94,9 @@ impl DemoApp {
                 id: "jkl012mno345".to_string(),
                 name: "database-dev".to_string(),
                 provider: ProviderType::Podman,
-                config_path: PathBuf::from("/home/user/projects/db/.devcontainer/devcontainer.json"),
+                config_path: PathBuf::from(
+                    "/home/user/projects/db/.devcontainer/devcontainer.json",
+                ),
                 image_id: Some("sha256:jkl012...".to_string()),
                 container_id: None,
                 status: DevcContainerStatus::Built,
@@ -174,10 +182,17 @@ impl DemoApp {
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
         use ratatui::widgets::{Block, Borders, Paragraph};
 
-        let title = format!(" devc - Dev Container Manager  [{}]  [DEMO MODE] ", self.provider_type);
+        let title = format!(
+            " devc - Dev Container Manager  [{}]  [DEMO MODE] ",
+            self.provider_type
+        );
         let header = Paragraph::new(title)
             .style(Style::default().fg(Color::Cyan).bold())
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            );
         frame.render_widget(header, area);
     }
 
@@ -193,7 +208,11 @@ impl DemoApp {
         };
 
         let status = self.status_message.as_deref().unwrap_or("");
-        let text = if status.is_empty() { help.to_string() } else { format!("{} | {}", status, help) };
+        let text = if status.is_empty() {
+            help.to_string()
+        } else {
+            format!("{} | {}", status, help)
+        };
 
         let footer = Paragraph::new(text)
             .style(Style::default().fg(Color::DarkGray))
@@ -204,43 +223,48 @@ impl DemoApp {
     fn draw_dashboard(&self, frame: &mut Frame, area: Rect) {
         use ratatui::widgets::{Block, Borders, List, ListItem};
 
-        let items: Vec<ListItem> = self.containers.iter().enumerate().map(|(i, c)| {
-            let symbol = match c.status {
-                DevcContainerStatus::Available => "◌",
-                DevcContainerStatus::Running => "●",
-                DevcContainerStatus::Stopped => "○",
-                DevcContainerStatus::Building => "◐",
-                DevcContainerStatus::Built => "◑",
-                DevcContainerStatus::Created => "◔",
-                DevcContainerStatus::Failed => "✗",
-                DevcContainerStatus::Configured => "◯",
-            };
+        let items: Vec<ListItem> = self
+            .containers
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let symbol = match c.status {
+                    DevcContainerStatus::Available => "◌",
+                    DevcContainerStatus::Running => "●",
+                    DevcContainerStatus::Stopped => "○",
+                    DevcContainerStatus::Building => "◐",
+                    DevcContainerStatus::Built => "◑",
+                    DevcContainerStatus::Created => "◔",
+                    DevcContainerStatus::Failed => "✗",
+                    DevcContainerStatus::Configured => "◯",
+                };
 
-            let color = match c.status {
-                DevcContainerStatus::Running => Color::Green,
-                DevcContainerStatus::Building => Color::Yellow,
-                DevcContainerStatus::Failed => Color::Red,
-                _ => Color::DarkGray,
-            };
+                let color = match c.status {
+                    DevcContainerStatus::Running => Color::Green,
+                    DevcContainerStatus::Building => Color::Yellow,
+                    DevcContainerStatus::Failed => Color::Red,
+                    _ => Color::DarkGray,
+                };
 
-            let style = if i == self.selected {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default()
-            };
+                let style = if i == self.selected {
+                    Style::default().bg(Color::DarkGray).fg(Color::White)
+                } else {
+                    Style::default()
+                };
 
-            let line = Line::from(vec![
-                Span::styled(format!(" {} ", symbol), Style::default().fg(color)),
-                Span::styled(format!("{:<20}", c.name), style.bold()),
-                Span::styled(format!("{:<12}", c.status), style.fg(color)),
-                Span::styled(format!("{:<10}", c.provider), style.fg(Color::DarkGray)),
-            ]);
+                let line = Line::from(vec![
+                    Span::styled(format!(" {} ", symbol), Style::default().fg(color)),
+                    Span::styled(format!("{:<20}", c.name), style.bold()),
+                    Span::styled(format!("{:<12}", c.status), style.fg(color)),
+                    Span::styled(format!("{:<10}", c.provider), style.fg(Color::DarkGray)),
+                ]);
 
-            ListItem::new(line).style(style)
-        }).collect();
+                ListItem::new(line).style(style)
+            })
+            .collect();
 
-        let list = List::new(items)
-            .block(Block::default().title(" Containers ").borders(Borders::ALL));
+        let list =
+            List::new(items).block(Block::default().title(" Containers ").borders(Borders::ALL));
         frame.render_widget(list, area);
     }
 
@@ -249,16 +273,32 @@ impl DemoApp {
 
         if let Some(c) = self.containers.get(self.selected) {
             let text = vec![
-                Line::from(vec![Span::raw("Name:        "), Span::styled(&c.name, Style::default().bold())]),
-                Line::from(vec![Span::raw("Status:      "), Span::raw(c.status.to_string())]),
-                Line::from(vec![Span::raw("Provider:    "), Span::raw(c.provider.to_string())]),
+                Line::from(vec![
+                    Span::raw("Name:        "),
+                    Span::styled(&c.name, Style::default().bold()),
+                ]),
+                Line::from(vec![
+                    Span::raw("Status:      "),
+                    Span::raw(c.status.to_string()),
+                ]),
+                Line::from(vec![
+                    Span::raw("Provider:    "),
+                    Span::raw(c.provider.to_string()),
+                ]),
                 Line::from(vec![Span::raw("ID:          "), Span::raw(&c.id)]),
                 Line::from(""),
-                Line::from(vec![Span::raw("Workspace:   "), Span::raw(c.workspace_path.to_string_lossy().to_string())]),
+                Line::from(vec![
+                    Span::raw("Workspace:   "),
+                    Span::raw(c.workspace_path.to_string_lossy().to_string()),
+                ]),
             ];
 
             let detail = Paragraph::new(text)
-                .block(Block::default().title(format!(" {} ", c.name)).borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title(format!(" {} ", c.name))
+                        .borders(Borders::ALL),
+                )
                 .wrap(Wrap { trim: true });
             frame.render_widget(detail, area);
         }
@@ -274,7 +314,10 @@ impl DemoApp {
             Line::from("  k/↑       Move up"),
             Line::from("  Enter     View details"),
             Line::from(""),
-            Line::from(Span::styled("Actions (disabled in demo)", Style::default().bold())),
+            Line::from(Span::styled(
+                "Actions (disabled in demo)",
+                Style::default().bold(),
+            )),
             Line::from("  s         Start/Stop"),
             Line::from("  u         Up (full lifecycle)"),
             Line::from("  d         Delete"),
@@ -293,9 +336,16 @@ impl DemoApp {
     fn draw_build(&self, frame: &mut Frame, area: Rect) {
         use ratatui::widgets::{Block, Borders, Paragraph};
 
-        let text: Vec<Line> = self.build_output.iter().map(|s| Line::from(s.as_str())).collect();
-        let output = Paragraph::new(text)
-            .block(Block::default().title(" Build Output ").borders(Borders::ALL));
+        let text: Vec<Line> = self
+            .build_output
+            .iter()
+            .map(|s| Line::from(s.as_str()))
+            .collect();
+        let output = Paragraph::new(text).block(
+            Block::default()
+                .title(" Build Output ")
+                .borders(Borders::ALL),
+        );
         frame.render_widget(output, area);
     }
 
@@ -318,7 +368,10 @@ impl DemoApp {
             .take(inner_height)
             .map(|(i, line)| {
                 Line::from(vec![
-                    Span::styled(format!("{:>5} ", i + 1), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{:>5} ", i + 1),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                     Span::raw(line.as_str()),
                 ])
             })
@@ -330,7 +383,13 @@ impl DemoApp {
             } else {
                 ((self.logs_scroll + inner_height).min(total_lines) * 100) / total_lines
             };
-            format!(" Logs: {} [{}/{}] {}% ", container_name, self.logs_scroll + 1, total_lines, percent)
+            format!(
+                " Logs: {} [{}/{}] {}% ",
+                container_name,
+                self.logs_scroll + 1,
+                total_lines,
+                percent
+            )
         } else {
             format!(" Logs: {} (empty) ", container_name)
         };
@@ -360,10 +419,18 @@ impl DemoApp {
             Line::from(""),
             Line::from("Action disabled in demo mode"),
             Line::from(""),
-            Line::from(Span::styled("[any key] Close", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                "[any key] Close",
+                Style::default().fg(Color::DarkGray),
+            )),
         ])
         .alignment(Alignment::Center)
-        .block(Block::default().title(" Demo ").borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)));
+        .block(
+            Block::default()
+                .title(" Demo ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
 
         frame.render_widget(dialog, dialog_area);
     }
@@ -402,8 +469,8 @@ impl DemoApp {
                     self.logs_scroll = self.logs.len().saturating_sub(1);
                 }
                 KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.logs_scroll = (self.logs_scroll + page_size / 2)
-                        .min(self.logs.len().saturating_sub(1));
+                    self.logs_scroll =
+                        (self.logs_scroll + page_size / 2).min(self.logs.len().saturating_sub(1));
                 }
                 KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.logs_scroll = self.logs_scroll.saturating_sub(page_size / 2);
@@ -429,7 +496,10 @@ impl DemoApp {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if !self.containers.is_empty() {
-                    self.selected = self.selected.checked_sub(1).unwrap_or(self.containers.len() - 1);
+                    self.selected = self
+                        .selected
+                        .checked_sub(1)
+                        .unwrap_or(self.containers.len() - 1);
                 }
             }
             KeyCode::Enter => {

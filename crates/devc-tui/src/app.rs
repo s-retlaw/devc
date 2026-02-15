@@ -1,21 +1,26 @@
 //! Main TUI application state and logic
 
 use crate::clipboard::copy_to_clipboard;
-use crate::event::{Event, EventHandler};
 use crate::compose_state::ComposeViewState;
+use crate::event::{Event, EventHandler};
 use crate::port_state::PortForwardingState;
 use crate::ports::{spawn_port_detector, PortDetectionUpdate};
-use crate::shell_state::{ShellSession, ShellState};
 use crate::settings::{ProviderDetailState, SettingsState};
 #[cfg(unix)]
 use crate::shell::PtyShell;
 use crate::shell::{ShellConfig, ShellExitReason};
-use crate::tunnel::{check_socat_installed, install_socat, open_in_browser, spawn_forwarder, InstallResult};
+use crate::shell_state::{ShellSession, ShellState};
+use crate::tunnel::{
+    check_socat_installed, install_socat, open_in_browser, spawn_forwarder, InstallResult,
+};
 use crate::{resume_tui, suspend_tui, ui};
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
 use devc_core::{Container, ContainerManager, ContainerState, DevcContainerStatus};
-use devc_provider::{create_provider, detect_available_providers, ContainerProvider, DevcontainerSource, DiscoveredContainer, ProviderType};
+use devc_provider::{
+    create_provider, detect_available_providers, ContainerProvider, DevcontainerSource,
+    DiscoveredContainer, ProviderType,
+};
 use ratatui::prelude::*;
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
@@ -137,10 +142,23 @@ pub enum DialogFocus {
 /// A container operation in progress (shown as spinner modal)
 #[derive(Debug, Clone)]
 pub enum ContainerOperation {
-    Starting { id: String, name: String },
-    Stopping { id: String, name: String },
-    Deleting { id: String, name: String },
-    Up { id: String, name: String, progress: String },
+    Starting {
+        id: String,
+        name: String,
+    },
+    Stopping {
+        id: String,
+        name: String,
+    },
+    Deleting {
+        id: String,
+        name: String,
+    },
+    Up {
+        id: String,
+        name: String,
+        progress: String,
+    },
 }
 
 impl ContainerOperation {
@@ -443,7 +461,10 @@ impl App {
     }
 
     /// Create a new application
-    pub async fn new(manager: ContainerManager, workspace_dir: Option<&std::path::Path>) -> AppResult<Self> {
+    pub async fn new(
+        manager: ContainerManager,
+        workspace_dir: Option<&std::path::Path>,
+    ) -> AppResult<Self> {
         let (async_event_tx, async_event_rx) = mpsc::unbounded_channel();
         let mut containers = manager.list().await?;
 
@@ -461,11 +482,13 @@ impl App {
 
         // Test all providers at startup to show accurate connection status
         let available_providers = detect_available_providers(&config).await;
-        let docker_connected = available_providers.iter()
+        let docker_connected = available_providers
+            .iter()
             .find(|(t, _)| *t == ProviderType::Docker)
             .map(|(_, connected)| *connected)
             .unwrap_or(false);
-        let podman_connected = available_providers.iter()
+        let podman_connected = available_providers
+            .iter()
             .find(|(t, _)| *t == ProviderType::Podman)
             .map(|(_, connected)| *connected)
             .unwrap_or(false);
@@ -498,7 +521,11 @@ impl App {
             view: View::Main,
             active_provider,
             providers,
-            selected_provider: if active_provider == Some(ProviderType::Podman) { 1 } else { 0 },
+            selected_provider: if active_provider == Some(ProviderType::Podman) {
+                1
+            } else {
+                0
+            },
             connection_error,
             containers,
             selected: 0,
@@ -592,7 +619,12 @@ impl App {
 
         // Register the Available entry
         let config_path = container.config_path.clone();
-        let result = self.manager.read().await.init_from_config(&config_path).await;
+        let result = self
+            .manager
+            .read()
+            .await
+            .init_from_config(&config_path)
+            .await;
         let id = match result {
             Ok(Some(cs)) => cs.id,
             Ok(None) => {
@@ -627,13 +659,20 @@ impl App {
         let fwd_tx = event_tx.clone();
         tokio::spawn(async move {
             while let Some(line) = progress_rx.recv().await {
-                if fwd_tx.send(AsyncEvent::BuildProgress(line)).is_err() { break; }
+                if fwd_tx.send(AsyncEvent::BuildProgress(line)).is_err() {
+                    break;
+                }
             }
         });
 
         let manager = Arc::clone(&self.manager);
         tokio::spawn(async move {
-            match manager.read().await.rebuild_with_progress(&id, false, progress_tx.clone()).await {
+            match manager
+                .read()
+                .await
+                .rebuild_with_progress(&id, false, progress_tx.clone())
+                .await
+            {
                 Ok(()) => {
                     // Success message is sent by rebuild_with_progress
                 }
@@ -655,10 +694,9 @@ impl App {
             ProviderType::Docker => devc_provider::CliProvider::new_docker().await,
             ProviderType::Podman => {
                 if devc_provider::is_in_toolbox() {
-                    match devc_provider::CliProvider::new_toolbox().await {
-                        Ok(p) => return Ok(p),
-                        Err(_) => {} // Fall through to regular podman
-                    }
+                    if let Ok(p) = devc_provider::CliProvider::new_toolbox().await {
+                        return Ok(p);
+                    } // Fall through to regular podman
                 }
                 devc_provider::CliProvider::new_podman().await
             }
@@ -666,7 +704,10 @@ impl App {
     }
 
     /// Run the application main loop
-    pub async fn run<B: Backend + std::io::Write>(&mut self, terminal: &mut Terminal<B>) -> AppResult<()> {
+    pub async fn run<B: Backend + std::io::Write>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> AppResult<()> {
         let mut events = Some(EventHandler::new(Duration::from_millis(250)));
 
         while !self.should_quit {
@@ -688,7 +729,9 @@ impl App {
             terminal.draw(|frame| ui::draw(frame, self))?;
 
             // Get event handler (should always be Some when not in shell mode)
-            let handler = events.as_mut().expect("EventHandler missing outside shell mode");
+            let handler = events
+                .as_mut()
+                .expect("EventHandler missing outside shell mode");
 
             // Use select to handle terminal events and unified async events
             tokio::select! {
@@ -729,10 +772,8 @@ impl App {
                 self.handle_operation_result(result).await?;
             }
             AsyncEvent::OperationProgress(msg) => {
-                if let Some(ref mut op) = self.container_op {
-                    if let ContainerOperation::Up { progress, .. } = op {
-                        *progress = msg;
-                    }
+                if let Some(ContainerOperation::Up { progress, .. }) = self.container_op.as_mut() {
+                    *progress = msg;
                 }
             }
             AsyncEvent::UpOutput(line) => {
@@ -765,7 +806,8 @@ impl App {
 
         // Remove detectors for containers that stopped
         let to_remove: Vec<String> = self
-            .port_state.auto_port_detectors
+            .port_state
+            .auto_port_detectors
             .keys()
             .filter(|cid| !running_container_ids.contains_key(*cid))
             .cloned()
@@ -787,7 +829,13 @@ impl App {
         }
 
         // Load configs and runtime args while holding the manager lock, then release it
-        let configs_to_start: Vec<(String, ProviderType, (String, Vec<String>), Vec<devc_config::PortForwardConfig>)> = {
+        #[allow(clippy::type_complexity)]
+        let configs_to_start: Vec<(
+            String,
+            ProviderType,
+            (String, Vec<String>),
+            Vec<devc_config::PortForwardConfig>,
+        )> = {
             let manager = self.manager.read().await;
             let mut result = Vec::new();
             for (provider_cid, devc_id) in &needs_detector {
@@ -801,7 +849,8 @@ impl App {
                 };
                 let auto_fwd = config.auto_forward_config();
                 if !auto_fwd.is_empty() {
-                    let rt_args = manager.runtime_args_for(&state)
+                    let rt_args = manager
+                        .runtime_args_for(&state)
                         .unwrap_or_else(|_| (state.provider.to_string(), vec![]));
                     result.push((provider_cid.clone(), state.provider, rt_args, auto_fwd));
                 }
@@ -822,16 +871,28 @@ impl App {
 
             let container_id = devc_provider::ContainerId::new(&provider_cid);
             let forwarded: HashSet<u16> = self
-                .port_state.active_forwarders
+                .port_state
+                .active_forwarders
                 .keys()
                 .filter(|(cid, _)| cid == &provider_cid)
                 .map(|(_, port)| *port)
                 .collect();
 
-            let rx = spawn_port_detector(provider_arc, container_id, container_provider_type, forwarded);
-            self.port_state.auto_port_detectors.insert(provider_cid.clone(), rx);
-            self.port_state.auto_forward_configs.insert(provider_cid.clone(), auto_fwd);
-            self.port_state.auto_runtime_args.insert(provider_cid, rt_args);
+            let rx = spawn_port_detector(
+                provider_arc,
+                container_id,
+                container_provider_type,
+                forwarded,
+            );
+            self.port_state
+                .auto_port_detectors
+                .insert(provider_cid.clone(), rx);
+            self.port_state
+                .auto_forward_configs
+                .insert(provider_cid.clone(), auto_fwd);
+            self.port_state
+                .auto_runtime_args
+                .insert(provider_cid, rt_args);
         }
     }
 
@@ -841,7 +902,12 @@ impl App {
     /// matches an auto-forward config entry (and action != Ignore, and not already
     /// forwarded), spawns a forwarder.
     async fn poll_auto_port_detectors(&mut self) {
-        let cids: Vec<String> = self.port_state.auto_port_detectors.keys().cloned().collect();
+        let cids: Vec<String> = self
+            .port_state
+            .auto_port_detectors
+            .keys()
+            .cloned()
+            .collect();
         for cid in cids {
             let rx = match self.port_state.auto_port_detectors.get_mut(&cid) {
                 Some(rx) => rx,
@@ -873,13 +939,19 @@ impl App {
                         }
 
                         // Auto-forward this port
-                        let (rt_prog, rt_prefix) = self.port_state.auto_runtime_args
+                        let (rt_prog, rt_prefix) = self
+                            .port_state
+                            .auto_runtime_args
                             .get(&cid)
                             .cloned()
                             .unwrap_or_else(|| ("docker".to_string(), vec![]));
-                        match spawn_forwarder(rt_prog, rt_prefix, cid.clone(), pfc.port, pfc.port).await {
+                        match spawn_forwarder(rt_prog, rt_prefix, cid.clone(), pfc.port, pfc.port)
+                            .await
+                        {
                             Ok(forwarder) => {
-                                self.port_state.active_forwarders.insert(key.clone(), forwarder);
+                                self.port_state
+                                    .active_forwarders
+                                    .insert(key.clone(), forwarder);
                                 self.port_state.auto_forwarded_ports.insert(key.clone());
                                 match pfc.action {
                                     devc_config::AutoForwardAction::Notify => {
@@ -902,7 +974,8 @@ impl App {
                                     devc_config::AutoForwardAction::OpenBrowserOnce => {
                                         if !self.port_state.auto_opened_ports.contains(&key) {
                                             self.port_state.auto_opened_ports.insert(key);
-                                            let _ = open_in_browser(pfc.port, pfc.protocol.as_deref());
+                                            let _ =
+                                                open_in_browser(pfc.port, pfc.protocol.as_deref());
                                         }
                                     }
                                     _ => {}
@@ -969,16 +1042,26 @@ impl App {
             }
         };
 
-        let file_strs: Vec<String> = files.iter().map(|f| f.to_string_lossy().to_string()).collect();
+        let file_strs: Vec<String> = files
+            .iter()
+            .map(|f| f.to_string_lossy().to_string())
+            .collect();
         let file_refs: Vec<&str> = file_strs.iter().map(|s| s.as_str()).collect();
 
-        match provider.compose_ps(&file_refs, &project_name, &workspace_path).await {
+        match provider
+            .compose_ps(&file_refs, &project_name, &workspace_path)
+            .await
+        {
             Ok(services) => {
-                self.compose_state.services.insert(container.id.clone(), services);
+                self.compose_state
+                    .services
+                    .insert(container.id.clone(), services);
             }
             Err(_) => {
                 // Store empty vec so we don't retry
-                self.compose_state.services.insert(container.id.clone(), Vec::new());
+                self.compose_state
+                    .services
+                    .insert(container.id.clone(), Vec::new());
             }
         }
 
@@ -1017,7 +1100,8 @@ impl App {
 
     /// Handle a single build progress message
     async fn handle_build_progress(&mut self, line: String) -> AppResult<()> {
-        let is_complete = line.contains("complete") || line.contains("Error:") || line.contains("Failed:");
+        let is_complete =
+            line.contains("complete") || line.contains("Error:") || line.contains("Failed:");
         self.build_output.push(line);
 
         if is_complete {
@@ -1196,7 +1280,9 @@ impl App {
         }
 
         // Check discover mode FIRST - Esc/q should exit discover mode, not quit app
-        if self.view == View::Main && self.tab == Tab::Containers && self.discover_mode
+        if self.view == View::Main
+            && self.tab == Tab::Containers
+            && self.discover_mode
             && (code == KeyCode::Esc || code == KeyCode::Char('q'))
         {
             self.discover_mode = false;
@@ -1305,28 +1391,32 @@ impl App {
             View::BuildOutput => self.handle_build_key(code, modifiers).await?,
             View::Logs => self.handle_logs_key(code, modifiers).await?,
             View::Ports => self.handle_ports_key(code, modifiers).await?,
-            View::DiscoverDetail => {
-                match code {
-                    KeyCode::Char('j') | KeyCode::Down => self.discover_detail_scroll = self.discover_detail_scroll.saturating_add(1),
-                    KeyCode::Char('k') | KeyCode::Up => self.discover_detail_scroll = self.discover_detail_scroll.saturating_sub(1),
-                    KeyCode::Char('a') => {
-                        if let Some(container) = self.discovered_containers.get(self.selected_discovered) {
-                            if container.source != DevcontainerSource::Devc {
-                                self.dialog_focus = DialogFocus::Cancel;
-                                self.confirm_action = Some(ConfirmAction::Adopt {
-                                    container_id: container.id.0.clone(),
-                                    container_name: container.name.clone(),
-                                    workspace_path: container.workspace_path.clone(),
-                                    source: container.source.clone(),
-                                    provider: container.provider,
-                                });
-                                self.view = View::Confirm;
-                            }
+            View::DiscoverDetail => match code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.discover_detail_scroll = self.discover_detail_scroll.saturating_add(1)
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.discover_detail_scroll = self.discover_detail_scroll.saturating_sub(1)
+                }
+                KeyCode::Char('a') => {
+                    if let Some(container) =
+                        self.discovered_containers.get(self.selected_discovered)
+                    {
+                        if container.source != DevcontainerSource::Devc {
+                            self.dialog_focus = DialogFocus::Cancel;
+                            self.confirm_action = Some(ConfirmAction::Adopt {
+                                container_id: container.id.0.clone(),
+                                container_name: container.name.clone(),
+                                workspace_path: container.workspace_path.clone(),
+                                source: container.source.clone(),
+                                provider: container.provider,
+                            });
+                            self.view = View::Confirm;
                         }
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             View::Shell => {} // Shell mode is handled in run() before event loop
             View::Help | View::Confirm => {} // Handled above
         }
@@ -1362,16 +1452,20 @@ impl App {
                 // Navigation
                 KeyCode::Char('j') | KeyCode::Down => {
                     if !self.discovered_containers.is_empty() {
-                        self.selected_discovered = (self.selected_discovered + 1) % self.discovered_containers.len();
-                        self.discovered_table_state.select(Some(self.selected_discovered));
+                        self.selected_discovered =
+                            (self.selected_discovered + 1) % self.discovered_containers.len();
+                        self.discovered_table_state
+                            .select(Some(self.selected_discovered));
                     }
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     if !self.discovered_containers.is_empty() {
-                        self.selected_discovered = self.selected_discovered
+                        self.selected_discovered = self
+                            .selected_discovered
                             .checked_sub(1)
                             .unwrap_or(self.discovered_containers.len() - 1);
-                        self.discovered_table_state.select(Some(self.selected_discovered));
+                        self.discovered_table_state
+                            .select(Some(self.selected_discovered));
                     }
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
@@ -1381,7 +1475,8 @@ impl App {
                 KeyCode::Char('G') | KeyCode::End => {
                     if !self.discovered_containers.is_empty() {
                         self.selected_discovered = self.discovered_containers.len() - 1;
-                        self.discovered_table_state.select(Some(self.selected_discovered));
+                        self.discovered_table_state
+                            .select(Some(self.selected_discovered));
                     }
                 }
                 // Adopt selected container
@@ -1399,7 +1494,8 @@ impl App {
                             });
                             self.view = View::Confirm;
                         } else {
-                            self.status_message = Some("Container is already managed by devc".to_string());
+                            self.status_message =
+                                Some("Container is already managed by devc".to_string());
                         }
                     }
                 }
@@ -1409,7 +1505,12 @@ impl App {
                         let container = &self.discovered_containers[self.selected_discovered];
                         let provider_type = container.provider;
                         let container_id = container.id.clone();
-                        match create_provider(provider_type, &self.manager.read().await.global_config()).await {
+                        match create_provider(
+                            provider_type,
+                            self.manager.read().await.global_config(),
+                        )
+                        .await
+                        {
                             Ok(provider) => match provider.inspect(&container_id).await {
                                 Ok(details) => {
                                     self.discover_detail = Some(details);
@@ -1445,7 +1546,10 @@ impl App {
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     if !self.containers.is_empty() {
-                        self.selected = self.selected.checked_sub(1).unwrap_or(self.containers.len() - 1);
+                        self.selected = self
+                            .selected
+                            .checked_sub(1)
+                            .unwrap_or(self.containers.len() - 1);
                         self.containers_table_state.select(Some(self.selected));
                     }
                 }
@@ -1482,7 +1586,8 @@ impl App {
                     if !self.containers.is_empty() {
                         let container = &self.containers[self.selected];
                         if container.status.is_available() {
-                            self.status_message = Some("Not registered — nothing to remove".to_string());
+                            self.status_message =
+                                Some("Not registered — nothing to remove".to_string());
                         } else {
                             self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
                             self.dialog_focus = DialogFocus::Cancel;
@@ -1493,7 +1598,9 @@ impl App {
                 KeyCode::Char('f') => {
                     if !self.containers.is_empty() {
                         let container = &self.containers[self.selected];
-                        if container.source != DevcontainerSource::Devc && !container.status.is_available() {
+                        if container.source != DevcontainerSource::Devc
+                            && !container.status.is_available()
+                        {
                             self.confirm_action = Some(ConfirmAction::Forget {
                                 id: container.id.clone(),
                                 name: container.name.clone(),
@@ -1501,7 +1608,8 @@ impl App {
                             self.dialog_focus = DialogFocus::Cancel;
                             self.view = View::Confirm;
                         } else if container.source == DevcontainerSource::Devc {
-                            self.status_message = Some("Cannot forget devc-created containers".to_string());
+                            self.status_message =
+                                Some("Cannot forget devc-created containers".to_string());
                         }
                     }
                 }
@@ -1533,7 +1641,8 @@ impl App {
                     }
                     #[cfg(not(unix))]
                     {
-                        self.status_message = Some("Shell not supported on this platform".to_string());
+                        self.status_message =
+                            Some("Shell not supported on this platform".to_string());
                     }
                 }
 
@@ -1554,15 +1663,18 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => {
                 if !self.providers.is_empty() {
                     self.selected_provider = (self.selected_provider + 1) % self.providers.len();
-                    self.providers_table_state.select(Some(self.selected_provider));
+                    self.providers_table_state
+                        .select(Some(self.selected_provider));
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if !self.providers.is_empty() {
-                    self.selected_provider = self.selected_provider
+                    self.selected_provider = self
+                        .selected_provider
                         .checked_sub(1)
                         .unwrap_or(self.providers.len() - 1);
-                    self.providers_table_state.select(Some(self.selected_provider));
+                    self.providers_table_state
+                        .select(Some(self.selected_provider));
                 }
             }
 
@@ -1634,7 +1746,8 @@ impl App {
                                 self.providers[self.selected_provider].socket = new_value;
                             }
                         }
-                        self.status_message = Some("Socket path updated. Press 's' to save.".to_string());
+                        self.status_message =
+                            Some("Socket path updated. Press 's' to save.".to_string());
                     }
                 }
                 KeyCode::Esc => {
@@ -1680,14 +1793,16 @@ impl App {
                                 self.status_message = Some("Connection successful!".to_string());
                             }
                             Err(e) => {
-                                self.provider_detail_state.set_connection_result(false, Some(e.to_string()));
+                                self.provider_detail_state
+                                    .set_connection_result(false, Some(e.to_string()));
                                 self.providers[self.selected_provider].connected = false;
                                 self.status_message = Some(format!("Connection failed: {}", e));
                             }
                         }
                     } else {
                         let msg = format!("Socket not found: {}", socket_path);
-                        self.provider_detail_state.set_connection_result(false, Some(msg.clone()));
+                        self.provider_detail_state
+                            .set_connection_result(false, Some(msg.clone()));
                         self.providers[self.selected_provider].connected = false;
                         self.status_message = Some(msg);
                     }
@@ -1792,7 +1907,8 @@ impl App {
                     let current = self.compose_state.selected_service as isize;
                     self.compose_state.selected_service =
                         ((current + delta).rem_euclid(len as isize)) as usize;
-                    self.compose_state.services_table_state
+                    self.compose_state
+                        .services_table_state
                         .select(Some(self.compose_state.selected_service));
                 }
             }
@@ -1805,7 +1921,8 @@ impl App {
         code: KeyCode,
         _modifiers: KeyModifiers,
     ) -> AppResult<()> {
-        let has_services = self.selected_container()
+        let has_services = self
+            .selected_container()
             .and_then(|c| self.compose_state.services.get(&c.id))
             .map(|s| !s.is_empty())
             .unwrap_or(false);
@@ -1868,11 +1985,7 @@ impl App {
     }
 
     /// Handle build output view keys
-    async fn handle_build_key(
-        &mut self,
-        code: KeyCode,
-        _modifiers: KeyModifiers,
-    ) -> AppResult<()> {
+    async fn handle_build_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> AppResult<()> {
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.build_output_scroll < self.build_output.len().saturating_sub(1) {
@@ -1900,7 +2013,10 @@ impl App {
                 if let Err(e) = copy_to_clipboard(&content) {
                     self.status_message = Some(format!("Failed to copy: {}", e));
                 } else {
-                    self.status_message = Some(format!("Copied {} lines to clipboard", self.build_output.len()));
+                    self.status_message = Some(format!(
+                        "Copied {} lines to clipboard",
+                        self.build_output.len()
+                    ));
                 }
             }
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -1917,11 +2033,7 @@ impl App {
     }
 
     /// Handle logs view keys with vim-like navigation
-    async fn handle_logs_key(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> AppResult<()> {
+    async fn handle_logs_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> AppResult<()> {
         let page_size = 20;
 
         match code {
@@ -1940,15 +2052,15 @@ impl App {
                 self.logs_scroll = self.logs.len().saturating_sub(1);
             }
             KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.logs_scroll = (self.logs_scroll + page_size / 2)
-                    .min(self.logs.len().saturating_sub(1));
+                self.logs_scroll =
+                    (self.logs_scroll + page_size / 2).min(self.logs.len().saturating_sub(1));
             }
             KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.logs_scroll = self.logs_scroll.saturating_sub(page_size / 2);
             }
             KeyCode::PageDown => {
-                self.logs_scroll = (self.logs_scroll + page_size)
-                    .min(self.logs.len().saturating_sub(1));
+                self.logs_scroll =
+                    (self.logs_scroll + page_size).min(self.logs.len().saturating_sub(1));
             }
             KeyCode::PageUp => {
                 self.logs_scroll = self.logs_scroll.saturating_sub(page_size);
@@ -1962,11 +2074,7 @@ impl App {
     }
 
     /// Handle Port Forwarding view keys
-    async fn handle_ports_key(
-        &mut self,
-        code: KeyCode,
-        _modifiers: KeyModifiers,
-    ) -> AppResult<()> {
+    async fn handle_ports_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> AppResult<()> {
         match code {
             // Navigation
             KeyCode::Char('j') | KeyCode::Down => {
@@ -2011,11 +2119,20 @@ impl App {
                 } else if let Some(port) = self.port_state.selected_port_info() {
                     if port.is_forwarded {
                         // Look up protocol from auto_forward_configs for this port
-                        let protocol = self.port_state.provider_container_id.as_ref().and_then(|cid| {
-                            self.port_state.auto_forward_configs.get(cid).and_then(|configs| {
-                                configs.iter().find(|c| c.port == port.port).and_then(|c| c.protocol.as_deref())
-                            })
-                        });
+                        let protocol =
+                            self.port_state
+                                .provider_container_id
+                                .as_ref()
+                                .and_then(|cid| {
+                                    self.port_state.auto_forward_configs.get(cid).and_then(
+                                        |configs| {
+                                            configs
+                                                .iter()
+                                                .find(|c| c.port == port.port)
+                                                .and_then(|c| c.protocol.as_deref())
+                                        },
+                                    )
+                                });
                         if let Err(e) = open_in_browser(port.port, protocol) {
                             self.status_message = Some(format!("Failed to open browser: {}", e));
                         }
@@ -2031,7 +2148,8 @@ impl App {
                     self.status_message = Some("socat required - press 'i' to install".to_string());
                 } else {
                     let ports_to_forward: Vec<u16> = self
-                        .port_state.detected_ports
+                        .port_state
+                        .detected_ports
                         .iter()
                         .filter(|p| !p.is_forwarded)
                         .map(|p| p.port)
@@ -2049,7 +2167,9 @@ impl App {
 
             // Install socat
             KeyCode::Char('i') => {
-                if self.port_state.socat_installed == Some(false) && !self.port_state.socat_installing {
+                if self.port_state.socat_installed == Some(false)
+                    && !self.port_state.socat_installing
+                {
                     self.install_socat_in_container();
                 }
             }
@@ -2079,7 +2199,8 @@ impl App {
         // Resolve runtime args for this container's provider
         let (rt_program, rt_prefix) = {
             let manager = self.manager.read().await;
-            manager.runtime_args_for(container)
+            manager
+                .runtime_args_for(container)
                 .unwrap_or_else(|_| (container.provider.to_string(), vec![]))
         };
 
@@ -2092,7 +2213,8 @@ impl App {
         );
 
         // Check if socat is installed
-        let socat_check = check_socat_installed(&rt_program, &rt_prefix, &provider_container_id).await;
+        let socat_check =
+            check_socat_installed(&rt_program, &rt_prefix, &provider_container_id).await;
         self.port_state.socat_installed = Some(socat_check);
         if !socat_check {
             self.status_message = Some("socat not installed - press 'i' to install".to_string());
@@ -2100,7 +2222,8 @@ impl App {
 
         // Get forwarded ports for this container
         let forwarded_ports: HashSet<u16> = self
-            .port_state.active_forwarders
+            .port_state
+            .active_forwarders
             .keys()
             .filter(|(cid, _)| cid == &provider_container_id)
             .map(|(_, port)| *port)
@@ -2113,11 +2236,18 @@ impl App {
             Ok(provider) => {
                 let provider_arc: Arc<dyn ContainerProvider + Send + Sync> = Arc::new(provider);
                 let container_id = devc_provider::ContainerId::new(&provider_container_id);
-                let mut rx = spawn_port_detector(provider_arc, container_id, container.provider, forwarded_ports);
+                let mut rx = spawn_port_detector(
+                    provider_arc,
+                    container_id,
+                    container.provider,
+                    forwarded_ports,
+                );
                 let tx = self.async_event_tx.clone();
                 let handle = tokio::spawn(async move {
                     while let Some(update) = rx.recv().await {
-                        if tx.send(AsyncEvent::PortDetected(update)).is_err() { break; }
+                        if tx.send(AsyncEvent::PortDetected(update)).is_err() {
+                            break;
+                        }
                     }
                 });
                 self.port_state.port_detect_handle = Some(handle);
@@ -2145,18 +2275,30 @@ impl App {
             None => return Ok(()),
         };
 
-        let program = self.port_state.runtime_program.clone().unwrap_or_else(|| "docker".to_string());
+        let program = self
+            .port_state
+            .runtime_program
+            .clone()
+            .unwrap_or_else(|| "docker".to_string());
         let prefix = self.port_state.runtime_prefix.clone();
 
         // Spawn forwarder (uses socat via exec, no SSH needed)
         match spawn_forwarder(program, prefix, container_id.clone(), port, port).await {
             Ok(forwarder) => {
-                self.port_state.active_forwarders.insert((container_id.clone(), port), forwarder);
+                self.port_state
+                    .active_forwarders
+                    .insert((container_id.clone(), port), forwarder);
                 // Update detected_ports to reflect forwarded state
-                if let Some(p) = self.port_state.detected_ports.iter_mut().find(|p| p.port == port) {
+                if let Some(p) = self
+                    .port_state
+                    .detected_ports
+                    .iter_mut()
+                    .find(|p| p.port == port)
+                {
                     p.is_forwarded = true;
                 }
-                self.status_message = Some(format!("Forwarding port {} -> localhost:{}", port, port));
+                self.status_message =
+                    Some(format!("Forwarding port {} -> localhost:{}", port, port));
             }
             Err(e) => {
                 self.status_message = Some(format!("Failed to forward port {}: {}", port, e));
@@ -2176,7 +2318,12 @@ impl App {
         if let Some(forwarder) = self.port_state.active_forwarders.remove(&key) {
             forwarder.stop().await;
             // Update detected_ports to reflect not forwarded state
-            if let Some(p) = self.port_state.detected_ports.iter_mut().find(|p| p.port == port) {
+            if let Some(p) = self
+                .port_state
+                .detected_ports
+                .iter_mut()
+                .find(|p| p.port == port)
+            {
                 p.is_forwarded = false;
             }
             self.status_message = Some(format!("Stopped forwarding port {}", port));
@@ -2191,7 +2338,8 @@ impl App {
         };
 
         let keys_to_remove: Vec<(String, u16)> = self
-            .port_state.active_forwarders
+            .port_state
+            .active_forwarders
             .keys()
             .filter(|(cid, _)| cid == &container_id)
             .cloned()
@@ -2217,7 +2365,11 @@ impl App {
             None => return,
         };
 
-        let program = self.port_state.runtime_program.clone().unwrap_or_else(|| "docker".to_string());
+        let program = self
+            .port_state
+            .runtime_program
+            .clone()
+            .unwrap_or_else(|| "docker".to_string());
         let prefix = self.port_state.runtime_prefix.clone();
 
         let tx = self.async_event_tx.clone();
@@ -2245,7 +2397,8 @@ impl App {
                 self.status_message = Some(format!("Failed to install socat: {}", msg));
             }
             InstallResult::NoPackageManager => {
-                self.status_message = Some("No supported package manager found in container".to_string());
+                self.status_message =
+                    Some("No supported package manager found in container".to_string());
             }
         }
     }
@@ -2256,14 +2409,12 @@ impl App {
         self.up_output.clear();
 
         let affected_id = match &result {
-            ContainerOpResult::Success(op) | ContainerOpResult::Failed(op, _) => {
-                match op {
-                    ContainerOperation::Starting { id, .. }
-                    | ContainerOperation::Stopping { id, .. }
-                    | ContainerOperation::Deleting { id, .. }
-                    | ContainerOperation::Up { id, .. } => Some(id.clone()),
-                }
-            }
+            ContainerOpResult::Success(op) | ContainerOpResult::Failed(op, _) => match op {
+                ContainerOperation::Starting { id, .. }
+                | ContainerOperation::Stopping { id, .. }
+                | ContainerOperation::Deleting { id, .. }
+                | ContainerOperation::Up { id, .. } => Some(id.clone()),
+            },
         };
 
         match result {
@@ -2278,10 +2429,18 @@ impl App {
             }
             ContainerOpResult::Failed(op, err) => {
                 let msg = match &op {
-                    ContainerOperation::Starting { name, .. } => format!("Start failed for {}: {}", name, err),
-                    ContainerOperation::Stopping { name, .. } => format!("Stop failed for {}: {}", name, err),
-                    ContainerOperation::Deleting { name, .. } => format!("Delete failed for {}: {}", name, err),
-                    ContainerOperation::Up { name, .. } => format!("Up failed for {}: {}", name, err),
+                    ContainerOperation::Starting { name, .. } => {
+                        format!("Start failed for {}: {}", name, err)
+                    }
+                    ContainerOperation::Stopping { name, .. } => {
+                        format!("Stop failed for {}: {}", name, err)
+                    }
+                    ContainerOperation::Deleting { name, .. } => {
+                        format!("Delete failed for {}: {}", name, err)
+                    }
+                    ContainerOperation::Up { name, .. } => {
+                        format!("Up failed for {}: {}", name, err)
+                    }
                 };
                 self.status_message = Some(msg);
             }
@@ -2339,7 +2498,8 @@ impl App {
             if let Err(e) = manager.setup_credentials_for_container(&container.id).await {
                 tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
             }
-            manager.runtime_args_for(container)
+            manager
+                .runtime_args_for(container)
                 .unwrap_or_else(|_| (container.provider.to_string(), vec![]))
         };
 
@@ -2350,11 +2510,20 @@ impl App {
         } else if let Some(user) = container.metadata.get("remote_user") {
             Some(user.clone())
         } else {
-            parsed.as_ref()
+            parsed
+                .as_ref()
                 .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()))
         };
-        let effective_working_dir = container.metadata.get("workspace_folder").cloned()
-            .or_else(|| parsed.as_ref().and_then(|c| c.devcontainer.workspace_folder.clone()));
+        let effective_working_dir =
+            container
+                .metadata
+                .get("workspace_folder")
+                .cloned()
+                .or_else(|| {
+                    parsed
+                        .as_ref()
+                        .and_then(|c| c.devcontainer.workspace_folder.clone())
+                });
 
         // Create a new session (PTY will be spawned in run_shell_session)
         self.shell_state.shell_sessions.insert(
@@ -2375,7 +2544,12 @@ impl App {
         let manager = Arc::clone(&self.manager);
         let state_id = container.id.clone();
         tokio::spawn(async move {
-            if let Err(e) = manager.read().await.run_post_attach_command(&state_id).await {
+            if let Err(e) = manager
+                .read()
+                .await
+                .run_post_attach_command(&state_id)
+                .await
+            {
                 tracing::warn!("postAttachCommand failed: {}", e);
             }
         });
@@ -2386,7 +2560,14 @@ impl App {
     }
 
     #[cfg(unix)]
-    fn make_shell_config(&self, runtime_program: String, runtime_prefix: Vec<String>, container_id: String, user: Option<String>, working_dir: Option<String>) -> ShellConfig {
+    fn make_shell_config(
+        &self,
+        runtime_program: String,
+        runtime_prefix: Vec<String>,
+        container_id: String,
+        user: Option<String>,
+        working_dir: Option<String>,
+    ) -> ShellConfig {
         ShellConfig {
             runtime_program,
             runtime_prefix,
@@ -2400,7 +2581,12 @@ impl App {
     /// Detect which shell is available in the container.
     /// Tests the configured shell first, falls back to /bin/sh.
     #[cfg(unix)]
-    fn detect_shell(program: &str, prefix: &[String], container_id: &str, preferred: &str) -> String {
+    fn detect_shell(
+        program: &str,
+        prefix: &[String],
+        container_id: &str,
+        preferred: &str,
+    ) -> String {
         let mut cmd = std::process::Command::new(program);
         cmd.args(prefix);
         cmd.args(["exec", container_id, "test", "-x", preferred]);
@@ -2435,7 +2621,15 @@ impl App {
         };
 
         // Extract session info we need before taking the PTY
-        let (container_name, provider_container_id, runtime_program, runtime_prefix, user, working_dir, has_pty) = {
+        let (
+            container_name,
+            provider_container_id,
+            runtime_program,
+            runtime_prefix,
+            user,
+            working_dir,
+            has_pty,
+        ) = {
             match self.shell_state.shell_sessions.get(&container_id) {
                 Some(s) => (
                     s.container_name.clone(),
@@ -2478,7 +2672,8 @@ impl App {
         // 5. Get or spawn PtyShell
         // Take the existing PTY out of the session (if any)
         let existing_pty = self
-            .shell_state.shell_sessions
+            .shell_state
+            .shell_sessions
             .get_mut(&container_id)
             .and_then(|s| s.pty.take());
 
@@ -2487,8 +2682,19 @@ impl App {
                 if !p.is_alive() {
                     // PTY died while we were away, spawn a new one below
                     drop(p);
-                    let mut config = self.make_shell_config(runtime_program.clone(), runtime_prefix.clone(), provider_container_id.clone(), user.clone(), working_dir.clone());
-                    config.shell = Self::detect_shell(&runtime_program, &runtime_prefix, &provider_container_id, &config.shell);
+                    let mut config = self.make_shell_config(
+                        runtime_program.clone(),
+                        runtime_prefix.clone(),
+                        provider_container_id.clone(),
+                        user.clone(),
+                        working_dir.clone(),
+                    );
+                    config.shell = Self::detect_shell(
+                        &runtime_program,
+                        &runtime_prefix,
+                        &provider_container_id,
+                        &config.shell,
+                    );
                     match PtyShell::spawn(&config) {
                         Ok(new_p) => new_p,
                         Err(e) => {
@@ -2506,10 +2712,7 @@ impl App {
                 } else {
                     // Reattach: restore alternate screen if child app was using it
                     if p.is_in_alternate_screen() {
-                        let _ = std::io::Write::write_all(
-                            &mut std::io::stdout(),
-                            b"\x1b[?1049h",
-                        );
+                        let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x1b[?1049h");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
                     p
@@ -2517,8 +2720,19 @@ impl App {
             }
             _ => {
                 // Spawn new PTY
-                let mut config = self.make_shell_config(runtime_program.clone(), runtime_prefix.clone(), provider_container_id.clone(), user.clone(), working_dir.clone());
-                config.shell = Self::detect_shell(&runtime_program, &runtime_prefix, &provider_container_id, &config.shell);
+                let mut config = self.make_shell_config(
+                    runtime_program.clone(),
+                    runtime_prefix.clone(),
+                    provider_container_id.clone(),
+                    user.clone(),
+                    working_dir.clone(),
+                );
+                config.shell = Self::detect_shell(
+                    &runtime_program,
+                    &runtime_prefix,
+                    &provider_container_id,
+                    &config.shell,
+                );
                 match PtyShell::spawn(&config) {
                     Ok(p) => p,
                     Err(e) => {
@@ -2557,10 +2771,7 @@ impl App {
                     }
                     // Leave child's alternate screen before entering TUI's
                     if was_alt {
-                        let _ = std::io::Write::write_all(
-                            &mut std::io::stdout(),
-                            b"\x1b[?1049l",
-                        );
+                        let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x1b[?1049l");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
                     self.status_message = Some(format!(
@@ -2620,9 +2831,15 @@ impl App {
 
         // Append ephemeral Available entries for unregistered configs
         if let Some(ref dir) = self.workspace_dir {
-            let unregistered = self.manager.read().await.find_unregistered_configs(dir).await;
+            let unregistered = self
+                .manager
+                .read()
+                .await
+                .find_unregistered_configs(dir)
+                .await;
             for (name, config_path, ws_path) in unregistered {
-                self.containers.push(make_available_entry(name, config_path, ws_path));
+                self.containers
+                    .push(make_available_entry(name, config_path, ws_path));
             }
         }
 
@@ -2637,7 +2854,9 @@ impl App {
 
         // Invalidate stale compose_services entries for containers that no longer exist
         let container_ids: HashSet<String> = self.containers.iter().map(|c| c.id.clone()).collect();
-        self.compose_state.services.retain(|id, _| container_ids.contains(id));
+        self.compose_state
+            .services
+            .retain(|id, _| container_ids.contains(id));
 
         Ok(())
     }
@@ -2647,12 +2866,15 @@ impl App {
         self.discovered_containers = self.manager.read().await.discover_all().await;
 
         // Ensure selected index is valid
-        if !self.discovered_containers.is_empty() && self.selected_discovered >= self.discovered_containers.len() {
+        if !self.discovered_containers.is_empty()
+            && self.selected_discovered >= self.discovered_containers.len()
+        {
             self.selected_discovered = self.discovered_containers.len() - 1;
         }
         // Sync table state
         if !self.discovered_containers.is_empty() {
-            self.discovered_table_state.select(Some(self.selected_discovered));
+            self.discovered_table_state
+                .select(Some(self.selected_discovered));
         }
 
         Ok(())
@@ -2673,8 +2895,16 @@ impl App {
         let name = container.name.clone();
 
         let op = match container.status {
-            DevcContainerStatus::Running => ContainerOperation::Stopping { id: id.clone(), name: name.clone() },
-            DevcContainerStatus::Stopped | DevcContainerStatus::Created => ContainerOperation::Starting { id: id.clone(), name: name.clone() },
+            DevcContainerStatus::Running => ContainerOperation::Stopping {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            DevcContainerStatus::Stopped | DevcContainerStatus::Created => {
+                ContainerOperation::Starting {
+                    id: id.clone(),
+                    name: name.clone(),
+                }
+            }
             _ => {
                 self.status_message = Some("Cannot start/stop in current state".to_string());
                 return Ok(());
@@ -2692,13 +2922,31 @@ impl App {
         tokio::spawn(async move {
             if is_start {
                 match manager.read().await.start(&id).await {
-                    Ok(()) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
-                    Err(e) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
+                    Ok(()) => {
+                        let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+                            op,
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(
+                            op,
+                            e.to_string(),
+                        )));
+                    }
                 }
             } else {
                 match manager.read().await.stop(&id).await {
-                    Ok(()) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
-                    Err(e) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
+                    Ok(()) => {
+                        let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+                            op,
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(
+                            op,
+                            e.to_string(),
+                        )));
+                    }
                 }
             }
         });
@@ -2716,13 +2964,22 @@ impl App {
         let is_available = self.containers[self.selected].status.is_available();
         if is_available {
             let config_path = self.containers[self.selected].config_path.clone();
-            let result = self.manager.read().await.init_from_config(&config_path).await;
+            let result = self
+                .manager
+                .read()
+                .await
+                .init_from_config(&config_path)
+                .await;
             match result {
                 Ok(Some(_cs)) => {
                     // Refresh so the new registered entry replaces the ephemeral one
                     self.refresh_containers().await?;
                     // Find the newly registered entry by its config_path
-                    if let Some(pos) = self.containers.iter().position(|c| c.config_path == config_path && !c.status.is_available()) {
+                    if let Some(pos) = self
+                        .containers
+                        .iter()
+                        .position(|c| c.config_path == config_path && !c.status.is_available())
+                    {
                         self.selected = pos;
                         self.containers_table_state.select(Some(pos));
                     }
@@ -2763,21 +3020,38 @@ impl App {
         let fwd_tx1 = event_tx.clone();
         tokio::spawn(async move {
             while let Some(msg) = progress_rx.recv().await {
-                if fwd_tx1.send(AsyncEvent::OperationProgress(msg)).is_err() { break; }
+                if fwd_tx1.send(AsyncEvent::OperationProgress(msg)).is_err() {
+                    break;
+                }
             }
         });
         let fwd_tx2 = event_tx.clone();
         tokio::spawn(async move {
             while let Some(line) = output_rx.recv().await {
-                if fwd_tx2.send(AsyncEvent::UpOutput(line)).is_err() { break; }
+                if fwd_tx2.send(AsyncEvent::UpOutput(line)).is_err() {
+                    break;
+                }
             }
         });
 
         let manager = Arc::clone(&self.manager);
         tokio::spawn(async move {
-            match manager.read().await.up_with_progress(&id, Some(&progress_tx), Some(&output_tx)).await {
-                Ok(()) => { let _ = event_tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
-                Err(e) => { let _ = event_tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
+            match manager
+                .read()
+                .await
+                .up_with_progress(&id, Some(&progress_tx), Some(&output_tx))
+                .await
+            {
+                Ok(()) => {
+                    let _ = event_tx.send(AsyncEvent::OperationComplete(
+                        ContainerOpResult::Success(op),
+                    ));
+                }
+                Err(e) => {
+                    let _ = event_tx.send(AsyncEvent::OperationComplete(
+                        ContainerOpResult::Failed(op, e.to_string()),
+                    ));
+                }
             }
         });
 
@@ -2795,17 +3069,23 @@ impl App {
         // Check if we should fetch logs for a companion service
         let companion = if self.view == View::ContainerDetail {
             let container_id = container.id.clone();
-            self.compose_state.services.get(&container_id).and_then(|services| {
-                services.get(self.compose_state.selected_service).and_then(|svc| {
-                    // If this is the primary service, use normal log path
-                    let is_primary = container.compose_service.as_deref() == Some(&svc.service_name);
-                    if is_primary {
-                        None
-                    } else {
-                        Some((svc.container_id.clone(), svc.service_name.clone()))
-                    }
+            self.compose_state
+                .services
+                .get(&container_id)
+                .and_then(|services| {
+                    services
+                        .get(self.compose_state.selected_service)
+                        .and_then(|svc| {
+                            // If this is the primary service, use normal log path
+                            let is_primary =
+                                container.compose_service.as_deref() == Some(&svc.service_name);
+                            if is_primary {
+                                None
+                            } else {
+                                Some((svc.container_id.clone(), svc.service_name.clone()))
+                            }
+                        })
                 })
-            })
         } else {
             None
         };
@@ -2865,7 +3145,13 @@ impl App {
         self.loading = true;
         self.compose_state.logs_service_name = None;
 
-        match self.manager.read().await.logs(&container.id, Some(1000)).await {
+        match self
+            .manager
+            .read()
+            .await
+            .logs(&container.id, Some(1000))
+            .await
+        {
             Ok(lines) => {
                 self.logs = lines;
                 self.logs_scroll = self.logs.len().saturating_sub(1);
@@ -2891,12 +3177,17 @@ impl App {
                 // Clean up any shell session for this container
                 self.shell_state.shell_sessions.remove(&id);
 
-                let name = self.containers.iter()
+                let name = self
+                    .containers
+                    .iter()
                     .find(|c| c.id == id)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| id.clone());
 
-                let op = ContainerOperation::Deleting { id: id.clone(), name };
+                let op = ContainerOperation::Deleting {
+                    id: id.clone(),
+                    name,
+                };
                 self.container_op = Some(op.clone());
                 self.loading = true;
                 self.spinner_frame = 0;
@@ -2906,8 +3197,16 @@ impl App {
                 let manager = Arc::clone(&self.manager);
                 tokio::spawn(async move {
                     match manager.read().await.remove(&id, true).await {
-                        Ok(()) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
-                        Err(e) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
+                        Ok(()) => {
+                            let _ = tx.send(AsyncEvent::OperationComplete(
+                                ContainerOpResult::Success(op),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AsyncEvent::OperationComplete(
+                                ContainerOpResult::Failed(op, e.to_string()),
+                            ));
+                        }
                     }
                 });
             }
@@ -2918,12 +3217,17 @@ impl App {
                 // Clean up any shell session for this container
                 self.shell_state.shell_sessions.remove(&id);
 
-                let name = self.containers.iter()
+                let name = self
+                    .containers
+                    .iter()
                     .find(|c| c.id == id)
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| id.clone());
 
-                let op = ContainerOperation::Stopping { id: id.clone(), name };
+                let op = ContainerOperation::Stopping {
+                    id: id.clone(),
+                    name,
+                };
                 self.container_op = Some(op.clone());
                 self.loading = true;
                 self.spinner_frame = 0;
@@ -2933,8 +3237,16 @@ impl App {
                 let manager = Arc::clone(&self.manager);
                 tokio::spawn(async move {
                     match manager.read().await.stop(&id).await {
-                        Ok(()) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
-                        Err(e) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
+                        Ok(()) => {
+                            let _ = tx.send(AsyncEvent::OperationComplete(
+                                ContainerOpResult::Success(op),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AsyncEvent::OperationComplete(
+                                ContainerOpResult::Failed(op, e.to_string()),
+                            ));
+                        }
                     }
                 });
             }
@@ -2952,7 +3264,9 @@ impl App {
                 let fwd_tx = event_tx.clone();
                 tokio::spawn(async move {
                     while let Some(line) = progress_rx.recv().await {
-                        if fwd_tx.send(AsyncEvent::BuildProgress(line)).is_err() { break; }
+                        if fwd_tx.send(AsyncEvent::BuildProgress(line)).is_err() {
+                            break;
+                        }
                     }
                 });
 
@@ -2964,7 +3278,12 @@ impl App {
                 // Spawn background task for rebuild
                 tokio::spawn(async move {
                     let _ = progress_tx.send("Starting rebuild...".to_string());
-                    match manager.read().await.rebuild_with_progress(&id, no_cache, progress_tx.clone()).await {
+                    match manager
+                        .read()
+                        .await
+                        .rebuild_with_progress(&id, no_cache, progress_tx.clone())
+                        .await
+                    {
                         Ok(()) => {
                             // Success message is sent by rebuild_with_progress
                         }
@@ -2996,20 +3315,29 @@ impl App {
                 if let Err(e) = self.config.save() {
                     self.status_message = Some(format!("Failed to save: {}", e));
                 } else {
-                    self.status_message = Some(format!("{} set as default provider", provider_name));
+                    self.status_message =
+                        Some(format!("{} set as default provider", provider_name));
 
                     // Try to reconnect with the new provider
                     self.retry_connection().await?;
                 }
             }
-            ConfirmAction::Adopt { container_id, container_name, workspace_path, source, provider } => {
+            ConfirmAction::Adopt {
+                container_id,
+                container_name,
+                workspace_path,
+                source,
+                provider,
+            } => {
                 self.loading = true;
                 self.status_message = Some(format!("Adopting '{}'...", container_name));
 
                 // Use a block to ensure the read guard is dropped before refresh_containers
                 let adopt_result = {
                     let manager = self.manager.read().await;
-                    manager.adopt(&container_id, workspace_path.as_deref(), source, provider).await
+                    manager
+                        .adopt(&container_id, workspace_path.as_deref(), source, provider)
+                        .await
                 };
 
                 match adopt_result {
@@ -3036,7 +3364,8 @@ impl App {
 
                 match forget_result {
                     Ok(()) => {
-                        self.status_message = Some(format!("Forgot '{}' (container still running)", name));
+                        self.status_message =
+                            Some(format!("Forgot '{}' (container still running)", name));
                         self.refresh_containers().await?;
                     }
                     Err(e) => {
@@ -3072,7 +3401,11 @@ impl App {
     fn is_popup_view(&self) -> bool {
         matches!(
             self.view,
-            View::ContainerDetail | View::ProviderDetail | View::Ports | View::Logs | View::DiscoverDetail
+            View::ContainerDetail
+                | View::ProviderDetail
+                | View::Ports
+                | View::Logs
+                | View::DiscoverDetail
         )
     }
 
@@ -3192,8 +3525,12 @@ mod tests {
     #[test]
     fn test_compose_service_selection_forward_wraps() {
         let mut app = App::new_for_testing();
-        let container =
-            App::create_test_compose_container("myapp", DevcContainerStatus::Running, "proj", "app");
+        let container = App::create_test_compose_container(
+            "myapp",
+            DevcContainerStatus::Running,
+            "proj",
+            "app",
+        );
         let cid = container.id.clone();
         app.containers.push(container);
         app.selected = 0;
@@ -3234,8 +3571,12 @@ mod tests {
     #[test]
     fn test_compose_service_selection_backward_wraps() {
         let mut app = App::new_for_testing();
-        let container =
-            App::create_test_compose_container("myapp", DevcContainerStatus::Running, "proj", "app");
+        let container = App::create_test_compose_container(
+            "myapp",
+            DevcContainerStatus::Running,
+            "proj",
+            "app",
+        );
         let cid = container.id.clone();
         app.containers.push(container);
         app.selected = 0;
@@ -3271,8 +3612,12 @@ mod tests {
     #[test]
     fn test_compose_service_selection_empty_noop() {
         let mut app = App::new_for_testing();
-        let container =
-            App::create_test_compose_container("myapp", DevcContainerStatus::Running, "proj", "app");
+        let container = App::create_test_compose_container(
+            "myapp",
+            DevcContainerStatus::Running,
+            "proj",
+            "app",
+        );
         app.containers.push(container);
         app.selected = 0;
         // No services in compose_services map

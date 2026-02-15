@@ -1,8 +1,8 @@
 //! Lifecycle command execution for ContainerManager
 
 use crate::{
-    run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container,
-    CoreError, DotfilesManager, Result, SshManager,
+    run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, CoreError,
+    DotfilesManager, Result, SshManager,
 };
 use devc_provider::{ContainerId, ContainerProvider, ContainerStatus};
 use tokio::sync::mpsc;
@@ -176,8 +176,7 @@ impl ContainerManager {
                             cs.metadata
                                 .insert("ssh_available".to_string(), "true".to_string());
                             if let Some(u) = user {
-                                cs.metadata
-                                    .insert("remote_user".to_string(), u.to_string());
+                                cs.metadata.insert("remote_user".to_string(), u.to_string());
                             }
                         }
                     }
@@ -232,9 +231,10 @@ impl ContainerManager {
         let provider = self.require_container_provider(&container_state)?;
 
         let container = self.load_container(&container_state.config_path)?;
-        let container_id_str = container_state.container_id.as_ref().ok_or_else(|| {
-            CoreError::InvalidState("Container not created yet".to_string())
-        })?;
+        let container_id_str = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container not created yet".to_string()))?;
         let cid = ContainerId::new(container_id_str);
 
         // Feature postAttachCommands run first (per spec)

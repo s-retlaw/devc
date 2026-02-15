@@ -5,7 +5,9 @@ pub(super) fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
         Some(ConfirmAction::Delete(id)) => {
             let container = app.containers.iter().find(|c| &c.id == id);
             let name = container.map(|c| c.name.as_str()).unwrap_or(id);
-            let is_adopted = container.map(|c| c.source != DevcontainerSource::Devc).unwrap_or(false);
+            let is_adopted = container
+                .map(|c| c.source != DevcontainerSource::Devc)
+                .unwrap_or(false);
             let has_container = container.map(|c| c.container_id.is_some()).unwrap_or(false);
             let msg = if is_adopted {
                 format!("Stop tracking '{}'? (container will not be deleted)", name)
@@ -25,7 +27,10 @@ pub(super) fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or(id);
             draw_simple_confirm_dialog(frame, app, area, &format!("Stop container '{}'?", name));
         }
-        Some(ConfirmAction::Rebuild { id, provider_change }) => {
+        Some(ConfirmAction::Rebuild {
+            id,
+            provider_change,
+        }) => {
             let name = app
                 .containers
                 .iter()
@@ -58,20 +63,10 @@ pub(super) fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
             );
         }
         Some(ConfirmAction::CancelBuild) => {
-            draw_simple_confirm_dialog(
-                frame,
-                app,
-                area,
-                "Cancel build in progress?",
-            );
+            draw_simple_confirm_dialog(frame, app, area, "Cancel build in progress?");
         }
         Some(ConfirmAction::QuitApp) => {
-            draw_simple_confirm_dialog(
-                frame,
-                app,
-                area,
-                "Quit devc?",
-            );
+            draw_simple_confirm_dialog(frame, app, area, "Quit devc?");
         }
         None => {}
     }
@@ -94,7 +89,12 @@ pub(super) fn draw_simple_confirm_dialog(frame: &mut Frame, app: &App, area: Rec
 }
 
 /// Draw the set default provider confirmation dialog
-pub(super) fn draw_set_provider_confirm_dialog(frame: &mut Frame, app: &App, area: Rect, provider_name: &str) {
+pub(super) fn draw_set_provider_confirm_dialog(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    provider_name: &str,
+) {
     let message = format!("Set {} as default provider?", provider_name);
 
     DialogBuilder::new("Set Default Provider")
@@ -124,8 +124,7 @@ pub(super) fn draw_rebuild_confirm_dialog(
 ) {
     // Pre-format strings to avoid lifetime issues
     let message = format!("Rebuild '{}'?", name);
-    let warning_text = provider_change
-        .map(|(old, new)| format!("{} -> {}", old, new));
+    let warning_text = provider_change.map(|(old, new)| format!("{} -> {}", old, new));
 
     let mut builder = DialogBuilder::new("Rebuild Container")
         .width(50)

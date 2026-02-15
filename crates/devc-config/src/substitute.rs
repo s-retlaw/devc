@@ -22,7 +22,10 @@ pub struct SubstitutionContext {
 }
 
 impl SubstitutionContext {
-    pub fn new(local_workspace_folder: impl Into<String>, container_workspace_folder: impl Into<String>) -> Self {
+    pub fn new(
+        local_workspace_folder: impl Into<String>,
+        container_workspace_folder: impl Into<String>,
+    ) -> Self {
         Self {
             local_workspace_folder: local_workspace_folder.into(),
             container_workspace_folder: container_workspace_folder.into(),
@@ -127,8 +130,14 @@ pub fn substitute_vec(input: &[String], ctx: &SubstitutionContext) -> Vec<String
 }
 
 /// Substitute variables in a HashMap's values
-pub fn substitute_map(input: &HashMap<String, String>, ctx: &SubstitutionContext) -> HashMap<String, String> {
-    input.iter().map(|(k, v)| (k.clone(), substitute(v, ctx))).collect()
+pub fn substitute_map(
+    input: &HashMap<String, String>,
+    ctx: &SubstitutionContext,
+) -> HashMap<String, String> {
+    input
+        .iter()
+        .map(|(k, v)| (k.clone(), substitute(v, ctx)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -142,15 +151,27 @@ mod tests {
     #[test]
     fn test_basic_substitution() {
         let ctx = test_ctx();
-        assert_eq!(substitute("${localWorkspaceFolder}", &ctx), "/home/user/project");
-        assert_eq!(substitute("${containerWorkspaceFolder}", &ctx), "/workspace");
+        assert_eq!(
+            substitute("${localWorkspaceFolder}", &ctx),
+            "/home/user/project"
+        );
+        assert_eq!(
+            substitute("${containerWorkspaceFolder}", &ctx),
+            "/workspace"
+        );
     }
 
     #[test]
     fn test_basename_substitution() {
         let ctx = test_ctx();
-        assert_eq!(substitute("${localWorkspaceFolderBasename}", &ctx), "project");
-        assert_eq!(substitute("${containerWorkspaceFolderBasename}", &ctx), "workspace");
+        assert_eq!(
+            substitute("${localWorkspaceFolderBasename}", &ctx),
+            "project"
+        );
+        assert_eq!(
+            substitute("${containerWorkspaceFolderBasename}", &ctx),
+            "workspace"
+        );
     }
 
     #[test]
@@ -158,7 +179,10 @@ mod tests {
         let ctx = test_ctx();
         std::env::set_var("DEVC_TEST_VAR", "hello");
         assert_eq!(substitute("${localEnv:DEVC_TEST_VAR}", &ctx), "hello");
-        assert_eq!(substitute("${localEnv:DEVC_TEST_MISSING:fallback}", &ctx), "fallback");
+        assert_eq!(
+            substitute("${localEnv:DEVC_TEST_MISSING:fallback}", &ctx),
+            "fallback"
+        );
         assert_eq!(substitute("${localEnv:DEVC_TEST_MISSING}", &ctx), "");
         std::env::remove_var("DEVC_TEST_VAR");
     }
@@ -166,7 +190,10 @@ mod tests {
     #[test]
     fn test_container_env_deferred() {
         let ctx = test_ctx();
-        assert_eq!(substitute("${containerEnv:HOME}", &ctx), "${containerEnv:HOME}");
+        assert_eq!(
+            substitute("${containerEnv:HOME}", &ctx),
+            "${containerEnv:HOME}"
+        );
     }
 
     #[test]
@@ -189,7 +216,10 @@ mod tests {
     fn test_mixed_text_and_variables() {
         let ctx = test_ctx();
         assert_eq!(
-            substitute("source=${localWorkspaceFolder}/.cache,target=${containerWorkspaceFolder}/.cache", &ctx),
+            substitute(
+                "source=${localWorkspaceFolder}/.cache,target=${containerWorkspaceFolder}/.cache",
+                &ctx
+            ),
             "source=/home/user/project/.cache,target=/workspace/.cache"
         );
     }
@@ -197,7 +227,10 @@ mod tests {
     #[test]
     fn test_substitute_opt() {
         let ctx = test_ctx();
-        assert_eq!(substitute_opt(&Some("${localWorkspaceFolder}".to_string()), &ctx), Some("/home/user/project".to_string()));
+        assert_eq!(
+            substitute_opt(&Some("${localWorkspaceFolder}".to_string()), &ctx),
+            Some("/home/user/project".to_string())
+        );
         assert_eq!(substitute_opt(&None, &ctx), None);
     }
 
@@ -213,7 +246,10 @@ mod tests {
     fn test_substitute_map() {
         let ctx = test_ctx();
         let mut input = HashMap::new();
-        input.insert("key".to_string(), "${containerWorkspaceFolder}/bin".to_string());
+        input.insert(
+            "key".to_string(),
+            "${containerWorkspaceFolder}/bin".to_string(),
+        );
         let result = substitute_map(&input, &ctx);
         assert_eq!(result.get("key").unwrap(), "/workspace/bin");
     }
@@ -221,19 +257,13 @@ mod tests {
     #[test]
     fn test_devcontainer_id_substitution() {
         let ctx = test_ctx().with_devcontainer_id("abc123".to_string());
-        assert_eq!(
-            substitute("vol-${devcontainerId}", &ctx),
-            "vol-abc123"
-        );
+        assert_eq!(substitute("vol-${devcontainerId}", &ctx), "vol-abc123");
     }
 
     #[test]
     fn test_devcontainer_id_not_set() {
         let ctx = test_ctx();
-        assert_eq!(
-            substitute("vol-${devcontainerId}", &ctx),
-            "vol-unknown"
-        );
+        assert_eq!(substitute("vol-${devcontainerId}", &ctx), "vol-unknown");
     }
 
     #[test]

@@ -8,11 +8,7 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
              Press 'D' to discover existing devcontainers.",
         )
         .style(Style::default().fg(Color::DarkGray))
-        .block(
-            Block::default()
-                .title(" Containers ")
-                .borders(Borders::ALL),
-        )
+        .block(Block::default().title(" Containers ").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
 
         frame.render_widget(empty, area);
@@ -28,7 +24,11 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         Cell::from("Provider"),
         Cell::from("Workspace"),
     ])
-    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
     .bottom_margin(1);
 
     // Build data rows
@@ -61,7 +61,7 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             // Format workspace path - show last component or truncate if too long
             let workspace = container.workspace_path.display().to_string();
             let workspace_display = if workspace.len() > 35 {
-                format!("...{}", &workspace[workspace.len()-32..])
+                format!("...{}", &workspace[workspace.len() - 32..])
             } else {
                 workspace
             };
@@ -83,7 +83,8 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
                 Cell::from(name_display).style(Style::default().bold()),
-                Cell::from(container.source.to_string()).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(container.source.to_string())
+                    .style(Style::default().fg(Color::DarkGray)),
                 Cell::from(container.status.to_string()).style(Style::default().fg(status_color)),
                 Cell::from(container.provider.to_string()),
                 Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
@@ -93,21 +94,17 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Define column widths
     let widths = [
-        Constraint::Length(3),   // Status icon
-        Constraint::Length(24),  // Name
-        Constraint::Length(8),   // Source
-        Constraint::Length(12),  // Status
-        Constraint::Length(8),   // Provider
-        Constraint::Min(10),     // Workspace (takes remaining)
+        Constraint::Length(3),  // Status icon
+        Constraint::Length(24), // Name
+        Constraint::Length(8),  // Source
+        Constraint::Length(12), // Status
+        Constraint::Length(8),  // Provider
+        Constraint::Min(10),    // Workspace (takes remaining)
     ];
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(
-            Block::default()
-                .title(" Containers ")
-                .borders(Borders::ALL),
-        )
+        .block(Block::default().title(" Containers ").borders(Borders::ALL))
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("▶ ");
 
@@ -143,7 +140,11 @@ pub(super) fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area:
         Cell::from("Source"),
         Cell::from("Workspace"),
     ])
-    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
     .bottom_margin(1);
 
     // Build data rows
@@ -174,7 +175,7 @@ pub(super) fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area:
 
             let workspace = container.workspace_path.as_deref().unwrap_or("-");
             let workspace_display = if workspace.len() > 30 {
-                format!("...{}", &workspace[workspace.len()-27..])
+                format!("...{}", &workspace[workspace.len() - 27..])
             } else {
                 workspace.to_string()
             };
@@ -190,7 +191,8 @@ pub(super) fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area:
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
                 Cell::from(name_display).style(Style::default().bold()),
-                Cell::from(format!("{}", container.status)).style(Style::default().fg(status_color)),
+                Cell::from(format!("{}", container.status))
+                    .style(Style::default().fg(status_color)),
                 Cell::from(provider_str).style(Style::default().fg(Color::Blue)),
                 Cell::from(source_str).style(Style::default().fg(Color::Cyan)),
                 Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
@@ -200,12 +202,12 @@ pub(super) fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area:
 
     // Define column widths
     let widths = [
-        Constraint::Length(3),   // Status icon
-        Constraint::Length(22),  // Name
-        Constraint::Length(10),  // Status
-        Constraint::Length(8),   // Provider
-        Constraint::Length(8),   // Source
-        Constraint::Min(20),     // Workspace (takes remaining)
+        Constraint::Length(3),  // Status icon
+        Constraint::Length(22), // Name
+        Constraint::Length(10), // Status
+        Constraint::Length(8),  // Provider
+        Constraint::Length(8),  // Source
+        Constraint::Min(20),    // Workspace (takes remaining)
     ];
 
     let table = Table::new(rows, widths)

@@ -195,9 +195,7 @@ async fn inject_helpers(
         return Ok(false);
     }
 
-    let original = sanitize_docker_helper_name(
-        &current_creds_store.unwrap_or_default(),
-    );
+    let original = sanitize_docker_helper_name(&current_creds_store.unwrap_or_default());
     tracing::info!(
         "Injecting credential helpers (original credsStore: {:?})",
         if original.is_empty() {
@@ -220,9 +218,7 @@ async fn inject_helpers(
     // 3. Read container's current git credential.helper
     let original_git_helper =
         read_container_git_credential_helper(provider, container_id, user).await;
-    let git_original = shell_escape_single_quotes(
-        &original_git_helper.unwrap_or_default(),
-    );
+    let git_original = shell_escape_single_quotes(&original_git_helper.unwrap_or_default());
 
     // 4. Generate git-credential-devc script
     let git_script = GIT_CREDENTIAL_HELPER.replace("{{original}}", &git_original);
@@ -306,10 +302,7 @@ async fn refresh_credentials(
                 &creds_content,
             )
             .await?;
-            tracing::debug!(
-                "Wrote Git credentials for {} hosts to tmpfs",
-                git_count
-            );
+            tracing::debug!("Wrote Git credentials for {} hosts to tmpfs", git_count);
         }
     }
 
@@ -467,9 +460,10 @@ async fn exec_script(
         privileged: false,
     };
 
-    let result = provider.exec(container_id, &config).await.map_err(|e| {
-        CoreError::CredentialError(format!("Failed to exec in container: {}", e))
-    })?;
+    let result = provider
+        .exec(container_id, &config)
+        .await
+        .map_err(|e| CoreError::CredentialError(format!("Failed to exec in container: {}", e)))?;
 
     if result.exit_code != 0 {
         return Err(CoreError::CredentialError(format!(
@@ -559,16 +553,19 @@ mod tests {
     #[test]
     fn test_git_helper_script_with_original() {
         let script = generate_git_helper_script("/usr/local/share/vscode/git-credential-helper.sh");
-        assert!(script.contains(
-            "ORIGINAL_HELPER='/usr/local/share/vscode/git-credential-helper.sh'"
-        ));
+        assert!(
+            script.contains("ORIGINAL_HELPER='/usr/local/share/vscode/git-credential-helper.sh'")
+        );
     }
 
     #[test]
     fn test_sanitize_docker_helper_name() {
         assert_eq!(sanitize_docker_helper_name("desktop"), "desktop");
         assert_eq!(sanitize_docker_helper_name("ecr-login"), "ecr-login");
-        assert_eq!(sanitize_docker_helper_name("dev-containers-abc123"), "dev-containers-abc123");
+        assert_eq!(
+            sanitize_docker_helper_name("dev-containers-abc123"),
+            "dev-containers-abc123"
+        );
         // Strips dangerous characters
         assert_eq!(sanitize_docker_helper_name("foo\"; rm -rf / #"), "foorm-rf");
         assert_eq!(sanitize_docker_helper_name(""), "");

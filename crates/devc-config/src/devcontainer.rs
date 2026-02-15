@@ -305,10 +305,7 @@ impl DevContainerConfig {
         let devcontainer_dir = dir.join(".devcontainer");
         if devcontainer_dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&devcontainer_dir) {
-                let mut subdirs: Vec<_> = entries
-                    .flatten()
-                    .filter(|e| e.path().is_dir())
-                    .collect();
+                let mut subdirs: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
                 subdirs.sort_by_key(|e| e.file_name());
 
                 for entry in subdirs {
@@ -402,7 +399,10 @@ impl DevContainerConfig {
             }
         } else if let Some(ref build) = self.build {
             ImageSource::Dockerfile {
-                path: build.dockerfile.clone().unwrap_or_else(|| "Dockerfile".to_string()),
+                path: build
+                    .dockerfile
+                    .clone()
+                    .unwrap_or_else(|| "Dockerfile".to_string()),
                 context: build.context.clone(),
                 args: build.args.clone(),
             }
@@ -716,7 +716,7 @@ fn strip_json_comments(input: &str) -> String {
                     chars.next();
                     while let Some(nc) = chars.next() {
                         if nc == '*' {
-                            if let Some(&'/' ) = chars.peek() {
+                            if let Some(&'/') = chars.peek() {
                                 chars.next();
                                 break;
                             }
@@ -797,12 +797,18 @@ mod tests {
         // String command
         let json = r#"{"postCreateCommand": "npm install"}"#;
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
-        assert!(matches!(config.post_create_command, Some(Command::String(_))));
+        assert!(matches!(
+            config.post_create_command,
+            Some(Command::String(_))
+        ));
 
         // Array command
         let json = r#"{"postCreateCommand": ["npm", "install"]}"#;
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
-        assert!(matches!(config.post_create_command, Some(Command::Array(_))));
+        assert!(matches!(
+            config.post_create_command,
+            Some(Command::Array(_))
+        ));
     }
 
     #[test]
@@ -821,9 +827,15 @@ mod tests {
         assert_eq!(config.init, Some(true));
         assert_eq!(config.privileged, Some(false));
         assert_eq!(config.cap_add.as_ref().unwrap().len(), 2);
-        assert_eq!(config.security_opt.as_ref().unwrap()[0], "seccomp=unconfined");
+        assert_eq!(
+            config.security_opt.as_ref().unwrap()[0],
+            "seccomp=unconfined"
+        );
         assert_eq!(config.override_command, Some(false));
-        assert_eq!(config.remote_env.as_ref().unwrap().get("EDITOR").unwrap(), "vim");
+        assert_eq!(
+            config.remote_env.as_ref().unwrap().get("EDITOR").unwrap(),
+            "vim"
+        );
         assert_eq!(config.shutdown_action, Some("stopContainer".to_string()));
     }
 
@@ -832,12 +844,18 @@ mod tests {
         // initializeCommand (spec name)
         let json = r#"{"initializeCommand": "echo hello"}"#;
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
-        assert!(matches!(config.initialize_command, Some(Command::String(_))));
+        assert!(matches!(
+            config.initialize_command,
+            Some(Command::String(_))
+        ));
 
         // initCommand (alias for backward compat)
         let json = r#"{"initCommand": "echo hello"}"#;
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
-        assert!(matches!(config.initialize_command, Some(Command::String(_))));
+        assert!(matches!(
+            config.initialize_command,
+            Some(Command::String(_))
+        ));
     }
 
     #[test]
@@ -848,7 +866,12 @@ mod tests {
     }
 
     /// Helper to build a PortForwardConfig concisely in tests
-    fn pfc(port: u16, action: AutoForwardAction, label: Option<&str>, protocol: Option<&str>) -> PortForwardConfig {
+    fn pfc(
+        port: u16,
+        action: AutoForwardAction,
+        label: Option<&str>,
+        protocol: Option<&str>,
+    ) -> PortForwardConfig {
         PortForwardConfig {
             port,
             action,
@@ -928,8 +951,14 @@ mod tests {
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
         let fwd = config.auto_forward_config();
         assert_eq!(fwd.len(), 2);
-        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::OpenBrowser, None, None));
-        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::OpenBrowserOnce, None, None));
+        assert_eq!(
+            fwd[0],
+            pfc(3000, AutoForwardAction::OpenBrowser, None, None)
+        );
+        assert_eq!(
+            fwd[1],
+            pfc(8080, AutoForwardAction::OpenBrowserOnce, None, None)
+        );
     }
 
     #[test]
@@ -941,8 +970,14 @@ mod tests {
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
         let fwd = config.auto_forward_config();
         assert_eq!(fwd.len(), 2);
-        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Notify, Some("App"), Some("https")));
-        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::Notify, Some("API"), None));
+        assert_eq!(
+            fwd[0],
+            pfc(3000, AutoForwardAction::Notify, Some("App"), Some("https"))
+        );
+        assert_eq!(
+            fwd[1],
+            pfc(8080, AutoForwardAction::Notify, Some("API"), None)
+        );
     }
 
     #[test]
@@ -957,8 +992,19 @@ mod tests {
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
         let fwd = config.auto_forward_config();
         assert_eq!(fwd.len(), 2);
-        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Silent, Some("Frontend"), Some("https")));
-        assert_eq!(fwd[1], pfc(8080, AutoForwardAction::Notify, Some("Backend"), None));
+        assert_eq!(
+            fwd[0],
+            pfc(
+                3000,
+                AutoForwardAction::Silent,
+                Some("Frontend"),
+                Some("https")
+            )
+        );
+        assert_eq!(
+            fwd[1],
+            pfc(8080, AutoForwardAction::Notify, Some("Backend"), None)
+        );
     }
 
     #[test]
@@ -973,7 +1019,10 @@ mod tests {
         let fwd = config.auto_forward_config();
         assert_eq!(fwd.len(), 2);
         assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Notify, None, None));
-        assert_eq!(fwd[1], pfc(9090, AutoForwardAction::OpenBrowser, Some("Metrics"), None));
+        assert_eq!(
+            fwd[1],
+            pfc(9090, AutoForwardAction::OpenBrowser, Some("Metrics"), None)
+        );
     }
 
     #[test]
@@ -987,7 +1036,10 @@ mod tests {
         let config: DevContainerConfig = serde_json::from_str(json).unwrap();
         let fwd = config.auto_forward_config();
         assert_eq!(fwd.len(), 1);
-        assert_eq!(fwd[0], pfc(3000, AutoForwardAction::Notify, Some("New Label"), None));
+        assert_eq!(
+            fwd[0],
+            pfc(3000, AutoForwardAction::Notify, Some("New Label"), None)
+        );
     }
 
     #[test]
@@ -1024,21 +1076,13 @@ mod tests {
         let dc = tmp.path().join(".devcontainer");
         std::fs::create_dir_all(dc.join("python")).unwrap();
         std::fs::create_dir_all(dc.join("node")).unwrap();
-        std::fs::write(
-            dc.join("devcontainer.json"),
-            r#"{"image": "ubuntu:22.04"}"#,
-        )
-        .unwrap();
+        std::fs::write(dc.join("devcontainer.json"), r#"{"image": "ubuntu:22.04"}"#).unwrap();
         std::fs::write(
             dc.join("python/devcontainer.json"),
             r#"{"image": "python:3.12"}"#,
         )
         .unwrap();
-        std::fs::write(
-            dc.join("node/devcontainer.json"),
-            r#"{"image": "node:20"}"#,
-        )
-        .unwrap();
+        std::fs::write(dc.join("node/devcontainer.json"), r#"{"image": "node:20"}"#).unwrap();
 
         let results = DevContainerConfig::load_all_from_dir(tmp.path());
         assert_eq!(results.len(), 3);
@@ -1054,11 +1098,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dc = tmp.path().join(".devcontainer");
         std::fs::create_dir_all(&dc).unwrap();
-        std::fs::write(
-            dc.join("devcontainer.json"),
-            r#"{"image": "ubuntu:22.04"}"#,
-        )
-        .unwrap();
+        std::fs::write(dc.join("devcontainer.json"), r#"{"image": "ubuntu:22.04"}"#).unwrap();
 
         let results = DevContainerConfig::load_all_from_dir(tmp.path());
         assert_eq!(results.len(), 1);
@@ -1083,11 +1123,7 @@ mod tests {
             r#"{"image": "ubuntu:22.04"}"#,
         )
         .unwrap();
-        std::fs::write(
-            dc.join("bad/devcontainer.json"),
-            "not valid json {{{",
-        )
-        .unwrap();
+        std::fs::write(dc.join("bad/devcontainer.json"), "not valid json {{{").unwrap();
 
         let results = DevContainerConfig::load_all_from_dir(tmp.path());
         assert_eq!(results.len(), 1);

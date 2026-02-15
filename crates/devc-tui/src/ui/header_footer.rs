@@ -92,13 +92,17 @@ pub(super) fn container_list_footer(app: &App) -> String {
     if action_part.is_empty() {
         "D: Discover  j/k: Navigate  Enter: Details  ?: Help  q: Quit".to_string()
     } else {
-        format!("D: Discover  j/k: Navigate  Enter: Details  {}  ?: Help  q: Quit", action_part)
+        format!(
+            "D: Discover  j/k: Navigate  Enter: Details  {}  ?: Help  q: Quit",
+            action_part
+        )
     }
 }
 
 /// Build context-sensitive footer help for the container detail view
 pub(super) fn container_detail_footer(app: &App) -> String {
-    let has_services = app.selected_container()
+    let has_services = app
+        .selected_container()
         .and_then(|c| app.compose_state.services.get(&c.id))
         .map(|s| !s.is_empty())
         .unwrap_or(false);
@@ -263,7 +267,11 @@ pub(super) fn draw_providers(frame: &mut Frame, app: &mut App, area: Rect) {
         Cell::from("Status"),
         Cell::from("Socket"),
     ])
-    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )
     .bottom_margin(1);
 
     // Build data rows
@@ -329,23 +337,19 @@ pub(super) fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
     let mut items: Vec<ListItem> = Vec::new();
 
     // Add a header explanation
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(
-            " Global settings that apply to all containers:",
-            Style::default().fg(Color::DarkGray).italic(),
-        ),
-    ])));
+    items.push(ListItem::new(Line::from(vec![Span::styled(
+        " Global settings that apply to all containers:",
+        Style::default().fg(Color::DarkGray).italic(),
+    )])));
 
     let mut field_index = 0;
     for section in SettingsSection::all() {
         // Section header
         items.push(ListItem::new(Line::from("")));
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(
-                format!(" {}", section.label()),
-                Style::default().fg(Color::Cyan).bold(),
-            ),
-        ])));
+        items.push(ListItem::new(Line::from(vec![Span::styled(
+            format!(" {}", section.label()),
+            Style::default().fg(Color::Cyan).bold(),
+        )])));
 
         // Fields in this section
         for field in section.fields() {
@@ -415,7 +419,10 @@ pub(super) fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
 pub(super) fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let general_help = vec![
         Line::from(""),
-        Line::from(Span::styled("Global Keys", Style::default().bold().underlined())),
+        Line::from(Span::styled(
+            "Global Keys",
+            Style::default().bold().underlined(),
+        )),
         Line::from(""),
         Line::from("  Tab         Next tab"),
         Line::from("  Shift+Tab   Previous tab"),
@@ -428,7 +435,10 @@ pub(super) fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
 
     let tab_help = match app.tab {
         Tab::Containers => vec![
-            Line::from(Span::styled("Containers Tab", Style::default().bold().underlined())),
+            Line::from(Span::styled(
+                "Containers Tab",
+                Style::default().bold().underlined(),
+            )),
             Line::from(""),
             Line::from("  j/Down      Move selection down"),
             Line::from("  k/Up        Move selection up"),
@@ -445,7 +455,10 @@ pub(super) fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             Line::from("  r/F5        Refresh list"),
         ],
         Tab::Providers => vec![
-            Line::from(Span::styled("Providers Tab", Style::default().bold().underlined())),
+            Line::from(Span::styled(
+                "Providers Tab",
+                Style::default().bold().underlined(),
+            )),
             Line::from(""),
             Line::from("  j/Down      Move selection down"),
             Line::from("  k/Up        Move selection up"),
@@ -457,7 +470,10 @@ pub(super) fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             Line::from("  Existing containers keep their original provider."),
         ],
         Tab::Settings => vec![
-            Line::from(Span::styled("Settings Tab", Style::default().bold().underlined())),
+            Line::from(Span::styled(
+                "Settings Tab",
+                Style::default().bold().underlined(),
+            )),
             Line::from(""),
             Line::from("  j/Down      Move to next setting"),
             Line::from("  k/Up        Move to previous setting"),

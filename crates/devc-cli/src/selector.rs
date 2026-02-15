@@ -204,7 +204,10 @@ fn render_selector(
     // Print help line
     write!(stdout, "\r\n")?;
     stdout.execute(SetForegroundColor(Color::DarkGrey))?;
-    write!(stdout, "[↑/↓ or j/k to move, Enter to select, Esc to cancel]")?;
+    write!(
+        stdout,
+        "[↑/↓ or j/k to move, Enter to select, Esc to cancel]"
+    )?;
     stdout.execute(ResetColor)?;
     stdout.flush()?;
 
@@ -269,7 +272,10 @@ fn rerender_selector(
     write!(stdout, "\r\n")?;
     stdout.execute(Clear(ClearType::CurrentLine))?;
     stdout.execute(SetForegroundColor(Color::DarkGrey))?;
-    write!(stdout, "[↑/↓ or j/k to move, Enter to select, Esc to cancel]")?;
+    write!(
+        stdout,
+        "[↑/↓ or j/k to move, Enter to select, Esc to cancel]"
+    )?;
     stdout.execute(ResetColor)?;
     stdout.flush()?;
 
@@ -339,7 +345,9 @@ mod tests {
         ];
         let filtered = SelectionContext::Running.filter(&containers);
         assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|c| c.status == DevcContainerStatus::Running));
+        assert!(filtered
+            .iter()
+            .all(|c| c.status == DevcContainerStatus::Running));
     }
 
     #[test]
