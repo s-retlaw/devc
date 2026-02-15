@@ -67,11 +67,11 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             };
 
             // Show [S] indicator if there's an active shell session for this container
-            let has_shell = app.shell_sessions.contains_key(&container.id);
+            let has_shell = app.shell_state.shell_sessions.contains_key(&container.id);
             let name_display = if has_shell {
                 format!("{} [S]", container.name)
             } else if container.compose_project.is_some() {
-                let suffix = match app.compose_services.get(&container.id) {
+                let suffix = match app.compose_state.compose_services.get(&container.id) {
                     Some(s) => format!(":{}", s.len()),
                     None => "...".to_string(),
                 };

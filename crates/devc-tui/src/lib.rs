@@ -4,9 +4,12 @@
 
 pub mod app;
 mod clipboard;
+pub mod compose_state;
 mod demo;
 mod event;
+pub mod port_state;
 pub mod ports;
+pub mod shell_state;
 pub mod settings;
 pub mod shell;
 pub mod tunnel;

@@ -2,12 +2,15 @@
 
 use crate::clipboard::copy_to_clipboard;
 use crate::event::{Event, EventHandler};
-use crate::ports::{spawn_port_detector, DetectedPort, PortDetectionUpdate};
+use crate::compose_state::ComposeViewState;
+use crate::port_state::PortForwardingState;
+use crate::ports::{spawn_port_detector, PortDetectionUpdate};
+use crate::shell_state::ShellState;
 use crate::settings::{ProviderDetailState, SettingsState};
 #[cfg(unix)]
 use crate::shell::PtyShell;
 use crate::shell::{ShellConfig, ShellExitReason};
-use crate::tunnel::{check_socat_installed, install_socat, open_in_browser, spawn_forwarder, InstallResult, PortForwarder};
+use crate::tunnel::{check_socat_installed, install_socat, open_in_browser, spawn_forwarder, InstallResult};
 use crate::{resume_tui, suspend_tui, ui};
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
@@ -279,37 +282,13 @@ pub struct App {
     /// Table state for providers view
     pub providers_table_state: TableState,
 
-    // Port forwarding state
-    /// Container currently being viewed for port forwarding (container_id from provider)
-    pub ports_container_id: Option<String>,
-    /// Provider container ID for the ports view
-    pub ports_provider_container_id: Option<String>,
-    /// Runtime program for the current ports view container
-    pub ports_runtime_program: Option<String>,
-    /// Runtime prefix args for the current ports view container
-    pub ports_runtime_prefix: Vec<String>,
-    /// Detected ports in current container
-    pub detected_ports: Vec<DetectedPort>,
-    /// Selected port index
-    pub selected_port: usize,
-    /// Table state for port list
-    pub ports_table_state: TableState,
-    /// Whether socat is installed in the container (None = not checked yet)
-    pub socat_installed: Option<bool>,
-    /// Whether socat installation is in progress
-    pub socat_installing: bool,
-    /// Spinner frame for install animation
+    // Port forwarding state (all fields in PortForwardingState)
+    pub port_state: PortForwardingState,
+    /// Spinner frame for install animation (shared across port install, build progress, container ops)
     pub spinner_frame: usize,
 
-    // Port forwarder management (persists across views)
-    /// Active port forwarders: (container_id, port) -> PortForwarder
-    pub active_forwarders: HashMap<(String, u16), PortForwarder>,
-
     // Shell session state
-    /// Persistent shell sessions keyed by container_id
-    pub shell_sessions: HashMap<String, ShellSession>,
-    /// Which container's shell is currently active (when View::Shell)
-    pub active_shell_container: Option<String>,
+    pub shell_state: ShellState,
 
     // Container operation spinner state
     /// Current container operation in progress (shown as spinner modal)
@@ -318,36 +297,13 @@ pub struct App {
     pub up_output: Vec<String>,
 
     // Compose service visibility state
-    /// Cached compose service info keyed by devc container ID
-    pub compose_services: HashMap<String, Vec<devc_provider::ComposeServiceInfo>>,
-    /// Table state for compose services in detail view
-    pub compose_services_table_state: TableState,
-    /// Currently selected service index in compose services table
-    pub compose_selected_service: usize,
-    /// Whether compose services are currently being loaded
-    pub compose_services_loading: bool,
-    /// Name of the service whose logs are being viewed (None = primary container)
-    pub logs_service_name: Option<String>,
-
-    // Auto port forwarding state
-    /// Background port detectors for auto-forwarding, keyed by provider container ID
-    pub auto_port_detectors: HashMap<String, mpsc::UnboundedReceiver<PortDetectionUpdate>>,
-    /// Auto-forward configurations per provider container ID
-    pub auto_forward_configs: HashMap<String, Vec<devc_config::PortForwardConfig>>,
-    /// Set of (provider_container_id, port) pairs that have been auto-forwarded
-    pub auto_forwarded_ports: HashSet<(String, u16)>,
-    /// Set of (provider_container_id, port) pairs where browser was already opened (for OpenBrowserOnce)
-    pub auto_opened_ports: HashSet<(String, u16)>,
-    /// Cached runtime args per provider container ID (for auto-forwarding)
-    auto_runtime_args: HashMap<String, (String, Vec<String>)>,
+    pub compose_state: ComposeViewState,
 
     // Unified async event channel
     /// Sender for background tasks to communicate with the main loop
     pub async_event_tx: mpsc::UnboundedSender<AsyncEvent>,
     /// Receiver for background task events (build progress, operation results, etc.)
     async_event_rx: mpsc::UnboundedReceiver<AsyncEvent>,
-    /// Handle for the active port detection task (aborted when ports view is closed)
-    port_detect_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -415,34 +371,14 @@ impl App {
             discovered_table_state: TableState::default().with_selected(0),
             providers_table_state: TableState::default().with_selected(0),
             // Port forwarding
-            ports_container_id: None,
-            ports_provider_container_id: None,
-            ports_runtime_program: None,
-            ports_runtime_prefix: Vec::new(),
-            detected_ports: Vec::new(),
-            selected_port: 0,
-            ports_table_state: TableState::default().with_selected(0),
-            socat_installed: None,
-            socat_installing: false,
+            port_state: PortForwardingState::new(),
             spinner_frame: 0,
-            active_forwarders: HashMap::new(),
-            shell_sessions: HashMap::new(),
-            active_shell_container: None,
+            shell_state: ShellState::new(),
             container_op: None,
             up_output: Vec::new(),
-            compose_services: HashMap::new(),
-            compose_services_table_state: TableState::default(),
-            compose_selected_service: 0,
-            compose_services_loading: false,
-            logs_service_name: None,
-            auto_port_detectors: HashMap::new(),
-            auto_forward_configs: HashMap::new(),
-            auto_forwarded_ports: HashSet::new(),
-            auto_opened_ports: HashSet::new(),
-            auto_runtime_args: HashMap::new(),
+            compose_state: ComposeViewState::new(),
             async_event_tx,
             async_event_rx,
-            port_detect_handle: None,
         }
     }
 
@@ -606,34 +542,14 @@ impl App {
             discovered_table_state: TableState::default().with_selected(0),
             providers_table_state: TableState::default().with_selected(0),
             // Port forwarding
-            ports_container_id: None,
-            ports_provider_container_id: None,
-            ports_runtime_program: None,
-            ports_runtime_prefix: Vec::new(),
-            detected_ports: Vec::new(),
-            selected_port: 0,
-            ports_table_state: TableState::default().with_selected(0),
-            socat_installed: None,
-            socat_installing: false,
+            port_state: PortForwardingState::new(),
             spinner_frame: 0,
-            active_forwarders: HashMap::new(),
-            shell_sessions: HashMap::new(),
-            active_shell_container: None,
+            shell_state: ShellState::new(),
             container_op: None,
             up_output: Vec::new(),
-            compose_services: HashMap::new(),
-            compose_services_table_state: TableState::default(),
-            compose_selected_service: 0,
-            compose_services_loading: false,
-            logs_service_name: None,
-            auto_port_detectors: HashMap::new(),
-            auto_forward_configs: HashMap::new(),
-            auto_forwarded_ports: HashSet::new(),
-            auto_opened_ports: HashSet::new(),
-            auto_runtime_args: HashMap::new(),
+            compose_state: ComposeViewState::new(),
             async_event_tx,
             async_event_rx,
-            port_detect_handle: None,
         })
     }
 
@@ -807,10 +723,10 @@ impl App {
         }
 
         // Cleanup: stop all forwarders and shell sessions on exit
-        for (_, forwarder) in self.active_forwarders.drain() {
+        for (_, forwarder) in self.port_state.active_forwarders.drain() {
             forwarder.stop().await;
         }
-        self.shell_sessions.clear();
+        self.shell_state.shell_sessions.clear();
 
         Ok(())
     }
@@ -846,33 +762,7 @@ impl App {
 
     /// Handle port detection update
     fn handle_port_update(&mut self, update: PortDetectionUpdate) {
-        // Update is_forwarded based on active tunnels
-        let forwarded_ports: HashSet<u16> = if let Some(ref container_id) = self.ports_provider_container_id {
-            self.active_forwarders
-                .keys()
-                .filter(|(cid, _)| cid == container_id)
-                .map(|(_, port)| *port)
-                .collect()
-        } else {
-            HashSet::new()
-        };
-
-        self.detected_ports = update
-            .ports
-            .into_iter()
-            .map(|mut p| {
-                p.is_forwarded = forwarded_ports.contains(&p.port);
-                p
-            })
-            .collect();
-
-        // Update table state if needed
-        if !self.detected_ports.is_empty() && self.selected_port >= self.detected_ports.len() {
-            self.selected_port = self.detected_ports.len() - 1;
-        }
-        if !self.detected_ports.is_empty() {
-            self.ports_table_state.select(Some(self.selected_port));
-        }
+        self.port_state.handle_port_update(update);
     }
 
     /// Ensure auto port detection is running for all running containers that declare ports.
@@ -895,20 +785,20 @@ impl App {
 
         // Remove detectors for containers that stopped
         let to_remove: Vec<String> = self
-            .auto_port_detectors
+            .port_state.auto_port_detectors
             .keys()
             .filter(|cid| !running_container_ids.contains_key(*cid))
             .cloned()
             .collect();
         for cid in to_remove {
-            self.auto_port_detectors.remove(&cid);
-            self.auto_forward_configs.remove(&cid);
+            self.port_state.auto_port_detectors.remove(&cid);
+            self.port_state.auto_forward_configs.remove(&cid);
         }
 
         // Collect containers that need a new detector
         let needs_detector: Vec<(String, String)> = running_container_ids
             .iter()
-            .filter(|(cid, _)| !self.auto_port_detectors.contains_key(*cid))
+            .filter(|(cid, _)| !self.port_state.auto_port_detectors.contains_key(*cid))
             .map(|(cid, did)| (cid.clone(), did.clone()))
             .collect();
 
@@ -952,16 +842,16 @@ impl App {
 
             let container_id = devc_provider::ContainerId::new(&provider_cid);
             let forwarded: HashSet<u16> = self
-                .active_forwarders
+                .port_state.active_forwarders
                 .keys()
                 .filter(|(cid, _)| cid == &provider_cid)
                 .map(|(_, port)| *port)
                 .collect();
 
             let rx = spawn_port_detector(provider_arc, container_id, container_provider_type, forwarded);
-            self.auto_port_detectors.insert(provider_cid.clone(), rx);
-            self.auto_forward_configs.insert(provider_cid.clone(), auto_fwd);
-            self.auto_runtime_args.insert(provider_cid, rt_args);
+            self.port_state.auto_port_detectors.insert(provider_cid.clone(), rx);
+            self.port_state.auto_forward_configs.insert(provider_cid.clone(), auto_fwd);
+            self.port_state.auto_runtime_args.insert(provider_cid, rt_args);
         }
     }
 
@@ -971,16 +861,16 @@ impl App {
     /// matches an auto-forward config entry (and action != Ignore, and not already
     /// forwarded), spawns a forwarder.
     async fn poll_auto_port_detectors(&mut self) {
-        let cids: Vec<String> = self.auto_port_detectors.keys().cloned().collect();
+        let cids: Vec<String> = self.port_state.auto_port_detectors.keys().cloned().collect();
         for cid in cids {
-            let rx = match self.auto_port_detectors.get_mut(&cid) {
+            let rx = match self.port_state.auto_port_detectors.get_mut(&cid) {
                 Some(rx) => rx,
                 None => continue,
             };
 
             // Drain all pending updates
             while let Ok(update) = rx.try_recv() {
-                let config = match self.auto_forward_configs.get(&cid) {
+                let config = match self.port_state.auto_forward_configs.get(&cid) {
                     Some(c) => c.clone(),
                     None => continue,
                 };
@@ -994,23 +884,23 @@ impl App {
                             continue;
                         }
                         let key = (cid.clone(), pfc.port);
-                        if self.auto_forwarded_ports.contains(&key) {
+                        if self.port_state.auto_forwarded_ports.contains(&key) {
                             continue;
                         }
-                        if self.active_forwarders.contains_key(&key) {
-                            self.auto_forwarded_ports.insert(key);
+                        if self.port_state.active_forwarders.contains_key(&key) {
+                            self.port_state.auto_forwarded_ports.insert(key);
                             continue;
                         }
 
                         // Auto-forward this port
-                        let (rt_prog, rt_prefix) = self.auto_runtime_args
+                        let (rt_prog, rt_prefix) = self.port_state.auto_runtime_args
                             .get(&cid)
                             .cloned()
                             .unwrap_or_else(|| ("docker".to_string(), vec![]));
                         match spawn_forwarder(rt_prog, rt_prefix, cid.clone(), pfc.port, pfc.port).await {
                             Ok(forwarder) => {
-                                self.active_forwarders.insert(key.clone(), forwarder);
-                                self.auto_forwarded_ports.insert(key.clone());
+                                self.port_state.active_forwarders.insert(key.clone(), forwarder);
+                                self.port_state.auto_forwarded_ports.insert(key.clone());
                                 match pfc.action {
                                     devc_config::AutoForwardAction::Notify => {
                                         let msg = if let Some(ref label) = pfc.label {
@@ -1030,8 +920,8 @@ impl App {
                                         let _ = open_in_browser(pfc.port, pfc.protocol.as_deref());
                                     }
                                     devc_config::AutoForwardAction::OpenBrowserOnce => {
-                                        if !self.auto_opened_ports.contains(&key) {
-                                            self.auto_opened_ports.insert(key);
+                                        if !self.port_state.auto_opened_ports.contains(&key) {
+                                            self.port_state.auto_opened_ports.insert(key);
                                             let _ = open_in_browser(pfc.port, pfc.protocol.as_deref());
                                         }
                                     }
@@ -1061,25 +951,25 @@ impl App {
         }
 
         // Already cached
-        if self.compose_services.contains_key(&container.id) {
+        if self.compose_state.compose_services.contains_key(&container.id) {
             return;
         }
 
-        self.compose_services_loading = true;
+        self.compose_state.compose_services_loading = true;
 
         // Load compose file paths from the devcontainer config
         let compose_info = {
             let core_container = match Container::from_config(&container.config_path) {
                 Ok(c) => c,
                 Err(_) => {
-                    self.compose_services_loading = false;
+                    self.compose_state.compose_services_loading = false;
                     return;
                 }
             };
             let files = match core_container.compose_files() {
                 Some(f) => f,
                 None => {
-                    self.compose_services_loading = false;
+                    self.compose_state.compose_services_loading = false;
                     return;
                 }
             };
@@ -1094,7 +984,7 @@ impl App {
         let provider = match Self::create_cli_provider(container.provider).await {
             Ok(p) => p,
             Err(_) => {
-                self.compose_services_loading = false;
+                self.compose_state.compose_services_loading = false;
                 return;
             }
         };
@@ -1104,15 +994,15 @@ impl App {
 
         match provider.compose_ps(&file_refs, &project_name, &workspace_path).await {
             Ok(services) => {
-                self.compose_services.insert(container.id.clone(), services);
+                self.compose_state.compose_services.insert(container.id.clone(), services);
             }
             Err(_) => {
                 // Store empty vec so we don't retry
-                self.compose_services.insert(container.id.clone(), Vec::new());
+                self.compose_state.compose_services.insert(container.id.clone(), Vec::new());
             }
         }
 
-        self.compose_services_loading = false;
+        self.compose_state.compose_services_loading = false;
     }
 
     /// Fetch inspect details for the currently selected managed container
@@ -1167,7 +1057,7 @@ impl App {
             }
             Event::Tick => {
                 // Advance spinner frame when installing or operating
-                if self.socat_installing || self.container_op.is_some() {
+                if self.port_state.socat_installing || self.container_op.is_some() {
                     self.spinner_frame = (self.spinner_frame + 1) % 10;
                 }
                 // Refresh container list periodically (only on Containers tab main view)
@@ -1198,11 +1088,11 @@ impl App {
         }
 
         // Cancel install if in progress (before global Ctrl+C handler)
-        if self.socat_installing
+        if self.port_state.socat_installing
             && ((code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 || code == KeyCode::Esc)
         {
-            self.socat_installing = false;
+            self.port_state.socat_installing = false;
             self.status_message = Some("Install cancelled".to_string());
             return Ok(());
         }
@@ -1596,8 +1486,8 @@ impl App {
                         self.view = View::ContainerDetail;
                         self.container_detail = None;
                         self.container_detail_scroll = 0;
-                        self.compose_selected_service = 0;
-                        self.compose_services_table_state.select(Some(0));
+                        self.compose_state.compose_selected_service = 0;
+                        self.compose_state.compose_services_table_state.select(Some(0));
                         self.fetch_compose_services().await;
                         self.fetch_container_detail().await;
                     }
@@ -1916,14 +1806,14 @@ impl App {
     fn move_compose_service_selection(&mut self, delta: isize) {
         if let Some(container) = self.selected_container() {
             let container_id = container.id.clone();
-            if let Some(services) = self.compose_services.get(&container_id) {
+            if let Some(services) = self.compose_state.compose_services.get(&container_id) {
                 if !services.is_empty() {
                     let len = services.len();
-                    let current = self.compose_selected_service as isize;
-                    self.compose_selected_service =
+                    let current = self.compose_state.compose_selected_service as isize;
+                    self.compose_state.compose_selected_service =
                         ((current + delta).rem_euclid(len as isize)) as usize;
-                    self.compose_services_table_state
-                        .select(Some(self.compose_selected_service));
+                    self.compose_state.compose_services_table_state
+                        .select(Some(self.compose_state.compose_selected_service));
                 }
             }
         }
@@ -1936,7 +1826,7 @@ impl App {
         _modifiers: KeyModifiers,
     ) -> AppResult<()> {
         let has_services = self.selected_container()
-            .and_then(|c| self.compose_services.get(&c.id))
+            .and_then(|c| self.compose_state.compose_services.get(&c.id))
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
@@ -1959,7 +1849,7 @@ impl App {
                 // Refresh: invalidate cached services and re-fetch
                 if let Some(container) = self.selected_container() {
                     let id = container.id.clone();
-                    self.compose_services.remove(&id);
+                    self.compose_state.compose_services.remove(&id);
                 }
                 self.fetch_compose_services().await;
             }
@@ -2100,37 +1990,37 @@ impl App {
         match code {
             // Navigation
             KeyCode::Char('j') | KeyCode::Down => {
-                if !self.detected_ports.is_empty() {
-                    self.selected_port = (self.selected_port + 1) % self.detected_ports.len();
-                    self.ports_table_state.select(Some(self.selected_port));
+                if !self.port_state.detected_ports.is_empty() {
+                    self.port_state.selected_port = (self.port_state.selected_port + 1) % self.port_state.detected_ports.len();
+                    self.port_state.ports_table_state.select(Some(self.port_state.selected_port));
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if !self.detected_ports.is_empty() {
-                    self.selected_port = self.selected_port
+                if !self.port_state.detected_ports.is_empty() {
+                    self.port_state.selected_port = self.port_state.selected_port
                         .checked_sub(1)
-                        .unwrap_or(self.detected_ports.len() - 1);
-                    self.ports_table_state.select(Some(self.selected_port));
+                        .unwrap_or(self.port_state.detected_ports.len() - 1);
+                    self.port_state.ports_table_state.select(Some(self.port_state.selected_port));
                 }
             }
             KeyCode::Char('g') | KeyCode::Home => {
-                if !self.detected_ports.is_empty() {
-                    self.selected_port = 0;
-                    self.ports_table_state.select(Some(0));
+                if !self.port_state.detected_ports.is_empty() {
+                    self.port_state.selected_port = 0;
+                    self.port_state.ports_table_state.select(Some(0));
                 }
             }
             KeyCode::Char('G') | KeyCode::End => {
-                if !self.detected_ports.is_empty() {
-                    self.selected_port = self.detected_ports.len() - 1;
-                    self.ports_table_state.select(Some(self.selected_port));
+                if !self.port_state.detected_ports.is_empty() {
+                    self.port_state.selected_port = self.port_state.detected_ports.len() - 1;
+                    self.port_state.ports_table_state.select(Some(self.port_state.selected_port));
                 }
             }
 
             // Forward selected port
             KeyCode::Char('f') => {
-                if self.socat_installed != Some(true) {
+                if self.port_state.socat_installed != Some(true) {
                     self.status_message = Some("socat required - press 'i' to install".to_string());
-                } else if let Some(port) = self.detected_ports.get(self.selected_port) {
+                } else if let Some(port) = self.port_state.detected_ports.get(self.port_state.selected_port) {
                     if !port.is_forwarded {
                         self.forward_port(port.port).await?;
                     }
@@ -2139,7 +2029,7 @@ impl App {
 
             // Stop forwarding
             KeyCode::Char('s') => {
-                if let Some(port) = self.detected_ports.get(self.selected_port) {
+                if let Some(port) = self.port_state.detected_ports.get(self.port_state.selected_port) {
                     if port.is_forwarded {
                         self.stop_forward(port.port).await;
                     }
@@ -2148,13 +2038,13 @@ impl App {
 
             // Open in browser
             KeyCode::Char('o') => {
-                if self.socat_installed != Some(true) {
+                if self.port_state.socat_installed != Some(true) {
                     self.status_message = Some("socat required - press 'i' to install".to_string());
-                } else if let Some(port) = self.detected_ports.get(self.selected_port) {
+                } else if let Some(port) = self.port_state.detected_ports.get(self.port_state.selected_port) {
                     if port.is_forwarded {
                         // Look up protocol from auto_forward_configs for this port
-                        let protocol = self.ports_provider_container_id.as_ref().and_then(|cid| {
-                            self.auto_forward_configs.get(cid).and_then(|configs| {
+                        let protocol = self.port_state.ports_provider_container_id.as_ref().and_then(|cid| {
+                            self.port_state.auto_forward_configs.get(cid).and_then(|configs| {
                                 configs.iter().find(|c| c.port == port.port).and_then(|c| c.protocol.as_deref())
                             })
                         });
@@ -2169,11 +2059,11 @@ impl App {
 
             // Forward all
             KeyCode::Char('a') => {
-                if self.socat_installed != Some(true) {
+                if self.port_state.socat_installed != Some(true) {
                     self.status_message = Some("socat required - press 'i' to install".to_string());
                 } else {
                     let ports_to_forward: Vec<u16> = self
-                        .detected_ports
+                        .port_state.detected_ports
                         .iter()
                         .filter(|p| !p.is_forwarded)
                         .map(|p| p.port)
@@ -2191,7 +2081,7 @@ impl App {
 
             // Install socat
             KeyCode::Char('i') => {
-                if self.socat_installed == Some(false) && !self.socat_installing {
+                if self.port_state.socat_installed == Some(false) && !self.port_state.socat_installing {
                     self.install_socat_in_container();
                 }
             }
@@ -2226,26 +2116,26 @@ impl App {
         };
 
         self.view = View::Ports;
-        self.ports_container_id = Some(container.id.clone());
-        self.ports_provider_container_id = Some(provider_container_id.clone());
-        self.ports_runtime_program = Some(rt_program.clone());
-        self.ports_runtime_prefix = rt_prefix.clone();
-        self.detected_ports.clear();
-        self.selected_port = 0;
-        self.ports_table_state.select(Some(0));
-        self.socat_installed = None; // Will be checked below
-        self.socat_installing = false;
+        self.port_state.ports_container_id = Some(container.id.clone());
+        self.port_state.ports_provider_container_id = Some(provider_container_id.clone());
+        self.port_state.ports_runtime_program = Some(rt_program.clone());
+        self.port_state.ports_runtime_prefix = rt_prefix.clone();
+        self.port_state.detected_ports.clear();
+        self.port_state.selected_port = 0;
+        self.port_state.ports_table_state.select(Some(0));
+        self.port_state.socat_installed = None; // Will be checked below
+        self.port_state.socat_installing = false;
 
         // Check if socat is installed
         let socat_check = check_socat_installed(&rt_program, &rt_prefix, &provider_container_id).await;
-        self.socat_installed = Some(socat_check);
+        self.port_state.socat_installed = Some(socat_check);
         if !socat_check {
             self.status_message = Some("socat not installed - press 'i' to install".to_string());
         }
 
         // Get forwarded ports for this container
         let forwarded_ports: HashSet<u16> = self
-            .active_forwarders
+            .port_state.active_forwarders
             .keys()
             .filter(|(cid, _)| cid == &provider_container_id)
             .map(|(_, port)| *port)
@@ -2265,7 +2155,7 @@ impl App {
                         if tx.send(AsyncEvent::PortDetected(update)).is_err() { break; }
                     }
                 });
-                self.port_detect_handle = Some(handle);
+                self.port_state.port_detect_handle = Some(handle);
                 self.status_message = Some("Detecting ports...".to_string());
             }
             Err(e) => {
@@ -2279,33 +2169,26 @@ impl App {
     /// Exit port forwarding view
     fn exit_ports_view(&mut self) {
         self.view = View::Main;
-        self.ports_container_id = None;
-        self.ports_provider_container_id = None;
-        self.ports_runtime_program = None;
-        self.ports_runtime_prefix.clear();
-        if let Some(handle) = self.port_detect_handle.take() { handle.abort(); }
-        self.detected_ports.clear();
-        self.socat_installed = None;
-        self.socat_installing = false;
+        self.port_state.clear_view_state();
         // Note: tunnels are NOT killed here - they persist
     }
 
     /// Forward a port from the current container
     async fn forward_port(&mut self, port: u16) -> AppResult<()> {
-        let container_id = match &self.ports_provider_container_id {
+        let container_id = match &self.port_state.ports_provider_container_id {
             Some(id) => id.clone(),
             None => return Ok(()),
         };
 
-        let program = self.ports_runtime_program.clone().unwrap_or_else(|| "docker".to_string());
-        let prefix = self.ports_runtime_prefix.clone();
+        let program = self.port_state.ports_runtime_program.clone().unwrap_or_else(|| "docker".to_string());
+        let prefix = self.port_state.ports_runtime_prefix.clone();
 
         // Spawn forwarder (uses socat via exec, no SSH needed)
         match spawn_forwarder(program, prefix, container_id.clone(), port, port).await {
             Ok(forwarder) => {
-                self.active_forwarders.insert((container_id.clone(), port), forwarder);
+                self.port_state.active_forwarders.insert((container_id.clone(), port), forwarder);
                 // Update detected_ports to reflect forwarded state
-                if let Some(p) = self.detected_ports.iter_mut().find(|p| p.port == port) {
+                if let Some(p) = self.port_state.detected_ports.iter_mut().find(|p| p.port == port) {
                     p.is_forwarded = true;
                 }
                 self.status_message = Some(format!("Forwarding port {} -> localhost:{}", port, port));
@@ -2319,16 +2202,16 @@ impl App {
 
     /// Stop forwarding a port
     async fn stop_forward(&mut self, port: u16) {
-        let container_id = match &self.ports_provider_container_id {
+        let container_id = match &self.port_state.ports_provider_container_id {
             Some(id) => id.clone(),
             None => return,
         };
 
         let key = (container_id, port);
-        if let Some(forwarder) = self.active_forwarders.remove(&key) {
+        if let Some(forwarder) = self.port_state.active_forwarders.remove(&key) {
             forwarder.stop().await;
             // Update detected_ports to reflect not forwarded state
-            if let Some(p) = self.detected_ports.iter_mut().find(|p| p.port == port) {
+            if let Some(p) = self.port_state.detected_ports.iter_mut().find(|p| p.port == port) {
                 p.is_forwarded = false;
             }
             self.status_message = Some(format!("Stopped forwarding port {}", port));
@@ -2337,26 +2220,26 @@ impl App {
 
     /// Stop all port forwards for the current container
     async fn stop_all_forwards_for_container(&mut self) {
-        let container_id = match &self.ports_provider_container_id {
+        let container_id = match &self.port_state.ports_provider_container_id {
             Some(id) => id.clone(),
             None => return,
         };
 
         let keys_to_remove: Vec<(String, u16)> = self
-            .active_forwarders
+            .port_state.active_forwarders
             .keys()
             .filter(|(cid, _)| cid == &container_id)
             .cloned()
             .collect();
 
         for key in keys_to_remove {
-            if let Some(forwarder) = self.active_forwarders.remove(&key) {
+            if let Some(forwarder) = self.port_state.active_forwarders.remove(&key) {
                 forwarder.stop().await;
             }
         }
 
         // Update all detected_ports to not forwarded
-        for p in &mut self.detected_ports {
+        for p in &mut self.port_state.detected_ports {
             p.is_forwarded = false;
         }
         self.status_message = Some("Stopped all port forwards".to_string());
@@ -2364,16 +2247,16 @@ impl App {
 
     /// Install socat in the current container (spawns background task)
     fn install_socat_in_container(&mut self) {
-        let container_id = match &self.ports_provider_container_id {
+        let container_id = match &self.port_state.ports_provider_container_id {
             Some(id) => id.clone(),
             None => return,
         };
 
-        let program = self.ports_runtime_program.clone().unwrap_or_else(|| "docker".to_string());
-        let prefix = self.ports_runtime_prefix.clone();
+        let program = self.port_state.ports_runtime_program.clone().unwrap_or_else(|| "docker".to_string());
+        let prefix = self.port_state.ports_runtime_prefix.clone();
 
         let tx = self.async_event_tx.clone();
-        self.socat_installing = true;
+        self.port_state.socat_installing = true;
         self.spinner_frame = 0;
         self.status_message = Some("Installing socat...".to_string());
 
@@ -2386,11 +2269,11 @@ impl App {
 
     /// Handle install result from background task
     fn handle_install_result(&mut self, result: InstallResult) {
-        self.socat_installing = false;
+        self.port_state.socat_installing = false;
 
         match result {
             InstallResult::Success => {
-                self.socat_installed = Some(true);
+                self.port_state.socat_installed = Some(true);
                 self.status_message = Some("socat installed successfully".to_string());
             }
             InstallResult::Failed(msg) => {
@@ -2444,7 +2327,7 @@ impl App {
 
         // Invalidate cached compose services so status gets refreshed
         if let Some(id) = affected_id {
-            self.compose_services.remove(&id);
+            self.compose_state.compose_services.remove(&id);
         }
         // Re-fetch if still in detail view
         if self.view == View::ContainerDetail {
@@ -2473,16 +2356,16 @@ impl App {
         let container_id = container.id.clone();
 
         // Check if we already have a session for this container
-        if let Some(session) = self.shell_sessions.get_mut(&container_id) {
+        if let Some(session) = self.shell_state.shell_sessions.get_mut(&container_id) {
             // Check if the PTY is still alive
             if session.pty.as_mut().is_some_and(|p| p.is_alive()) {
                 // Reattach to existing session
-                self.active_shell_container = Some(container_id);
+                self.shell_state.active_shell_container = Some(container_id);
                 self.view = View::Shell;
                 return Ok(());
             }
             // PTY is dead, remove the stale session - will create a new one below
-            self.shell_sessions.remove(&container_id);
+            self.shell_state.shell_sessions.remove(&container_id);
         }
 
         // Set up credential forwarding and resolve runtime args before spawning shell
@@ -2509,7 +2392,7 @@ impl App {
             .or_else(|| parsed.as_ref().and_then(|c| c.devcontainer.workspace_folder.clone()));
 
         // Create a new session (PTY will be spawned in run_shell_session)
-        self.shell_sessions.insert(
+        self.shell_state.shell_sessions.insert(
             container_id.clone(),
             ShellSession {
                 container_id: container_id.clone(),
@@ -2532,7 +2415,7 @@ impl App {
             }
         });
 
-        self.active_shell_container = Some(container_id);
+        self.shell_state.active_shell_container = Some(container_id);
         self.view = View::Shell;
         Ok(())
     }
@@ -2578,7 +2461,7 @@ impl App {
         terminal: &mut Terminal<B>,
         events: &mut Option<EventHandler>,
     ) -> AppResult<()> {
-        let container_id = match &self.active_shell_container {
+        let container_id = match &self.shell_state.active_shell_container {
             Some(id) => id.clone(),
             None => {
                 self.view = View::Main;
@@ -2588,7 +2471,7 @@ impl App {
 
         // Extract session info we need before taking the PTY
         let (container_name, provider_container_id, runtime_program, runtime_prefix, user, working_dir, has_pty) = {
-            match self.shell_sessions.get(&container_id) {
+            match self.shell_state.shell_sessions.get(&container_id) {
                 Some(s) => (
                     s.container_name.clone(),
                     s.provider_container_id.clone(),
@@ -2600,7 +2483,7 @@ impl App {
                 ),
                 None => {
                     self.view = View::Main;
-                    self.active_shell_container = None;
+                    self.shell_state.active_shell_container = None;
                     return Ok(());
                 }
             }
@@ -2630,7 +2513,7 @@ impl App {
         // 5. Get or spawn PtyShell
         // Take the existing PTY out of the session (if any)
         let existing_pty = self
-            .shell_sessions
+            .shell_state.shell_sessions
             .get_mut(&container_id)
             .and_then(|s| s.pty.take());
 
@@ -2645,8 +2528,8 @@ impl App {
                         Ok(new_p) => new_p,
                         Err(e) => {
                             self.status_message = Some(format!("Shell spawn error: {}", e));
-                            self.shell_sessions.remove(&container_id);
-                            self.active_shell_container = None;
+                            self.shell_state.shell_sessions.remove(&container_id);
+                            self.shell_state.active_shell_container = None;
                             self.view = View::Main;
                             crate::shell::reset_terminal();
                             resume_tui(terminal.backend_mut())?;
@@ -2675,8 +2558,8 @@ impl App {
                     Ok(p) => p,
                     Err(e) => {
                         self.status_message = Some(format!("Shell spawn error: {}", e));
-                        self.shell_sessions.remove(&container_id);
-                        self.active_shell_container = None;
+                        self.shell_state.shell_sessions.remove(&container_id);
+                        self.shell_state.active_shell_container = None;
                         self.view = View::Main;
                         crate::shell::reset_terminal();
                         resume_tui(terminal.backend_mut())?;
@@ -2704,7 +2587,7 @@ impl App {
                     // (docker exec only propagates SIGWINCH when size actually differs)
                     pty.set_size_and_signal(1, 1);
                     // Put PTY back into session - session preserved
-                    if let Some(session) = self.shell_sessions.get_mut(&container_id) {
+                    if let Some(session) = self.shell_state.shell_sessions.get_mut(&container_id) {
                         session.pty = Some(pty);
                     }
                     // Leave child's alternate screen before entering TUI's
@@ -2723,18 +2606,18 @@ impl App {
                 ShellExitReason::Exited => {
                     // Shell exited - clean up session
                     drop(pty);
-                    self.shell_sessions.remove(&container_id);
+                    self.shell_state.shell_sessions.remove(&container_id);
                     self.status_message = Some("Shell exited".to_string());
                 }
                 ShellExitReason::Error(e) => {
                     drop(pty);
-                    self.shell_sessions.remove(&container_id);
+                    self.shell_state.shell_sessions.remove(&container_id);
                     self.status_message = Some(format!("Shell error: {}", e));
                 }
             },
             Err(e) => {
                 // Lost the PtyShell — clean up session and recover
-                self.shell_sessions.remove(&container_id);
+                self.shell_state.shell_sessions.remove(&container_id);
                 self.status_message = Some(format!("Shell error: {}", e));
             }
         }
@@ -2743,7 +2626,7 @@ impl App {
         crate::shell::reset_terminal();
 
         // 9. Return to main view
-        self.active_shell_container = None;
+        self.shell_state.active_shell_container = None;
         self.view = View::Main;
 
         // 10. Resume TUI using terminal's backend
@@ -2789,7 +2672,7 @@ impl App {
 
         // Invalidate stale compose_services entries for containers that no longer exist
         let container_ids: HashSet<String> = self.containers.iter().map(|c| c.id.clone()).collect();
-        self.compose_services.retain(|id, _| container_ids.contains(id));
+        self.compose_state.compose_services.retain(|id, _| container_ids.contains(id));
 
         Ok(())
     }
@@ -2947,8 +2830,8 @@ impl App {
         // Check if we should fetch logs for a companion service
         let companion = if self.view == View::ContainerDetail {
             let container_id = container.id.clone();
-            self.compose_services.get(&container_id).and_then(|services| {
-                services.get(self.compose_selected_service).and_then(|svc| {
+            self.compose_state.compose_services.get(&container_id).and_then(|services| {
+                services.get(self.compose_state.compose_selected_service).and_then(|svc| {
                     // If this is the primary service, use normal log path
                     let is_primary = container.compose_service.as_deref() == Some(&svc.service_name);
                     if is_primary {
@@ -2989,7 +2872,7 @@ impl App {
                             }
                             self.logs = lines;
                             self.logs_scroll = self.logs.len().saturating_sub(1);
-                            self.logs_service_name = Some(svc_name);
+                            self.compose_state.logs_service_name = Some(svc_name);
                             self.view = View::Logs;
                             self.status_message = Some(format!("{} log lines", self.logs.len()));
                         }
@@ -3015,7 +2898,7 @@ impl App {
 
         self.status_message = Some(format!("Loading logs for {}...", container.name));
         self.loading = true;
-        self.logs_service_name = None;
+        self.compose_state.logs_service_name = None;
 
         match self.manager.read().await.logs(&container.id, Some(1000)).await {
             Ok(lines) => {
@@ -3041,7 +2924,7 @@ impl App {
                     return Ok(());
                 }
                 // Clean up any shell session for this container
-                self.shell_sessions.remove(&id);
+                self.shell_state.shell_sessions.remove(&id);
 
                 let name = self.containers.iter()
                     .find(|c| c.id == id)
@@ -3068,7 +2951,7 @@ impl App {
                     return Ok(());
                 }
                 // Clean up any shell session for this container
-                self.shell_sessions.remove(&id);
+                self.shell_state.shell_sessions.remove(&id);
 
                 let name = self.containers.iter()
                     .find(|c| c.id == id)
@@ -3232,14 +3115,14 @@ impl App {
     fn cleanup_view_state(&mut self) {
         match self.view {
             View::ContainerDetail => {
-                self.compose_selected_service = 0;
-                self.compose_services_table_state = TableState::default();
-                self.compose_services_loading = false;
+                self.compose_state.compose_selected_service = 0;
+                self.compose_state.compose_services_table_state = TableState::default();
+                self.compose_state.compose_services_loading = false;
                 self.container_detail = None;
                 self.container_detail_scroll = 0;
             }
             View::Logs => {
-                self.logs_service_name = None;
+                self.compose_state.logs_service_name = None;
             }
             View::DiscoverDetail => {
                 self.discover_detail = None;
@@ -3253,12 +3136,12 @@ impl App {
     fn close_current_view(&mut self) {
         match self.view {
             View::Ports => {
-                self.ports_container_id = None;
-                self.ports_provider_container_id = None;
-                if let Some(handle) = self.port_detect_handle.take() { handle.abort(); }
-                self.detected_ports.clear();
-                self.socat_installed = None;
-                self.socat_installing = false;
+                self.port_state.ports_container_id = None;
+                self.port_state.ports_provider_container_id = None;
+                if let Some(handle) = self.port_state.port_detect_handle.take() { handle.abort(); }
+                self.port_state.detected_ports.clear();
+                self.port_state.socat_installed = None;
+                self.port_state.socat_installing = false;
             }
             View::ProviderDetail if self.provider_detail_state.editing => {
                 self.provider_detail_state.cancel_edit();
@@ -3358,7 +3241,7 @@ mod tests {
         app.selected = 0;
 
         // Insert 3 services for this container
-        app.compose_services.insert(
+        app.compose_state.compose_services.insert(
             cid.clone(),
             vec![
                 ComposeServiceInfo {
@@ -3379,15 +3262,15 @@ mod tests {
             ],
         );
 
-        assert_eq!(app.compose_selected_service, 0);
+        assert_eq!(app.compose_state.compose_selected_service, 0);
         app.move_compose_service_selection(1); // 0 -> 1
-        assert_eq!(app.compose_selected_service, 1);
+        assert_eq!(app.compose_state.compose_selected_service, 1);
         app.move_compose_service_selection(1); // 1 -> 2
-        assert_eq!(app.compose_selected_service, 2);
+        assert_eq!(app.compose_state.compose_selected_service, 2);
         app.move_compose_service_selection(1); // 2 -> 0 (wraps)
-        assert_eq!(app.compose_selected_service, 0);
+        assert_eq!(app.compose_state.compose_selected_service, 0);
         app.move_compose_service_selection(1); // 0 -> 1
-        assert_eq!(app.compose_selected_service, 1);
+        assert_eq!(app.compose_state.compose_selected_service, 1);
     }
 
     #[test]
@@ -3399,7 +3282,7 @@ mod tests {
         app.containers.push(container);
         app.selected = 0;
 
-        app.compose_services.insert(
+        app.compose_state.compose_services.insert(
             cid.clone(),
             vec![
                 ComposeServiceInfo {
@@ -3420,11 +3303,11 @@ mod tests {
             ],
         );
 
-        assert_eq!(app.compose_selected_service, 0);
+        assert_eq!(app.compose_state.compose_selected_service, 0);
         app.move_compose_service_selection(-1); // 0 -> 2 (wraps backward)
-        assert_eq!(app.compose_selected_service, 2);
+        assert_eq!(app.compose_state.compose_selected_service, 2);
         app.move_compose_service_selection(-1); // 2 -> 1
-        assert_eq!(app.compose_selected_service, 1);
+        assert_eq!(app.compose_state.compose_selected_service, 1);
     }
 
     #[test]
@@ -3436,10 +3319,10 @@ mod tests {
         app.selected = 0;
         // No services in compose_services map
 
-        app.compose_selected_service = 0;
+        app.compose_state.compose_selected_service = 0;
         app.move_compose_service_selection(1);
-        assert_eq!(app.compose_selected_service, 0);
+        assert_eq!(app.compose_state.compose_selected_service, 0);
         app.move_compose_service_selection(-1);
-        assert_eq!(app.compose_selected_service, 0);
+        assert_eq!(app.compose_state.compose_selected_service, 0);
     }
 }

@@ -603,9 +603,9 @@ pub(super) fn draw_compose_services(
     container: &devc_core::ContainerState,
     area: Rect,
 ) {
-    let services = app.compose_services.get(&container.id);
+    let services = app.compose_state.compose_services.get(&container.id);
 
-    if app.compose_services_loading && services.is_none() {
+    if app.compose_state.compose_services_loading && services.is_none() {
         let loading = Paragraph::new("Loading services...")
             .style(Style::default().fg(Color::DarkGray))
             .block(
@@ -690,5 +690,5 @@ pub(super) fn draw_compose_services(
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("▶ ");
 
-    frame.render_stateful_widget(table, area, &mut app.compose_services_table_state);
+    frame.render_stateful_widget(table, area, &mut app.compose_state.compose_services_table_state);
 }

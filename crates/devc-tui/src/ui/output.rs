@@ -109,7 +109,7 @@ pub(super) fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
         .selected_container()
         .map(|c| c.name.as_str())
         .unwrap_or("Unknown");
-    let display_name = if let Some(ref svc_name) = app.logs_service_name {
+    let display_name = if let Some(ref svc_name) = app.compose_state.logs_service_name {
         format!("{}/{}", container_name, svc_name)
     } else {
         container_name.to_string()

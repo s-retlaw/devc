@@ -209,8 +209,8 @@ fn test_ports_popup_empty() {
 
     // Set up ports view with no detected ports
     app.view = View::Ports;
-    app.ports_container_id = Some("test-my-rust-project".to_string());
-    app.socat_installed = Some(true);
+    app.port_state.ports_container_id = Some("test-my-rust-project".to_string());
+    app.port_state.socat_installed = Some(true);
 
     let output = render_app(&mut app, 80, 24);
     insta::assert_snapshot!(output);
@@ -234,9 +234,9 @@ fn test_ports_popup_with_ports() {
 
     // Set up ports view with detected ports
     app.view = View::Ports;
-    app.ports_container_id = Some("test-my-rust-project".to_string());
-    app.socat_installed = Some(true);
-    app.detected_ports = vec![
+    app.port_state.ports_container_id = Some("test-my-rust-project".to_string());
+    app.port_state.socat_installed = Some(true);
+    app.port_state.detected_ports = vec![
         DetectedPort {
             port: 3000,
             protocol: "tcp".to_string(),
@@ -252,8 +252,8 @@ fn test_ports_popup_with_ports() {
             is_forwarded: false,
         },
     ];
-    app.selected_port = 0;
-    app.ports_table_state.select(Some(0));
+    app.port_state.selected_port = 0;
+    app.port_state.ports_table_state.select(Some(0));
 
     let output = render_app(&mut app, 80, 24);
     insta::assert_snapshot!(output);
@@ -308,7 +308,7 @@ fn test_compose_container_list_badge() {
     app.containers_table_state.select(Some(0));
 
     // Populate compose services cache for the compose container
-    app.compose_services.insert(
+    app.compose_state.compose_services.insert(
         "test-compose-app".to_string(),
         vec![
             ComposeServiceInfo {
@@ -353,7 +353,7 @@ fn test_compose_container_detail_with_services() {
     app.view = View::ContainerDetail;
 
     // Populate compose services
-    app.compose_services.insert(
+    app.compose_state.compose_services.insert(
         "test-compose-app".to_string(),
         vec![
             ComposeServiceInfo {
@@ -373,8 +373,8 @@ fn test_compose_container_detail_with_services() {
             },
         ],
     );
-    app.compose_selected_service = 0;
-    app.compose_services_table_state = TableState::default().with_selected(0);
+    app.compose_state.compose_selected_service = 0;
+    app.compose_state.compose_services_table_state = TableState::default().with_selected(0);
 
     let output = render_app(&mut app, 90, 30);
     insta::assert_snapshot!(output);
@@ -395,7 +395,7 @@ fn test_compose_container_detail_loading() {
     )];
     app.selected = 0;
     app.view = View::ContainerDetail;
-    app.compose_services_loading = true;
+    app.compose_state.compose_services_loading = true;
 
     let output = render_app(&mut app, 90, 30);
     insta::assert_snapshot!(output);

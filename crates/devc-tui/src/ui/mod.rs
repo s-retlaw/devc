@@ -106,12 +106,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         View::Logs => draw_logs(frame, app, content_area),
         View::Ports => {
             draw_main_content(frame, app, content_area);
-            let port_rows = app.detected_ports.len().max(3) as u16;
+            let port_rows = app.port_state.detected_ports.len().max(3) as u16;
             let h = (port_rows + 7).max(12);
             let popup = popup_rect(80, 70, 56, h, content_area);
             frame.render_widget(Clear, popup);
             draw_ports(frame, app, popup);
-            if app.socat_installing {
+            if app.port_state.socat_installing {
                 draw_install_progress(frame, app, area);
             }
         }

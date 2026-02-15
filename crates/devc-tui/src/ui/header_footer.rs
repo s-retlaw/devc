@@ -99,7 +99,7 @@ pub(super) fn container_list_footer(app: &App) -> String {
 /// Build context-sensitive footer help for the container detail view
 pub(super) fn container_detail_footer(app: &App) -> String {
     let has_services = app.selected_container()
-        .and_then(|c| app.compose_services.get(&c.id))
+        .and_then(|c| app.compose_state.compose_services.get(&c.id))
         .map(|s| !s.is_empty())
         .unwrap_or(false);
 
@@ -190,14 +190,14 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         View::Logs => "j/k: Scroll  g/G: Top/Bottom  PgUp/PgDn: Page  r: Refresh  Esc/q: Back".to_string(),
         View::Ports => {
             // Show install option if socat not installed
-            if app.socat_installed == Some(false) && !app.socat_installing {
+            if app.port_state.socat_installed == Some(false) && !app.port_state.socat_installing {
                 "[i]nstall socat  j/k: Navigate  1-3: Switch tab  q/Esc: Back".to_string()
-            } else if app.socat_installing {
+            } else if app.port_state.socat_installing {
                 "Installing socat...  q/Esc: Back".to_string()
             } else {
                 let is_forwarded = app
-                    .detected_ports
-                    .get(app.selected_port)
+                    .port_state.detected_ports
+                    .get(app.port_state.selected_port)
                     .map(|p| p.is_forwarded)
                     .unwrap_or(false);
                 if is_forwarded {

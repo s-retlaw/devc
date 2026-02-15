@@ -4,18 +4,18 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
     let container_name = app
         .containers
         .iter()
-        .find(|c| Some(&c.id) == app.ports_container_id.as_ref())
+        .find(|c| Some(&c.id) == app.port_state.ports_container_id.as_ref())
         .map(|c| c.name.as_str())
         .unwrap_or("Unknown");
 
     // Show socat warning if not installed
-    let socat_warning = match (app.socat_installed, app.socat_installing) {
+    let socat_warning = match (app.port_state.socat_installed, app.port_state.socat_installing) {
         (_, true) => Some(("Installing socat...", Color::Yellow)),
         (Some(false), _) => Some(("⚠ socat not installed - press 'i' to install", Color::Yellow)),
         _ => None,
     };
 
-    if app.detected_ports.is_empty() {
+    if app.port_state.detected_ports.is_empty() {
         let message = if let Some((warning, _)) = socat_warning {
             format!("{}\n\nNo ports detected.\n\nWaiting for port detection...", warning)
         } else {
@@ -37,17 +37,17 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Build table rows
-    let container_id_for_auto = app.ports_provider_container_id.clone();
+    let container_id_for_auto = app.port_state.ports_provider_container_id.clone();
     let auto_configs = container_id_for_auto
         .as_ref()
-        .and_then(|cid| app.auto_forward_configs.get(cid));
+        .and_then(|cid| app.port_state.auto_forward_configs.get(cid));
     let rows: Vec<Row> = app
-        .detected_ports
+        .port_state.detected_ports
         .iter()
         .map(|port| {
             let is_auto = container_id_for_auto
                 .as_ref()
-                .map(|cid| app.auto_forwarded_ports.contains(&(cid.clone(), port.port)))
+                .map(|cid| app.port_state.auto_forwarded_ports.contains(&(cid.clone(), port.port)))
                 .unwrap_or(false);
             let status = if port.is_forwarded && is_auto {
                 "● Forwarded [auto]"
@@ -121,5 +121,5 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("▶ ");
 
-    frame.render_stateful_widget(table, area, &mut app.ports_table_state);
+    frame.render_stateful_widget(table, area, &mut app.port_state.ports_table_state);
 }
