@@ -99,7 +99,7 @@ pub(super) fn container_list_footer(app: &App) -> String {
 /// Build context-sensitive footer help for the container detail view
 pub(super) fn container_detail_footer(app: &App) -> String {
     let has_services = app.selected_container()
-        .and_then(|c| app.compose_state.compose_services.get(&c.id))
+        .and_then(|c| app.compose_state.services.get(&c.id))
         .map(|s| !s.is_empty())
         .unwrap_or(false);
 

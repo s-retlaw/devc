@@ -355,7 +355,7 @@ fn test_ports_view_cleanup() {
 
     // Set up ports view state
     app.view = View::Ports;
-    app.port_state.ports_container_id = Some("container123".to_string());
+    app.port_state.container_id = Some("container123".to_string());
     app.port_state.detected_ports.push(devc_tui::ports::DetectedPort {
         port: 8080,
         protocol: "tcp".to_string(),
@@ -365,11 +365,11 @@ fn test_ports_view_cleanup() {
     });
 
     // Close ports view manually
-    app.port_state.ports_container_id = None;
+    app.port_state.container_id = None;
     app.port_state.detected_ports.clear();
     app.view = View::Main;
 
-    assert!(app.port_state.ports_container_id.is_none());
+    assert!(app.port_state.container_id.is_none());
     assert!(app.port_state.detected_ports.is_empty());
     assert_eq!(app.view, View::Main);
 }

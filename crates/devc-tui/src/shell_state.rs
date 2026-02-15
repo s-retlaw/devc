@@ -1,7 +1,23 @@
 //! Shell session state extracted from App
 
-use crate::app::ShellSession;
+#[cfg(unix)]
+use crate::shell::PtyShell;
 use std::collections::HashMap;
+
+/// Active shell session state (persistent across attach/detach cycles)
+pub struct ShellSession {
+    pub container_id: String,
+    pub container_name: String,
+    pub provider_container_id: String,
+    pub runtime_program: String,
+    pub runtime_prefix: Vec<String>,
+    /// Effective user for the shell (from config override, metadata, or devcontainer.json)
+    pub user: Option<String>,
+    /// Working directory for the shell (from metadata or devcontainer.json workspaceFolder)
+    pub working_dir: Option<String>,
+    #[cfg(unix)]
+    pub pty: Option<PtyShell>,
+}
 
 /// State for persistent shell sessions.
 pub struct ShellState {

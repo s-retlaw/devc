@@ -11,19 +11,19 @@ pub struct PortForwardingState {
     // === Per-view state (cleared when exiting ports view) ===
 
     /// Container currently being viewed for port forwarding (devc container ID)
-    pub ports_container_id: Option<String>,
+    pub container_id: Option<String>,
     /// Provider container ID for the ports view
-    pub ports_provider_container_id: Option<String>,
+    pub provider_container_id: Option<String>,
     /// Runtime program for the current ports view container
-    pub ports_runtime_program: Option<String>,
+    pub runtime_program: Option<String>,
     /// Runtime prefix args for the current ports view container
-    pub ports_runtime_prefix: Vec<String>,
+    pub runtime_prefix: Vec<String>,
     /// Detected ports in current container
     pub detected_ports: Vec<DetectedPort>,
     /// Selected port index
     pub selected_port: usize,
     /// Table state for port list
-    pub ports_table_state: TableState,
+    pub table_state: TableState,
     /// Whether socat is installed in the container (None = not checked yet)
     pub socat_installed: Option<bool>,
     /// Whether socat installation is in progress
@@ -54,13 +54,13 @@ impl PortForwardingState {
     /// Create a new default port forwarding state
     pub fn new() -> Self {
         Self {
-            ports_container_id: None,
-            ports_provider_container_id: None,
-            ports_runtime_program: None,
-            ports_runtime_prefix: Vec::new(),
+            container_id: None,
+            provider_container_id: None,
+            runtime_program: None,
+            runtime_prefix: Vec::new(),
             detected_ports: Vec::new(),
             selected_port: 0,
-            ports_table_state: TableState::default().with_selected(0),
+            table_state: TableState::default().with_selected(0),
             socat_installed: None,
             socat_installing: false,
             port_detect_handle: None,
@@ -75,7 +75,7 @@ impl PortForwardingState {
 
     /// Handle a port detection update (updates detected_ports list)
     pub fn handle_port_update(&mut self, update: PortDetectionUpdate) {
-        let forwarded_ports: HashSet<u16> = if let Some(ref container_id) = self.ports_provider_container_id {
+        let forwarded_ports: HashSet<u16> = if let Some(ref container_id) = self.provider_container_id {
             self.active_forwarders
                 .keys()
                 .filter(|(cid, _)| cid == container_id)
@@ -98,16 +98,74 @@ impl PortForwardingState {
             self.selected_port = self.detected_ports.len() - 1;
         }
         if !self.detected_ports.is_empty() {
-            self.ports_table_state.select(Some(self.selected_port));
+            self.table_state.select(Some(self.selected_port));
         }
+    }
+
+    /// Move selection to the next port (wrapping)
+    pub fn select_next(&mut self) {
+        if !self.detected_ports.is_empty() {
+            self.selected_port = (self.selected_port + 1) % self.detected_ports.len();
+            self.table_state.select(Some(self.selected_port));
+        }
+    }
+
+    /// Move selection to the previous port (wrapping)
+    pub fn select_prev(&mut self) {
+        if !self.detected_ports.is_empty() {
+            self.selected_port = self.selected_port
+                .checked_sub(1)
+                .unwrap_or(self.detected_ports.len() - 1);
+            self.table_state.select(Some(self.selected_port));
+        }
+    }
+
+    /// Move selection to the first port
+    pub fn select_first(&mut self) {
+        if !self.detected_ports.is_empty() {
+            self.selected_port = 0;
+            self.table_state.select(Some(0));
+        }
+    }
+
+    /// Move selection to the last port
+    pub fn select_last(&mut self) {
+        if !self.detected_ports.is_empty() {
+            self.selected_port = self.detected_ports.len() - 1;
+            self.table_state.select(Some(self.selected_port));
+        }
+    }
+
+    /// Get the currently selected port info
+    pub fn selected_port_info(&self) -> Option<&DetectedPort> {
+        self.detected_ports.get(self.selected_port)
+    }
+
+    /// Initialize per-view state for entering the ports view
+    pub fn enter_view(
+        &mut self,
+        container_id: String,
+        provider_id: String,
+        program: String,
+        prefix: Vec<String>,
+    ) {
+        self.container_id = Some(container_id);
+        self.provider_container_id = Some(provider_id);
+        self.runtime_program = Some(program);
+        self.runtime_prefix = prefix;
+        self.detected_ports.clear();
+        self.selected_port = 0;
+        self.table_state.select(Some(0));
+        self.socat_installed = None;
+        self.socat_installing = false;
     }
 
     /// Clear per-view state (called when exiting ports view)
     pub fn clear_view_state(&mut self) {
-        self.ports_container_id = None;
-        self.ports_provider_container_id = None;
-        self.ports_runtime_program = None;
-        self.ports_runtime_prefix.clear();
+        self.container_id = None;
+        self.provider_container_id = None;
+        self.runtime_program = None;
+        self.runtime_prefix.clear();
         if let Some(handle) = self.port_detect_handle.take() {
             handle.abort();
         }

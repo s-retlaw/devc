@@ -351,7 +351,7 @@ async fn test_compose_detail_service_navigation() {
     app.containers_table_state.select(Some(0));
 
     // Populate compose services for this container
-    app.compose_state.compose_services.insert(
+    app.compose_state.services.insert(
         "test-compose-app".to_string(),
         vec![
             ComposeServiceInfo {
@@ -371,8 +371,8 @@ async fn test_compose_detail_service_navigation() {
             },
         ],
     );
-    app.compose_state.compose_selected_service = 0;
-    app.compose_state.compose_services_table_state = TableState::default().with_selected(0);
+    app.compose_state.selected_service = 0;
+    app.compose_state.services_table_state = TableState::default().with_selected(0);
 
     // Enter detail view
     app.view = View::ContainerDetail;
@@ -381,19 +381,19 @@ async fn test_compose_detail_service_navigation() {
     app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_eq!(app.compose_state.compose_selected_service, 1, "j should move to service index 1");
+    assert_eq!(app.compose_state.selected_service, 1, "j should move to service index 1");
 
     // 'j' again moves to the third service
     app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_eq!(app.compose_state.compose_selected_service, 2, "j should move to service index 2");
+    assert_eq!(app.compose_state.selected_service, 2, "j should move to service index 2");
 
     // 'k' moves back up
     app.send_key(KeyCode::Char('k'), KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_eq!(app.compose_state.compose_selected_service, 1, "k should move back to service index 1");
+    assert_eq!(app.compose_state.selected_service, 1, "k should move back to service index 1");
 
     // 'j' wraps around to the first service
     app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
@@ -402,5 +402,5 @@ async fn test_compose_detail_service_navigation() {
     app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
         .await
         .unwrap();
-    assert_eq!(app.compose_state.compose_selected_service, 0, "j should wrap around to first service");
+    assert_eq!(app.compose_state.selected_service, 0, "j should wrap around to first service");
 }

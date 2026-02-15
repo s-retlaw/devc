@@ -71,7 +71,7 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             let name_display = if has_shell {
                 format!("{} [S]", container.name)
             } else if container.compose_project.is_some() {
-                let suffix = match app.compose_state.compose_services.get(&container.id) {
+                let suffix = match app.compose_state.services.get(&container.id) {
                     Some(s) => format!(":{}", s.len()),
                     None => "...".to_string(),
                 };

@@ -36,9 +36,6 @@ pub struct ContainerManager {
     connection_error: Option<String>,
 }
 
-/// Build progress callback
-pub type BuildProgressCallback = Box<dyn Fn(&str) + Send + Sync>;
-
 /// Context prepared by `prepare_exec()` for exec/shell operations.
 pub(crate) struct ExecContext<'a> {
     pub(crate) provider: &'a dyn ContainerProvider,

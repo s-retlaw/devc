@@ -10,6 +10,28 @@ use tokio::sync::mpsc;
 
 use super::ContainerManager;
 
+// Send a progress message to the channel, or log via tracing if no channel.
+fn emit(progress: &Option<mpsc::UnboundedSender<String>>, msg: String) {
+    if let Some(tx) = progress {
+        let _ = tx.send(msg);
+    } else {
+        tracing::info!("{}", msg);
+    }
+}
+
+// Dispatch a build to the provider, using progress-streaming or plain build.
+async fn dispatch_build(
+    provider: &dyn ContainerProvider,
+    config: &devc_provider::BuildConfig,
+    progress: &Option<mpsc::UnboundedSender<String>>,
+) -> std::result::Result<devc_provider::ImageId, devc_provider::ProviderError> {
+    if let Some(tx) = progress {
+        provider.build_with_progress(config, tx.clone()).await
+    } else {
+        provider.build(config).await
+    }
+}
+
 impl ContainerManager {
     /// Build a container image
     pub async fn build(&self, id: &str) -> Result<String> {
@@ -67,13 +89,11 @@ impl ContainerManager {
         // Check if SSH injection is enabled
         let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(false);
 
-        // Log SSH injection status when progress channel is present
-        if let Some(ref tx) = progress {
-            if inject_ssh {
-                let _ = tx.send("SSH support: Injecting dropbear into image...".to_string());
-            } else {
-                let _ = tx.send("SSH support: Disabled (not injecting dropbear)".to_string());
-            }
+        // Log SSH injection status
+        if inject_ssh {
+            emit(&progress, "SSH support: Injecting dropbear into image...".to_string());
+        } else {
+            emit(&progress, "SSH support: Disabled (not injecting dropbear)".to_string());
         }
 
         // Resolve devcontainer features
@@ -89,38 +109,17 @@ impl ContainerManager {
         let remote_user = container.devcontainer.effective_user().unwrap_or("root").to_string();
 
         if has_features {
-            if let Some(ref tx) = progress {
-                let _ = tx.send(format!("Installing {} devcontainer feature(s)...", resolved_features.len()));
-            }
-        }
-
-        /// Helper: run a provider build, dispatching to build_with_progress or build
-        /// depending on whether a progress channel is available.
-        async fn do_build(
-            provider: &dyn ContainerProvider,
-            config: &devc_provider::BuildConfig,
-            progress: &Option<mpsc::UnboundedSender<String>>,
-        ) -> std::result::Result<devc_provider::ImageId, devc_provider::ProviderError> {
-            if let Some(tx) = progress {
-                provider.build_with_progress(config, tx.clone()).await
-            } else {
-                provider.build(config).await
-            }
+            emit(&progress, format!("Installing {} devcontainer feature(s)...", resolved_features.len()));
         }
 
         // Check if we need to build or pull
         let image_id = match container.devcontainer.image_source() {
             ImageSource::Image(image) => {
                 if has_features || inject_ssh {
-                    let msg = format!(
+                    emit(&progress, format!(
                         "Building enhanced image from {} (features: {}, SSH: {})",
                         image, has_features, inject_ssh
-                    );
-                    if let Some(ref tx) = progress {
-                        let _ = tx.send(msg);
-                    } else {
-                        tracing::info!("{}", msg);
-                    }
+                    ));
 
                     let enhanced_ctx = if has_features {
                         EnhancedBuildContext::from_image_with_features(
@@ -137,18 +136,16 @@ impl ContainerManager {
                         build_args: std::collections::HashMap::new(),
                         target: None,
                         cache_from: Vec::new(),
-                        labels: {
-                            let mut labels = std::collections::HashMap::new();
-                            labels.insert("devc.managed".to_string(), "true".to_string());
-                            labels.insert("devc.project".to_string(), container.name.clone());
-                            labels.insert("devc.base_image".to_string(), image.clone());
-                            labels
-                        },
+                        labels: std::collections::HashMap::from([
+                            ("devc.managed".to_string(), "true".to_string()),
+                            ("devc.project".to_string(), container.name.clone()),
+                            ("devc.base_image".to_string(), image.clone()),
+                        ]),
                         no_cache,
                         pull: true,
                     };
 
-                    let result = do_build(provider, &build_config, &progress).await;
+                    let result = dispatch_build(provider, &build_config, &progress).await;
                     match result {
                         Ok(id) => id.0,
                         Err(e) => {
@@ -157,12 +154,7 @@ impl ContainerManager {
                         }
                     }
                 } else {
-                    let msg = format!("Pulling image: {}", image);
-                    if let Some(ref tx) = progress {
-                        let _ = tx.send(msg);
-                    } else {
-                        tracing::info!("{}", msg);
-                    }
+                    emit(&progress, format!("Pulling image: {}", image));
                     let result = provider.pull(&image).await;
                     match result {
                         Ok(id) => id.0,
@@ -178,15 +170,10 @@ impl ContainerManager {
                 build_config.no_cache = no_cache;
 
                 if has_features || inject_ssh {
-                    let msg = format!(
+                    emit(&progress, format!(
                         "Building enhanced image: {} (features: {}, SSH: {}, no_cache: {})",
                         build_config.tag, has_features, inject_ssh, no_cache
-                    );
-                    if let Some(ref tx) = progress {
-                        let _ = tx.send(msg);
-                    } else {
-                        tracing::info!("{}", msg);
-                    }
+                    ));
 
                     let enhanced_ctx = if has_features {
                         EnhancedBuildContext::from_dockerfile_with_features(
@@ -206,7 +193,7 @@ impl ContainerManager {
                     build_config.context = enhanced_ctx.context_path().to_path_buf();
                     build_config.dockerfile = enhanced_ctx.dockerfile_name().to_string();
 
-                    let result = do_build(provider, &build_config, &progress).await;
+                    let result = dispatch_build(provider, &build_config, &progress).await;
                     match result {
                         Ok(id) => id.0,
                         Err(e) => {
@@ -215,17 +202,12 @@ impl ContainerManager {
                         }
                     }
                 } else {
-                    let msg = format!(
+                    emit(&progress, format!(
                         "Building image: {} (no_cache: {})",
                         build_config.tag, no_cache
-                    );
-                    if let Some(ref tx) = progress {
-                        let _ = tx.send(msg);
-                    } else {
-                        tracing::info!("{}", msg);
-                    }
+                    ));
 
-                    let result = do_build(provider, &build_config, &progress).await;
+                    let result = dispatch_build(provider, &build_config, &progress).await;
                     match result {
                         Ok(id) => id.0,
                         Err(e) => {
@@ -237,11 +219,7 @@ impl ContainerManager {
             }
             ImageSource::Compose => {
                 // Compose builds happen during `compose up`, mark as built
-                if let Some(ref tx) = progress {
-                    let _ = tx.send("Compose project: build will happen during 'up'".to_string());
-                } else {
-                    tracing::info!("Compose project: skipping standalone build");
-                }
+                emit(&progress, "Compose project: build will happen during 'up'".to_string());
                 {
                     let mut state = self.state.write().await;
                     if let Some(cs) = state.get_mut(id) {
@@ -329,26 +307,16 @@ impl ContainerManager {
 
         // 1. Stop and remove runtime container
         if container_state.container_id.is_some() {
-            if let Some(ref tx) = progress {
-                let _ = tx.send("Stopping container...".to_string());
-            }
+            emit(&progress, "Stopping container...".to_string());
             self.down(id).await?;
         }
 
         // 2. Handle provider migration
         if provider_changed {
-            if let Some(ref tx) = progress {
-                let _ = tx.send(format!(
-                    "Migrating provider: {} -> {}",
-                    old_provider, new_provider
-                ));
-            } else {
-                tracing::info!(
-                    "Provider migration: {} -> {}",
-                    old_provider,
-                    new_provider
-                );
-            }
+            emit(&progress, format!(
+                "Migrating provider: {} -> {}",
+                old_provider, new_provider
+            ));
             {
                 let mut state = self.state.write().await;
                 if let Some(cs) = state.get_mut(id) {
@@ -364,9 +332,7 @@ impl ContainerManager {
         // 3. Run initializeCommand on host before build (per spec)
         let container = self.load_container(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.initialize_command {
-            if let Some(ref tx) = progress {
-                let _ = tx.send("Running initializeCommand on host...".to_string());
-            }
+            emit(&progress, "Running initializeCommand on host...".to_string());
             let output = progress.as_ref();
             crate::run_host_command(cmd, &container.workspace_path, output).await?;
         }
@@ -378,9 +344,7 @@ impl ContainerManager {
         let progress_ref = progress.as_ref();
         self.up_with_progress(id, progress_ref, progress_ref).await?;
 
-        if let Some(ref tx) = progress {
-            let _ = tx.send("Build complete.".to_string());
-        }
+        emit(&progress, "Build complete.".to_string());
         Ok(())
     }
 }

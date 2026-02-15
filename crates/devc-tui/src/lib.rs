@@ -18,7 +18,8 @@ pub mod widgets;
 
 pub use clipboard::copy_to_clipboard;
 
-pub use app::{App, AppResult, ConfirmAction, ContainerOperation, DialogFocus, ShellSession, Tab, View};
+pub use app::{App, AppResult, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
+pub use shell_state::ShellSession;
 pub use demo::DemoApp;
 pub use event::{Event, EventHandler};
 pub use shell::{reset_terminal, ShellConfig, ShellExitReason};

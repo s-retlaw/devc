@@ -69,6 +69,15 @@ impl ContainerManager {
         }
     }
 
+    /// Touch last-used timestamp and persist state.
+    async fn touch_last_used(&self, id: &str) -> Result<()> {
+        {
+            let mut state = self.state.write().await;
+            state.touch(id);
+        }
+        self.save_state().await
+    }
+
     /// Execute a command in a container
     pub async fn exec(&self, id: &str, cmd: Vec<String>, tty: bool) -> Result<i64> {
         let result = self.exec_inner(id, cmd, tty).await?;
@@ -115,12 +124,7 @@ impl ContainerManager {
             .exec(&ctx.cid, &config)
             .await?;
 
-        // Update last used
-        {
-            let mut state = self.state.write().await;
-            state.touch(id);
-        }
-        self.save_state().await?;
+        self.touch_last_used(id).await?;
 
         Ok(result)
     }
@@ -142,12 +146,7 @@ impl ContainerManager {
             .exec_interactive(&ctx.cid, &config)
             .await?;
 
-        // Update last used
-        {
-            let mut state = self.state.write().await;
-            state.touch(id);
-        }
-        self.save_state().await?;
+        self.touch_last_used(id).await?;
 
         Ok(stream)
     }
@@ -169,12 +168,7 @@ impl ContainerManager {
             .exec_interactive(&ctx.cid, &config)
             .await?;
 
-        // Update last used
-        {
-            let mut state = self.state.write().await;
-            state.touch(id);
-        }
-        self.save_state().await?;
+        self.touch_last_used(id).await?;
 
         Ok(stream)
     }

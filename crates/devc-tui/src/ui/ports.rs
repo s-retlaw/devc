@@ -4,7 +4,7 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
     let container_name = app
         .containers
         .iter()
-        .find(|c| Some(&c.id) == app.port_state.ports_container_id.as_ref())
+        .find(|c| Some(&c.id) == app.port_state.container_id.as_ref())
         .map(|c| c.name.as_str())
         .unwrap_or("Unknown");
 
@@ -37,7 +37,7 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Build table rows
-    let container_id_for_auto = app.port_state.ports_provider_container_id.clone();
+    let container_id_for_auto = app.port_state.provider_container_id.clone();
     let auto_configs = container_id_for_auto
         .as_ref()
         .and_then(|cid| app.port_state.auto_forward_configs.get(cid));
@@ -121,5 +121,5 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("▶ ");
 
-    frame.render_stateful_widget(table, area, &mut app.port_state.ports_table_state);
+    frame.render_stateful_widget(table, area, &mut app.port_state.table_state);
 }

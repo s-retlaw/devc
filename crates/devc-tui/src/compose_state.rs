@@ -4,15 +4,16 @@ use ratatui::widgets::TableState;
 use std::collections::HashMap;
 
 /// State for the compose services detail view.
+#[derive(Debug)]
 pub struct ComposeViewState {
     /// Cached compose service info keyed by devc container ID
-    pub compose_services: HashMap<String, Vec<devc_provider::ComposeServiceInfo>>,
+    pub services: HashMap<String, Vec<devc_provider::ComposeServiceInfo>>,
     /// Table state for compose services in detail view
-    pub compose_services_table_state: TableState,
+    pub services_table_state: TableState,
     /// Currently selected service index in compose services table
-    pub compose_selected_service: usize,
+    pub selected_service: usize,
     /// Whether compose services are currently being loaded
-    pub compose_services_loading: bool,
+    pub services_loading: bool,
     /// Name of the service whose logs are being viewed (None = primary container)
     pub logs_service_name: Option<String>,
 }
@@ -20,12 +21,24 @@ pub struct ComposeViewState {
 impl ComposeViewState {
     pub fn new() -> Self {
         Self {
-            compose_services: HashMap::new(),
-            compose_services_table_state: TableState::default(),
-            compose_selected_service: 0,
-            compose_services_loading: false,
+            services: HashMap::new(),
+            services_table_state: TableState::default(),
+            selected_service: 0,
+            services_loading: false,
             logs_service_name: None,
         }
+    }
+}
+
+impl ComposeViewState {
+    pub fn reset_detail(&mut self) {
+        self.selected_service = 0;
+        self.services_table_state = TableState::default();
+        self.services_loading = false;
+    }
+
+    pub fn reset_logs(&mut self) {
+        self.logs_service_name = None;
     }
 }
 
