@@ -159,8 +159,19 @@ async fn ssh_to_container(state: &ContainerState, cmd: &[String], program: &str,
         }
     }
 
+    // Resolve effective user from metadata or devcontainer.json
+    let effective_user = state
+        .metadata
+        .get("remote_user")
+        .cloned()
+        .or_else(|| {
+            Container::from_config(&state.config_path)
+                .ok()
+                .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()))
+        });
+
     // Fallback to exec -it
-    exec_shell_fallback(program, prefix, container_id, cmd).await
+    exec_shell_fallback(program, prefix, container_id, cmd, effective_user.as_deref()).await
 }
 
 /// Connect via SSH over stdio using dropbear in inetd mode
@@ -229,7 +240,7 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str,
 }
 
 /// Fallback to exec -it (doesn't support terminal resize)
-async fn exec_shell_fallback(program: &str, prefix: &[String], container_id: &str, cmd: &[String]) -> Result<()> {
+async fn exec_shell_fallback(program: &str, prefix: &[String], container_id: &str, cmd: &[String], user: Option<&str>) -> Result<()> {
     // Build the shell command: interactive shell, or `bash -lc "cmd"` for commands
     let shell_args: Vec<String> = if cmd.is_empty() {
         vec!["/bin/bash".to_string()]
@@ -243,7 +254,12 @@ async fn exec_shell_fallback(program: &str, prefix: &[String], container_id: &st
     };
 
     let mut args: Vec<String> = prefix.to_vec();
-    args.extend(["exec".to_string(), "-it".to_string(), container_id.to_string()]);
+    args.extend(["exec".to_string(), "-it".to_string()]);
+    if let Some(u) = user {
+        args.push("--user".to_string());
+        args.push(u.to_string());
+    }
+    args.push(container_id.to_string());
     args.extend(shell_args);
 
     let status = std::process::Command::new(program)

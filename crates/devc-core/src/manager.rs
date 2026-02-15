@@ -2277,7 +2277,7 @@ fi
         source: DevcontainerSource,
         provider_type: ProviderType,
     ) -> Result<ContainerState> {
-        let provider = devc_provider::create_provider(provider_type, &self.global_config).await?;
+        let provider = self.require_provider_for(provider_type)?;
 
         // Inspect the container to get details
         let details = provider
@@ -2337,6 +2337,17 @@ fi
         container_state.image_id = Some(details.image_id.clone());
         container_state.status = status;
         container_state.source = source;
+
+        // Extract remote_user from devcontainer.json if available
+        if container_state.config_path.exists() {
+            if let Ok(c) = Container::from_config(&container_state.config_path) {
+                if let Some(user) = c.devcontainer.effective_user() {
+                    container_state
+                        .metadata
+                        .insert("remote_user".to_string(), user.to_string());
+                }
+            }
+        }
 
         // Save state
         {
@@ -4738,6 +4749,61 @@ mod tests {
         assert!(
             !podman_recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })),
             "Podman provider should NOT have been used for stop"
+        );
+    }
+
+    // ==================== Adopt — remote_user metadata ====================
+
+    /// Helper: create workspace with remoteUser in devcontainer.json
+    fn create_test_workspace_with_user(user: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let devcontainer_dir = tmp.path().join(".devcontainer");
+        std::fs::create_dir_all(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            format!(r#"{{"image": "ubuntu:22.04", "remoteUser": "{}"}}"#, user),
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[tokio::test]
+    async fn test_adopt_stores_remote_user() {
+        let workspace = create_test_workspace_with_user("vscode");
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        let state = mgr
+            .adopt(
+                "mock_container_id",
+                Some(workspace.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.metadata.get("remote_user").map(|s| s.as_str()),
+            Some("vscode"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adopt_no_remote_user_when_not_configured() {
+        let workspace = create_test_workspace(); // no remoteUser
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        let state = mgr
+            .adopt(
+                "mock_container_id",
+                Some(workspace.path().to_str().unwrap()),
+                DevcontainerSource::VsCode,
+                ProviderType::Docker,
+            )
+            .await
+            .unwrap();
+        assert!(
+            state.metadata.get("remote_user").is_none(),
+            "Should not have remote_user when devcontainer.json doesn't specify one"
         );
     }
 }
