@@ -19,8 +19,10 @@ use tokio::sync::RwLock;
 
 /// Main container manager
 pub struct ContainerManager {
-    /// Container provider (None when disconnected)
-    provider: Option<Box<dyn ContainerProvider>>,
+    /// Available container providers, keyed by type
+    providers: HashMap<ProviderType, Box<dyn ContainerProvider>>,
+    /// Default provider type for new containers (None if fully disconnected)
+    default_provider_type: Option<ProviderType>,
     /// State store
     state: Arc<RwLock<StateStore>>,
     /// Global configuration
@@ -45,9 +47,23 @@ impl ContainerManager {
     pub async fn new(provider: Box<dyn ContainerProvider>) -> Result<Self> {
         let global_config = GlobalConfig::load()?;
         let state = StateStore::load()?;
+        let default_type = provider.info().provider_type;
+
+        let mut providers = HashMap::new();
+        providers.insert(default_type, provider);
+
+        // Try to also cache the other provider type for cross-provider operations
+        for &pt in &[ProviderType::Docker, ProviderType::Podman] {
+            if pt != default_type {
+                if let Ok(p) = devc_provider::create_provider(pt, &global_config).await {
+                    providers.insert(pt, p);
+                }
+            }
+        }
 
         Ok(Self {
-            provider: Some(provider),
+            providers,
+            default_provider_type: Some(default_type),
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: None,
@@ -60,9 +76,23 @@ impl ContainerManager {
         global_config: GlobalConfig,
     ) -> Result<Self> {
         let state = StateStore::load()?;
+        let default_type = provider.info().provider_type;
+
+        let mut providers = HashMap::new();
+        providers.insert(default_type, provider);
+
+        // Try to also cache the other provider type for cross-provider operations
+        for &pt in &[ProviderType::Docker, ProviderType::Podman] {
+            if pt != default_type {
+                if let Ok(p) = devc_provider::create_provider(pt, &global_config).await {
+                    providers.insert(pt, p);
+                }
+            }
+        }
 
         Ok(Self {
-            provider: Some(provider),
+            providers,
+            default_provider_type: Some(default_type),
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: None,
@@ -76,8 +106,33 @@ impl ContainerManager {
         global_config: GlobalConfig,
         state: StateStore,
     ) -> Self {
+        let pt = provider.info().provider_type;
+        let mut providers = HashMap::new();
+        providers.insert(pt, provider);
         Self {
-            provider: Some(provider),
+            providers,
+            default_provider_type: Some(pt),
+            state: Arc::new(RwLock::new(state)),
+            global_config,
+            connection_error: None,
+        }
+    }
+
+    /// Create a manager with multiple providers for testing cross-provider operations
+    #[cfg(test)]
+    pub fn new_for_testing_multi(
+        providers_list: Vec<Box<dyn ContainerProvider>>,
+        default_type: ProviderType,
+        global_config: GlobalConfig,
+        state: StateStore,
+    ) -> Self {
+        let mut providers = HashMap::new();
+        for p in providers_list {
+            providers.insert(p.info().provider_type, p);
+        }
+        Self {
+            providers,
+            default_provider_type: Some(default_type),
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: None,
@@ -92,7 +147,8 @@ impl ContainerManager {
         error: String,
     ) -> Self {
         Self {
-            provider: None,
+            providers: HashMap::new(),
+            default_provider_type: None,
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: Some(error),
@@ -104,7 +160,8 @@ impl ContainerManager {
         let state = StateStore::load()?;
 
         Ok(Self {
-            provider: None,
+            providers: HashMap::new(),
+            default_provider_type: None,
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: Some(error),
@@ -113,7 +170,7 @@ impl ContainerManager {
 
     /// Check if connected to a provider
     pub fn is_connected(&self) -> bool {
-        self.provider.is_some()
+        !self.providers.is_empty()
     }
 
     /// Get the connection error message (if disconnected)
@@ -123,19 +180,34 @@ impl ContainerManager {
 
     /// Connect to a provider (for reconnection)
     pub fn connect(&mut self, provider: Box<dyn ContainerProvider>) {
-        self.provider = Some(provider);
+        let pt = provider.info().provider_type;
+        self.providers.insert(pt, provider);
+        self.default_provider_type = Some(pt);
         self.connection_error = None;
     }
 
-    /// Get the provider, returning an error if not connected
+    /// Get a provider for the given type
+    fn require_provider_for(&self, pt: ProviderType) -> Result<&dyn ContainerProvider> {
+        self.providers.get(&pt).map(|p| p.as_ref()).ok_or_else(|| {
+            CoreError::NotConnected(format!("{} provider not available", pt))
+        })
+    }
+
+    /// Get the provider matching a container's stored provider type
+    fn require_container_provider(&self, cs: &ContainerState) -> Result<&dyn ContainerProvider> {
+        self.require_provider_for(cs.provider)
+    }
+
+    /// Get the default provider, returning an error if not connected
     fn require_provider(&self) -> Result<&dyn ContainerProvider> {
-        self.provider.as_deref().ok_or_else(|| {
+        let pt = self.default_provider_type.ok_or_else(|| {
             CoreError::NotConnected(
                 self.connection_error
                     .clone()
                     .unwrap_or_else(|| "No container provider available".to_string()),
             )
-        })
+        })?;
+        self.require_provider_for(pt)
     }
 
     /// Load a Container from config, using this manager's GlobalConfig
@@ -149,8 +221,6 @@ impl ContainerManager {
     /// Shared preamble for exec/shell operations.
     /// Validates the container is running, extracts provider ID, and loads feature properties.
     async fn prepare_exec(&self, id: &str) -> Result<ExecContext<'_>> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -158,6 +228,8 @@ impl ContainerManager {
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         if container_state.status != DevcContainerStatus::Running {
             return Err(CoreError::InvalidState(
@@ -209,14 +281,29 @@ impl ContainerManager {
         }
     }
 
-    /// Get the provider type (None if disconnected)
+    /// Get the default provider type (None if disconnected)
     pub fn provider_type(&self) -> Option<ProviderType> {
-        self.provider.as_ref().map(|p| p.info().provider_type)
+        self.default_provider_type
     }
 
-    /// Get a reference to the container provider (for advanced operations like port detection)
+    /// Get a reference to the default container provider (for advanced operations like port detection)
     pub fn provider(&self) -> Option<&dyn ContainerProvider> {
-        self.provider.as_deref()
+        self.default_provider_type
+            .and_then(|pt| self.providers.get(&pt))
+            .map(|p| p.as_ref())
+    }
+
+    /// Get a reference to a provider for a specific type (for cross-provider operations)
+    pub fn provider_for_type(&self, pt: ProviderType) -> Option<&dyn ContainerProvider> {
+        self.providers.get(&pt).map(|p| p.as_ref())
+    }
+
+    /// Get runtime command args for a container's provider (for PTY shell, socat, etc.)
+    /// Returns (program, prefix_args) so callers can build:
+    /// `program [prefix_args...] exec [flags...] container_id [cmd...]`
+    pub fn runtime_args_for(&self, cs: &ContainerState) -> Result<(String, Vec<String>)> {
+        let provider = self.require_container_provider(cs)?;
+        Ok(provider.runtime_args())
     }
 
     /// Get the global config
@@ -232,8 +319,6 @@ impl ContainerManager {
         &self,
         id: &str,
     ) -> Result<crate::credentials::CredentialStatus> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -241,6 +326,8 @@ impl ContainerManager {
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         if container_state.status != DevcContainerStatus::Running {
             return Ok(crate::credentials::CredentialStatus::default());
@@ -412,8 +499,6 @@ impl ContainerManager {
 
     /// Build a container image with options
     pub async fn build_with_options(&self, id: &str, no_cache: bool) -> Result<String> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -421,6 +506,8 @@ impl ContainerManager {
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         // Load container config
         let container = self.load_container(&container_state.config_path)?;
@@ -598,8 +685,6 @@ impl ContainerManager {
 
     /// Create a container from a built image
     pub async fn create(&self, id: &str) -> Result<ContainerId> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -607,6 +692,8 @@ impl ContainerManager {
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         let image_id = container_state.image_id.as_ref().ok_or_else(|| {
             CoreError::InvalidState("Container image not built yet".to_string())
@@ -657,8 +744,6 @@ impl ContainerManager {
 
     /// Start a container
     pub async fn start(&self, id: &str) -> Result<()> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -666,6 +751,8 @@ impl ContainerManager {
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         // Allow idempotent call when already running — skips provider.start()
         // but still runs post-start phase (SSH daemon, postStartCommand)
@@ -729,7 +816,7 @@ impl ContainerManager {
 
                 // Ensure SSH daemon is running if SSH was set up
                 if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
-                    self.ensure_ssh_daemon_running(&svc.container_id).await?;
+                    self.ensure_ssh_daemon_running(provider, &svc.container_id).await?;
                 }
 
                 // Run post-start commands (feature commands first, then devcontainer.json)
@@ -780,7 +867,7 @@ impl ContainerManager {
 
         // Ensure SSH daemon is running if SSH was set up for this container
         if container_state.metadata.get("ssh_available").map(|v| v == "true").unwrap_or(false) {
-            self.ensure_ssh_daemon_running(&ContainerId::new(container_id)).await?;
+            self.ensure_ssh_daemon_running(provider, &ContainerId::new(container_id)).await?;
         }
 
         // Run post-start commands (feature commands first, then devcontainer.json)
@@ -818,9 +905,7 @@ impl ContainerManager {
     }
 
     /// Ensure the SSH daemon (dropbear) is running in the container
-    async fn ensure_ssh_daemon_running(&self, container_id: &ContainerId) -> Result<()> {
-        let provider = self.require_provider()?;
-
+    async fn ensure_ssh_daemon_running(&self, provider: &dyn ContainerProvider, container_id: &ContainerId) -> Result<()> {
         let script = r#"
 if ! pgrep -x dropbear >/dev/null 2>&1; then
     /usr/sbin/dropbear -s -r /etc/dropbear/dropbear_ed25519_host_key -p 127.0.0.1:2222 2>/dev/null
@@ -851,8 +936,6 @@ fi
 
     /// Stop a container (or all compose services for a compose project)
     pub async fn stop(&self, id: &str) -> Result<()> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -860,6 +943,8 @@ fi
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         if !container_state.can_stop() {
             return Err(CoreError::InvalidState(format!(
@@ -929,9 +1014,9 @@ fi
             )));
         }
 
-        // Remove the container if it exists (only if we have a provider)
+        // Remove the container if it exists (only if we have its provider)
         if let Some(ref container_id) = container_state.container_id {
-            if let Some(ref provider) = self.provider {
+            if let Some(provider) = self.providers.get(&container_state.provider) {
                 if let Err(e) = provider
                     .remove(&ContainerId::new(container_id), force)
                     .await
@@ -953,8 +1038,6 @@ fi
 
     /// Stop and remove the runtime container, but keep the state so it can be recreated with `up`
     pub async fn down(&self, id: &str) -> Result<()> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -962,6 +1045,8 @@ fi
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         // Handle compose teardown
         if let Some(ref compose_project) = container_state.compose_project {
@@ -1162,8 +1247,6 @@ fi
         no_cache: bool,
         progress: mpsc::UnboundedSender<String>,
     ) -> Result<String> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -1171,6 +1254,8 @@ fi
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         // Load container config
         let container = self.load_container(&container_state.config_path)?;
@@ -1373,8 +1458,6 @@ fi
         progress: Option<&mpsc::UnboundedSender<String>>,
         output: Option<&mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -1382,6 +1465,8 @@ fi
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         let container = self.load_container(&container_state.config_path)?;
         if let Some(ref wait_for) = container.devcontainer.wait_for {
@@ -1857,8 +1942,6 @@ fi
 
     /// Run postAttachCommand for a container (if configured)
     pub async fn run_post_attach_command(&self, id: &str) -> Result<()> {
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -1866,6 +1949,8 @@ fi
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         let container = self.load_container(&container_state.config_path)?;
         let container_id_str = container_state.container_id.as_ref().ok_or_else(|| {
@@ -2018,7 +2103,9 @@ fi
 
     /// Sync container status with actual provider status
     ///
-    /// If not connected to a provider, returns the current status without syncing.
+    /// Creates a provider matching the container's own provider type to inspect it,
+    /// so cross-provider containers (e.g. adopted from a different runtime) are
+    /// inspected correctly. Returns current status if the provider can't be created.
     pub async fn sync_status(&self, id: &str) -> Result<DevcContainerStatus> {
         let container_state = {
             let state = self.state.read().await;
@@ -2028,10 +2115,11 @@ fi
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
 
-        // If no provider, just return current status
-        let provider = match self.provider.as_ref() {
-            Some(p) => p,
-            None => return Ok(container_state.status),
+        // Look up the provider matching the container's own type.
+        // Fall back to current status if the provider isn't available.
+        let provider = match self.require_container_provider(&container_state) {
+            Ok(p) => p,
+            Err(_) => return Ok(container_state.status),
         };
 
         let new_status = if let Some(ref container_id) = container_state.container_id {
@@ -2071,8 +2159,6 @@ fi
     pub async fn logs(&self, id: &str, tail: Option<u64>) -> Result<Vec<String>> {
         use tokio::io::AsyncBufReadExt;
 
-        let provider = self.require_provider()?;
-
         let container_state = {
             let state = self.state.read().await;
             state
@@ -2080,6 +2166,8 @@ fi
                 .cloned()
                 .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
         };
+
+        let provider = self.require_container_provider(&container_state)?;
 
         let container_id = container_state
             .container_id
@@ -2401,17 +2489,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_require_provider_when_disconnected() {
-        let state = StateStore::new();
+        let workspace = create_test_workspace();
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("img123"),
+            Some("ctr123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
         let mgr = ContainerManager::disconnected_for_testing(
             GlobalConfig::default(),
             state,
             "no runtime".to_string(),
         );
-        // Any operation requiring a provider should fail
-        let result = mgr.stop("nonexistent").await;
+        // Operation on an existing container should fail with provider error
+        let result = mgr.stop(&id).await;
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("Not connected"));
+        assert!(err_msg.contains("provider not available"), "Expected 'provider not available' but got: {}", err_msg);
     }
 
     #[tokio::test]
@@ -3163,26 +3261,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sync_disconnected_returns_current() {
+    async fn test_sync_no_container_id_returns_current() {
         let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
         let mut state = StateStore::new();
         let cs = make_container_state(
             workspace.path(),
-            DevcContainerStatus::Running,
+            DevcContainerStatus::Built,
             Some("sha256:img"),
-            Some("container123"),
+            None, // no container_id → returns current status without inspecting
         );
         let id = cs.id.clone();
         state.add(cs);
 
-        let mgr = ContainerManager::disconnected_for_testing(
-            GlobalConfig::default(),
-            state,
-            "no provider".to_string(),
-        );
-
+        let mgr = test_manager_with_state(mock, state);
         let status = mgr.sync_status(&id).await.unwrap();
-        assert_eq!(status, DevcContainerStatus::Running);
+        assert_eq!(status, DevcContainerStatus::Built);
     }
 
     // ==================== List / Get ====================
@@ -4551,5 +4645,99 @@ mod tests {
         let found = mgr.get_by_name("myproject").await.unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, "myproject");
+    }
+
+    // ==================== Cross-provider ====================
+
+    #[tokio::test]
+    async fn test_cross_provider_uses_container_provider() {
+        // Manager's default is Podman, but container was created with Docker
+        let workspace = create_test_workspace();
+
+        let podman_mock = MockProvider::new(ProviderType::Podman);
+        let docker_mock = MockProvider::new(ProviderType::Docker);
+        let docker_calls = docker_mock.calls.clone();
+        let podman_calls = podman_mock.calls.clone();
+
+        // Set up Docker mock with inspect result so sync_status works
+        *docker_mock.inspect_result.lock().unwrap() =
+            Ok(mock_container_details("docker_ctr_123", ContainerStatus::Running));
+
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("img123"),
+            Some("docker_ctr_123"),
+        );
+        cs.provider = ProviderType::Docker; // Container belongs to Docker
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = ContainerManager::new_for_testing_multi(
+            vec![Box::new(podman_mock), Box::new(docker_mock)],
+            ProviderType::Podman, // Default is Podman
+            GlobalConfig::default(),
+            state,
+        );
+
+        // sync_status should use the Docker provider (the container's provider)
+        let status = mgr.sync_status(&id).await.unwrap();
+        assert_eq!(status, DevcContainerStatus::Running);
+
+        // Docker mock should have been called with Inspect, not the Podman mock
+        let docker_recorded = docker_calls.lock().unwrap();
+        assert!(
+            docker_recorded.iter().any(|c| matches!(c, MockCall::Inspect { .. })),
+            "Docker provider should have been used for inspect"
+        );
+        let podman_recorded = podman_calls.lock().unwrap();
+        assert!(
+            !podman_recorded.iter().any(|c| matches!(c, MockCall::Inspect { .. })),
+            "Podman provider should NOT have been used for inspect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cross_provider_stop_uses_container_provider() {
+        // Container belongs to Docker but default provider is Podman
+        let workspace = create_test_workspace();
+
+        let podman_mock = MockProvider::new(ProviderType::Podman);
+        let docker_mock = MockProvider::new(ProviderType::Docker);
+        let docker_calls = docker_mock.calls.clone();
+        let podman_calls = podman_mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let mut cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("img123"),
+            Some("docker_ctr_456"),
+        );
+        cs.provider = ProviderType::Docker;
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = ContainerManager::new_for_testing_multi(
+            vec![Box::new(podman_mock), Box::new(docker_mock)],
+            ProviderType::Podman,
+            GlobalConfig::default(),
+            state,
+        );
+
+        // stop() should route to Docker provider
+        mgr.stop(&id).await.unwrap();
+
+        let docker_recorded = docker_calls.lock().unwrap();
+        assert!(
+            docker_recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })),
+            "Docker provider should have been used for stop"
+        );
+        let podman_recorded = podman_calls.lock().unwrap();
+        assert!(
+            !podman_recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })),
+            "Podman provider should NOT have been used for stop"
+        );
     }
 }

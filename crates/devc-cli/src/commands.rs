@@ -46,12 +46,11 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
     };
 
     // Build runtime args for direct spawn with inherited stdio
-    let runtime = match state.provider {
-        devc_provider::ProviderType::Docker => "docker",
-        devc_provider::ProviderType::Podman => "podman",
-    };
+    let (program, prefix) = manager.runtime_args_for(&state)
+        .map_err(|e| anyhow!("{}", e))?;
 
-    let mut args = vec!["exec".to_string()];
+    let mut args: Vec<String> = prefix;
+    args.push("exec".to_string());
 
     // TTY and stdin flags
     if exec_config.tty {
@@ -78,19 +77,10 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
     args.push(container_id.clone());
     args.extend(exec_config.cmd);
 
-    let status = if is_in_toolbox() {
-        let mut fargs = vec!["--host".to_string(), "podman".to_string()];
-        fargs.extend(args);
-        std::process::Command::new("flatpak-spawn")
-            .args(&fargs)
-            .status()
-            .context("Failed to spawn command via flatpak-spawn")?
-    } else {
-        std::process::Command::new(runtime)
-            .args(&args)
-            .status()
-            .context("Failed to spawn command")?
-    };
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .status()
+        .context("Failed to spawn command")?;
 
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
@@ -110,15 +100,19 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
             manager.start(&state.id).await?;
             // Re-fetch state after starting
             let state = find_container(manager, container).await?;
+            let (program, prefix) = manager.runtime_args_for(&state)
+                .map_err(|e| anyhow!("{}", e))?;
             print_credential_status(manager, &state).await;
-            return ssh_to_container(&state, &cmd).await;
+            return ssh_to_container(&state, &cmd, &program, &prefix).await;
         } else {
             bail!("Container '{}' is not running (status: {})", state.name, state.status);
         }
     }
 
+    let (program, prefix) = manager.runtime_args_for(&state)
+        .map_err(|e| anyhow!("{}", e))?;
     print_credential_status(manager, &state).await;
-    ssh_to_container(&state, &cmd).await
+    ssh_to_container(&state, &cmd, &program, &prefix).await
 }
 
 /// Set up credential forwarding and print a one-line status
@@ -140,7 +134,7 @@ async fn print_credential_status(manager: &ContainerManager, state: &ContainerSt
 }
 
 /// Connect to container, preferring SSH over stdio when available
-async fn ssh_to_container(state: &ContainerState, cmd: &[String]) -> Result<()> {
+async fn ssh_to_container(state: &ContainerState, cmd: &[String], program: &str, prefix: &[String]) -> Result<()> {
     let container_id = state.container_id.as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
@@ -150,7 +144,7 @@ async fn ssh_to_container(state: &ContainerState, cmd: &[String]) -> Result<()> 
         .unwrap_or(false);
 
     if ssh_available {
-        match ssh_via_dropbear(state, cmd).await {
+        match ssh_via_dropbear(state, cmd, program, prefix).await {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => {
                 // SSH exited with non-zero but we should still respect that
@@ -165,12 +159,12 @@ async fn ssh_to_container(state: &ContainerState, cmd: &[String]) -> Result<()> 
         }
     }
 
-    // Fallback to podman/docker exec -it
-    exec_shell_fallback(state, container_id, cmd).await
+    // Fallback to exec -it
+    exec_shell_fallback(program, prefix, container_id, cmd).await
 }
 
 /// Connect via SSH over stdio using dropbear in inetd mode
-async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String]) -> Result<std::process::ExitStatus> {
+async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String], program: &str, prefix: &[String]) -> Result<std::process::ExitStatus> {
     let container_id = state.container_id.as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
@@ -187,25 +181,19 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String]) -> Result<std:
         bail!("SSH key not found at {:?}", key_path);
     }
 
-    // Build the proxy command based on environment
+    // Build the proxy command using runtime args from the provider
     // Dropbear runs as daemon on 127.0.0.1:2222, we use socat to connect
     // Shell-quote container_id for safe interpolation into ProxyCommand
     let quoted_id = format!("'{}'", container_id.replace('\'', "'\\''"));
-    let proxy_cmd = if is_in_toolbox() {
-        format!(
-            "flatpak-spawn --host podman exec -i {} socat - TCP:127.0.0.1:2222",
-            quoted_id
-        )
+    let prefix_str = if prefix.is_empty() {
+        String::new()
     } else {
-        let runtime = match state.provider {
-            devc_provider::ProviderType::Docker => "docker",
-            devc_provider::ProviderType::Podman => "podman",
-        };
-        format!(
-            "{} exec -i {} socat - TCP:127.0.0.1:2222",
-            runtime, quoted_id
-        )
+        format!("{} ", prefix.join(" "))
     };
+    let proxy_cmd = format!(
+        "{} {}exec -i {} socat - TCP:127.0.0.1:2222",
+        program, prefix_str, quoted_id
+    );
 
     let key_path_str = key_path.to_str()
         .ok_or_else(|| anyhow!("SSH key path contains invalid UTF-8"))?;
@@ -241,7 +229,7 @@ async fn ssh_via_dropbear(state: &ContainerState, cmd: &[String]) -> Result<std:
 }
 
 /// Fallback to exec -it (doesn't support terminal resize)
-async fn exec_shell_fallback(state: &ContainerState, container_id: &str, cmd: &[String]) -> Result<()> {
+async fn exec_shell_fallback(program: &str, prefix: &[String], container_id: &str, cmd: &[String]) -> Result<()> {
     // Build the shell command: interactive shell, or `bash -lc "cmd"` for commands
     let shell_args: Vec<String> = if cmd.is_empty() {
         vec!["/bin/bash".to_string()]
@@ -254,30 +242,14 @@ async fn exec_shell_fallback(state: &ContainerState, container_id: &str, cmd: &[
         ]
     };
 
-    let status = if is_in_toolbox() {
-        let mut args = vec![
-            "--host".to_string(), "podman".to_string(),
-            "exec".to_string(), "-it".to_string(), container_id.to_string(),
-        ];
-        args.extend(shell_args);
-        std::process::Command::new("flatpak-spawn")
-            .args(&args)
-            .status()
-            .context("Failed to spawn shell via flatpak-spawn")?
-    } else {
-        let runtime = match state.provider {
-            devc_provider::ProviderType::Docker => "docker",
-            devc_provider::ProviderType::Podman => "podman",
-        };
-        let mut args = vec![
-            "exec".to_string(), "-it".to_string(), container_id.to_string(),
-        ];
-        args.extend(shell_args);
-        std::process::Command::new(runtime)
-            .args(&args)
-            .status()
-            .context("Failed to spawn shell")?
-    };
+    let mut args: Vec<String> = prefix.to_vec();
+    args.extend(["exec".to_string(), "-it".to_string(), container_id.to_string()]);
+    args.extend(shell_args);
+
+    let status = std::process::Command::new(program)
+        .args(&args)
+        .status()
+        .context("Failed to spawn shell")?;
 
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
@@ -286,15 +258,10 @@ async fn exec_shell_fallback(state: &ContainerState, container_id: &str, cmd: &[
     Ok(())
 }
 
-/// Check if running inside a toolbox/container that needs flatpak-spawn
-fn is_in_toolbox() -> bool {
-    std::path::Path::new("/run/.containerenv").exists()
-}
-
 /// Resize container terminal to match current terminal size
 /// This is a lightweight command that doesn't need the full provider infrastructure
 pub async fn resize(
-    _manager: &ContainerManager,
+    manager: &ContainerManager,
     container: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
@@ -322,6 +289,10 @@ pub async fn resize(
     let container_id = state.container_id.as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
+    // Get runtime args from the container's provider
+    let (program, prefix) = manager.runtime_args_for(&state)
+        .map_err(|e| anyhow!("{}", e))?;
+
     // Get terminal size - use args if provided, otherwise detect
     let (cols, rows) = match (cols, rows) {
         (Some(c), Some(r)) => (c, r),
@@ -334,25 +305,13 @@ pub async fn resize(
         rows, cols
     );
 
-    // Determine how to reach the container runtime
-    let status = if is_in_toolbox() {
-        // Inside toolbox: use flatpak-spawn to reach host's podman
-        std::process::Command::new("flatpak-spawn")
-            .args(["--host", "podman", "exec", container_id, "bash", "-c", &resize_cmd])
-            .status()
-            .context("Failed to exec via flatpak-spawn")?
-    } else {
-        // On host: try podman, fall back to docker
-        std::process::Command::new("podman")
-            .args(["exec", container_id, "bash", "-c", &resize_cmd])
-            .status()
-            .or_else(|_| {
-                std::process::Command::new("docker")
-                    .args(["exec", container_id, "bash", "-c", &resize_cmd])
-                    .status()
-            })
-            .context("Failed to exec resize command")?
-    };
+    let mut args: Vec<String> = prefix;
+    args.extend(["exec".to_string(), container_id.to_string(), "bash".to_string(), "-c".to_string(), resize_cmd]);
+
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .status()
+        .context("Failed to exec resize command")?;
 
     if status.success() {
         println!("Resized '{}' to {}x{}", state.name, cols, rows);
@@ -940,8 +899,8 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
         let container_id = state.container_id.as_ref()
             .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
-        let provider = manager.provider()
-            .ok_or_else(|| anyhow!("Not connected to a container provider"))?;
+        let provider = manager.provider_for_type(state.provider)
+            .ok_or_else(|| anyhow!("{} provider not available", state.provider))?;
         let cid = devc_provider::ContainerId::new(container_id);
 
         let user = state.metadata.get("remote_user").map(|s| s.as_str()).unwrap_or("root");

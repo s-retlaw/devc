@@ -4,7 +4,6 @@
 //! When the user detaches (Ctrl+\), the PTY and docker exec process stay alive,
 //! allowing reattachment with full state preserved.
 
-use devc_provider::ProviderType;
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::process::{Command, Stdio};
@@ -28,7 +27,8 @@ pub fn reset_terminal() {
 
 /// Configuration for spawning a shell session
 pub struct ShellConfig {
-    pub provider_type: ProviderType,
+    pub runtime_program: String,
+    pub runtime_prefix: Vec<String>,
     pub container_id: String,
     pub shell: String,
     pub user: Option<String>,
@@ -94,14 +94,10 @@ mod pty {
             let master_fd = pty.master;
             let slave_fd = pty.slave;
 
-            // Build the docker/podman exec command
+            // Build the exec command using pre-resolved runtime args
             // No --detach-keys: we intercept Ctrl+\ in the relay loop ourselves
-            let runtime = match config.provider_type {
-                ProviderType::Docker => "docker",
-                ProviderType::Podman => "podman",
-            };
-
-            let mut cmd = Command::new(runtime);
+            let mut cmd = Command::new(&config.runtime_program);
+            cmd.args(&config.runtime_prefix);
             cmd.args(["exec", "-it"]);
 
             if let Some(ref user) = config.user {
@@ -365,7 +361,8 @@ mod tests {
     #[test]
     fn test_shell_config_docker() {
         let config = ShellConfig {
-            provider_type: ProviderType::Docker,
+            runtime_program: "docker".to_string(),
+            runtime_prefix: vec![],
             container_id: "abc123".to_string(),
             shell: "/bin/bash".to_string(),
             user: None,
@@ -378,7 +375,8 @@ mod tests {
     #[test]
     fn test_shell_config_podman_with_options() {
         let config = ShellConfig {
-            provider_type: ProviderType::Podman,
+            runtime_program: "podman".to_string(),
+            runtime_prefix: vec![],
             container_id: "def456".to_string(),
             shell: "/bin/zsh".to_string(),
             user: Some("root".to_string()),
@@ -386,6 +384,20 @@ mod tests {
         };
         assert_eq!(config.user, Some("root".to_string()));
         assert_eq!(config.working_dir, Some("/workspace".to_string()));
+    }
+
+    #[test]
+    fn test_shell_config_toolbox() {
+        let config = ShellConfig {
+            runtime_program: "flatpak-spawn".to_string(),
+            runtime_prefix: vec!["--host".to_string(), "podman".to_string()],
+            container_id: "toolbox123".to_string(),
+            shell: "/bin/bash".to_string(),
+            user: None,
+            working_dir: None,
+        };
+        assert_eq!(config.runtime_program, "flatpak-spawn");
+        assert_eq!(config.runtime_prefix, vec!["--host", "podman"]);
     }
 
     #[test]

@@ -178,7 +178,8 @@ pub struct ShellSession {
     pub container_id: String,
     pub container_name: String,
     pub provider_container_id: String,
-    pub provider_type: ProviderType,
+    pub runtime_program: String,
+    pub runtime_prefix: Vec<String>,
     #[cfg(unix)]
     pub pty: Option<PtyShell>,
 }
@@ -265,6 +266,10 @@ pub struct App {
     pub ports_container_id: Option<String>,
     /// Provider container ID for the ports view
     pub ports_provider_container_id: Option<String>,
+    /// Runtime program for the current ports view container
+    pub ports_runtime_program: Option<String>,
+    /// Runtime prefix args for the current ports view container
+    pub ports_runtime_prefix: Vec<String>,
     /// Detected ports in current container
     pub detected_ports: Vec<DetectedPort>,
     /// Selected port index
@@ -325,6 +330,8 @@ pub struct App {
     pub auto_forwarded_ports: HashSet<(String, u16)>,
     /// Set of (provider_container_id, port) pairs where browser was already opened (for OpenBrowserOnce)
     pub auto_opened_ports: HashSet<(String, u16)>,
+    /// Cached runtime args per provider container ID (for auto-forwarding)
+    auto_runtime_args: HashMap<String, (String, Vec<String>)>,
 }
 
 impl App {
@@ -394,6 +401,8 @@ impl App {
             // Port forwarding
             ports_container_id: None,
             ports_provider_container_id: None,
+            ports_runtime_program: None,
+            ports_runtime_prefix: Vec::new(),
             detected_ports: Vec::new(),
             selected_port: 0,
             ports_table_state: TableState::default().with_selected(0),
@@ -419,6 +428,7 @@ impl App {
             auto_forward_configs: HashMap::new(),
             auto_forwarded_ports: HashSet::new(),
             auto_opened_ports: HashSet::new(),
+            auto_runtime_args: HashMap::new(),
         }
     }
 
@@ -574,6 +584,8 @@ impl App {
             // Port forwarding
             ports_container_id: None,
             ports_provider_container_id: None,
+            ports_runtime_program: None,
+            ports_runtime_prefix: Vec::new(),
             detected_ports: Vec::new(),
             selected_port: 0,
             ports_table_state: TableState::default().with_selected(0),
@@ -599,6 +611,7 @@ impl App {
             auto_forward_configs: HashMap::new(),
             auto_forwarded_ports: HashSet::new(),
             auto_opened_ports: HashSet::new(),
+            auto_runtime_args: HashMap::new(),
         })
     }
 
@@ -913,8 +926,8 @@ impl App {
             return;
         }
 
-        // Load configs while holding the manager lock, then release it
-        let configs_to_start: Vec<(String, Vec<devc_config::PortForwardConfig>)> = {
+        // Load configs and runtime args while holding the manager lock, then release it
+        let configs_to_start: Vec<(String, ProviderType, (String, Vec<String>), Vec<devc_config::PortForwardConfig>)> = {
             let manager = self.manager.read().await;
             let mut result = Vec::new();
             for (provider_cid, devc_id) in &needs_detector {
@@ -928,19 +941,20 @@ impl App {
                 };
                 let auto_fwd = config.auto_forward_config();
                 if !auto_fwd.is_empty() {
-                    result.push((provider_cid.clone(), auto_fwd));
+                    let rt_args = manager.runtime_args_for(&state)
+                        .unwrap_or_else(|_| (state.provider.to_string(), vec![]));
+                    result.push((provider_cid.clone(), state.provider, rt_args, auto_fwd));
                 }
             }
             result
         };
 
         // Now spawn detectors (no lock held)
-        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
-        for (provider_cid, auto_fwd) in configs_to_start {
+        for (provider_cid, container_provider_type, rt_args, auto_fwd) in configs_to_start {
             // Create a new provider instance for the background detector task.
             // We use CliProvider directly (same pattern as existing port detection code).
             let provider_arc: Arc<dyn ContainerProvider + Send + Sync> = {
-                match Self::create_cli_provider(provider_type).await {
+                match Self::create_cli_provider(container_provider_type).await {
                     Ok(p) => Arc::new(p),
                     Err(_) => continue,
                 }
@@ -954,9 +968,10 @@ impl App {
                 .map(|(_, port)| *port)
                 .collect();
 
-            let rx = spawn_port_detector(provider_arc, container_id, provider_type, forwarded);
+            let rx = spawn_port_detector(provider_arc, container_id, container_provider_type, forwarded);
             self.auto_port_detectors.insert(provider_cid.clone(), rx);
-            self.auto_forward_configs.insert(provider_cid, auto_fwd);
+            self.auto_forward_configs.insert(provider_cid.clone(), auto_fwd);
+            self.auto_runtime_args.insert(provider_cid, rt_args);
         }
     }
 
@@ -966,8 +981,6 @@ impl App {
     /// matches an auto-forward config entry (and action != Ignore, and not already
     /// forwarded), spawns a forwarder.
     async fn poll_auto_port_detectors(&mut self) {
-        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
-
         let cids: Vec<String> = self.auto_port_detectors.keys().cloned().collect();
         for cid in cids {
             let rx = match self.auto_port_detectors.get_mut(&cid) {
@@ -1000,7 +1013,11 @@ impl App {
                         }
 
                         // Auto-forward this port
-                        match spawn_forwarder(provider_type, &cid, pfc.port, pfc.port).await {
+                        let (rt_prog, rt_prefix) = self.auto_runtime_args
+                            .get(&cid)
+                            .cloned()
+                            .unwrap_or_else(|| ("docker".to_string(), vec![]));
+                        match spawn_forwarder(rt_prog, rt_prefix, cid.clone(), pfc.port, pfc.port).await {
                             Ok(forwarder) => {
                                 self.active_forwarders.insert(key.clone(), forwarder);
                                 self.auto_forwarded_ports.insert(key.clone());
@@ -1083,9 +1100,8 @@ impl App {
 
         let (files, project_name, workspace_path) = compose_info;
 
-        // Create a provider for the compose_ps call
-        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
-        let provider = match Self::create_cli_provider(provider_type).await {
+        // Create a provider for the compose_ps call (use the container's own provider)
+        let provider = match Self::create_cli_provider(container.provider).await {
             Ok(p) => p,
             Err(_) => {
                 self.compose_services_loading = false;
@@ -2216,9 +2232,18 @@ impl App {
             }
         };
 
+        // Resolve runtime args for this container's provider
+        let (rt_program, rt_prefix) = {
+            let manager = self.manager.read().await;
+            manager.runtime_args_for(container)
+                .unwrap_or_else(|_| (container.provider.to_string(), vec![]))
+        };
+
         self.view = View::Ports;
         self.ports_container_id = Some(container.id.clone());
         self.ports_provider_container_id = Some(provider_container_id.clone());
+        self.ports_runtime_program = Some(rt_program.clone());
+        self.ports_runtime_prefix = rt_prefix.clone();
         self.detected_ports.clear();
         self.selected_port = 0;
         self.ports_table_state.select(Some(0));
@@ -2226,8 +2251,7 @@ impl App {
         self.socat_installing = false;
 
         // Check if socat is installed
-        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
-        let socat_check = check_socat_installed(provider_type, &provider_container_id).await;
+        let socat_check = check_socat_installed(&rt_program, &rt_prefix, &provider_container_id).await;
         self.socat_installed = Some(socat_check);
         if !socat_check {
             self.status_message = Some("socat not installed - press 'i' to install".to_string());
@@ -2242,14 +2266,13 @@ impl App {
             .collect();
 
         // Start port detection polling - create a new provider instance for the background task
-        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
-        let provider_result = Self::create_cli_provider(provider_type).await;
+        let provider_result = Self::create_cli_provider(container.provider).await;
 
         match provider_result {
             Ok(provider) => {
                 let provider_arc: Arc<dyn ContainerProvider + Send + Sync> = Arc::new(provider);
                 let container_id = devc_provider::ContainerId::new(&provider_container_id);
-                let rx = spawn_port_detector(provider_arc, container_id, provider_type, forwarded_ports);
+                let rx = spawn_port_detector(provider_arc, container_id, container.provider, forwarded_ports);
                 self.port_detect_rx = Some(rx);
                 self.status_message = Some("Detecting ports...".to_string());
             }
@@ -2266,6 +2289,8 @@ impl App {
         self.view = View::Main;
         self.ports_container_id = None;
         self.ports_provider_container_id = None;
+        self.ports_runtime_program = None;
+        self.ports_runtime_prefix.clear();
         self.port_detect_rx = None; // Stops the polling task
         self.detected_ports.clear();
         self.socat_installed = None;
@@ -2280,10 +2305,11 @@ impl App {
             None => return Ok(()),
         };
 
-        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+        let program = self.ports_runtime_program.clone().unwrap_or_else(|| "docker".to_string());
+        let prefix = self.ports_runtime_prefix.clone();
 
         // Spawn forwarder (uses socat via exec, no SSH needed)
-        match spawn_forwarder(provider_type, &container_id, port, port).await {
+        match spawn_forwarder(program, prefix, container_id.clone(), port, port).await {
             Ok(forwarder) => {
                 self.active_forwarders.insert((container_id.clone(), port), forwarder);
                 // Update detected_ports to reflect forwarded state
@@ -2351,7 +2377,8 @@ impl App {
             None => return,
         };
 
-        let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
+        let program = self.ports_runtime_program.clone().unwrap_or_else(|| "docker".to_string());
+        let prefix = self.ports_runtime_prefix.clone();
 
         // Create channel for result
         let (tx, rx) = mpsc::unbounded_channel();
@@ -2362,7 +2389,7 @@ impl App {
 
         // Spawn background task
         tokio::spawn(async move {
-            let result = install_socat(provider_type, &container_id).await;
+            let result = install_socat(&program, &prefix, &container_id).await;
             let _ = tx.send(result);
         });
     }
@@ -2492,13 +2519,15 @@ impl App {
             self.shell_sessions.remove(&container_id);
         }
 
-        // Set up credential forwarding before spawning shell
-        {
+        // Set up credential forwarding and resolve runtime args before spawning shell
+        let (rt_program, rt_prefix) = {
             let manager = self.manager.read().await;
             if let Err(e) = manager.setup_credentials_for_container(&container.id).await {
                 tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
             }
-        }
+            manager.runtime_args_for(container)
+                .unwrap_or_else(|_| (container.provider.to_string(), vec![]))
+        };
 
         // Create a new session (PTY will be spawned in run_shell_session)
         self.shell_sessions.insert(
@@ -2507,7 +2536,8 @@ impl App {
                 container_id: container_id.clone(),
                 container_name: container.name.clone(),
                 provider_container_id,
-                provider_type: self.active_provider.unwrap_or(container.provider),
+                runtime_program: rt_program,
+                runtime_prefix: rt_prefix,
                 pty: None,
             },
         );
@@ -2527,9 +2557,10 @@ impl App {
     }
 
     #[cfg(unix)]
-    fn make_shell_config(&self, provider_type: ProviderType, container_id: String) -> ShellConfig {
+    fn make_shell_config(&self, runtime_program: String, runtime_prefix: Vec<String>, container_id: String) -> ShellConfig {
         ShellConfig {
-            provider_type,
+            runtime_program,
+            runtime_prefix,
             container_id,
             shell: self.config.defaults.shell.clone(),
             user: self.config.defaults.user.clone(),
@@ -2540,19 +2571,14 @@ impl App {
     /// Detect which shell is available in the container.
     /// Tests the configured shell first, falls back to /bin/sh.
     #[cfg(unix)]
-    fn detect_shell(provider_type: ProviderType, container_id: &str, preferred: &str) -> String {
-        let runtime = match provider_type {
-            ProviderType::Docker => "docker",
-            ProviderType::Podman => "podman",
-        };
+    fn detect_shell(program: &str, prefix: &[String], container_id: &str, preferred: &str) -> String {
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(prefix);
+        cmd.args(["exec", container_id, "test", "-x", preferred]);
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
 
-        let result = std::process::Command::new(runtime)
-            .args(["exec", container_id, "test", "-x", preferred])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-
-        if let Ok(status) = result {
+        if let Ok(status) = cmd.status() {
             if status.success() {
                 return preferred.to_string();
             }
@@ -2580,12 +2606,13 @@ impl App {
         };
 
         // Extract session info we need before taking the PTY
-        let (container_name, provider_container_id, provider_type, has_pty) = {
+        let (container_name, provider_container_id, runtime_program, runtime_prefix, has_pty) = {
             match self.shell_sessions.get(&container_id) {
                 Some(s) => (
                     s.container_name.clone(),
                     s.provider_container_id.clone(),
-                    s.provider_type,
+                    s.runtime_program.clone(),
+                    s.runtime_prefix.clone(),
                     s.pty.is_some(),
                 ),
                 None => {
@@ -2629,8 +2656,8 @@ impl App {
                 if !p.is_alive() {
                     // PTY died while we were away, spawn a new one below
                     drop(p);
-                    let mut config = self.make_shell_config(provider_type, provider_container_id.clone());
-                    config.shell = Self::detect_shell(provider_type, &provider_container_id, &config.shell);
+                    let mut config = self.make_shell_config(runtime_program.clone(), runtime_prefix.clone(), provider_container_id.clone());
+                    config.shell = Self::detect_shell(&runtime_program, &runtime_prefix, &provider_container_id, &config.shell);
                     match PtyShell::spawn(&config) {
                         Ok(new_p) => new_p,
                         Err(e) => {
@@ -2659,8 +2686,8 @@ impl App {
             }
             _ => {
                 // Spawn new PTY
-                let mut config = self.make_shell_config(provider_type, provider_container_id.clone());
-                config.shell = Self::detect_shell(provider_type, &provider_container_id, &config.shell);
+                let mut config = self.make_shell_config(runtime_program.clone(), runtime_prefix.clone(), provider_container_id.clone());
+                config.shell = Self::detect_shell(&runtime_program, &runtime_prefix, &provider_container_id, &config.shell);
                 match PtyShell::spawn(&config) {
                     Ok(p) => p,
                     Err(e) => {
@@ -2948,8 +2975,7 @@ impl App {
             self.status_message = Some(format!("Loading logs for {}...", svc_name));
             self.loading = true;
 
-            let provider_type = self.active_provider.unwrap_or(ProviderType::Docker);
-            match Self::create_cli_provider(provider_type).await {
+            match Self::create_cli_provider(container.provider).await {
                 Ok(provider) => {
                     let log_config = devc_provider::LogConfig {
                         follow: false,

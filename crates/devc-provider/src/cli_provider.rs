@@ -780,6 +780,16 @@ impl ContainerProvider for CliProvider {
         Ok(())
     }
 
+    fn runtime_args(&self) -> (String, Vec<String>) {
+        if self.cmd_prefix.is_empty() {
+            (self.cmd.clone(), vec![])
+        } else {
+            let mut args: Vec<String> = self.cmd_prefix[1..].iter().cloned().collect();
+            args.push(self.cmd.clone());
+            (self.cmd_prefix[0].clone(), args)
+        }
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             provider_type: self.provider_type,

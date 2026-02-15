@@ -53,7 +53,7 @@ impl std::fmt::Display for ImageId {
 }
 
 /// Container provider type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
     Docker,

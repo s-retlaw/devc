@@ -3,7 +3,6 @@
 //! Uses socat inside the container to forward ports directly through `podman exec`
 //! or `docker exec`, without requiring SSH.
 
-use devc_provider::ProviderType;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -12,19 +11,16 @@ use tokio::task::JoinHandle;
 
 /// Check if socat is installed in a container
 pub async fn check_socat_installed(
-    provider_type: ProviderType,
+    program: &str,
+    prefix: &[String],
     container_id: &str,
 ) -> bool {
-    let (cmd, args) = build_check_command(provider_type, container_id, "socat");
+    let mut cmd = Command::new(program);
+    cmd.args(prefix);
+    cmd.args(["exec", container_id, "sh", "-c", "command -v socat"]);
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
-    let output = Command::new(&cmd)
-        .args(&args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-
-    matches!(output, Ok(status) if status.success())
+    matches!(cmd.status().await, Ok(status) if status.success())
 }
 
 /// Result of socat installation attempt
@@ -49,77 +45,28 @@ pub const PACKAGE_MANAGERS: &[(&str, &str)] = &[
     ("pacman", "pacman -Sy --noconfirm socat"),
 ];
 
-/// Build the command to check if a program exists in a container
-pub fn build_check_command(
-    provider_type: ProviderType,
-    container_id: &str,
-    program: &str,
-) -> (String, Vec<String>) {
-    let runtime = match provider_type {
-        ProviderType::Docker => "docker",
-        ProviderType::Podman => "podman",
-    };
-    let check_cmd = format!("command -v {}", program);
-
-    (
-        runtime.to_string(),
-        vec![
-            "exec".to_string(),
-            container_id.to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            check_cmd,
-        ],
-    )
-}
-
-/// Build the command to install a package as root in a container
-pub fn build_install_command(
-    provider_type: ProviderType,
-    container_id: &str,
-    install_cmd: &str,
-) -> (String, Vec<String>) {
-    let runtime = match provider_type {
-        ProviderType::Docker => "docker",
-        ProviderType::Podman => "podman",
-    };
-
-    (
-        runtime.to_string(),
-        vec![
-            "exec".to_string(),
-            "-u".to_string(),
-            "root".to_string(),
-            container_id.to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            install_cmd.to_string(),
-        ],
-    )
-}
-
 /// Install socat in a container, detecting the appropriate package manager
 pub async fn install_socat(
-    provider_type: ProviderType,
+    program: &str,
+    prefix: &[String],
     container_id: &str,
 ) -> InstallResult {
     for (pkg_mgr, install_cmd) in PACKAGE_MANAGERS {
         // Check if this package manager exists
-        let (cmd, args) = build_check_command(provider_type, container_id, pkg_mgr);
-        let check = Command::new(&cmd)
-            .args(&args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+        let mut cmd = Command::new(program);
+        cmd.args(prefix);
+        cmd.args(["exec", container_id, "sh", "-c", &format!("command -v {}", pkg_mgr)]);
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+
+        let check = cmd.status().await;
 
         if matches!(check, Ok(status) if status.success()) {
             // Found package manager, try to install as root
-            let (cmd, args) = build_install_command(provider_type, container_id, install_cmd);
-            let output = Command::new(&cmd)
-                .args(&args)
-                .output()
-                .await;
+            let mut cmd = Command::new(program);
+            cmd.args(prefix);
+            cmd.args(["exec", "-u", "root", container_id, "sh", "-c", install_cmd]);
+
+            let output = cmd.output().await;
 
             return match output {
                 Ok(out) if out.status.success() => InstallResult::Success,
@@ -213,7 +160,8 @@ impl std::error::Error for ForwarderError {}
 /// Spawn a port forwarder that forwards connections from localhost to the container
 ///
 /// # Arguments
-/// * `provider_type` - Docker or Podman
+/// * `program` - Runtime program (e.g. "docker", "flatpak-spawn")
+/// * `prefix` - Runtime prefix args (e.g. ["--host", "podman"])
 /// * `container_id` - Container ID to forward to
 /// * `local_port` - Port on host to listen on
 /// * `remote_port` - Port in container to forward to
@@ -221,8 +169,9 @@ impl std::error::Error for ForwarderError {}
 /// # Returns
 /// A `PortForwarder` that can be used to monitor and stop the forwarding
 pub async fn spawn_forwarder(
-    provider_type: ProviderType,
-    container_id: &str,
+    program: String,
+    prefix: Vec<String>,
+    container_id: String,
     local_port: u16,
     remote_port: u16,
 ) -> Result<PortForwarder, ForwarderError> {
@@ -232,7 +181,6 @@ pub async fn spawn_forwarder(
         .map_err(|e| ForwarderError::PortInUse(local_port, e.to_string()))?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let container_id_owned = container_id.to_string();
 
     let listener_handle = tokio::spawn(async move {
         loop {
@@ -251,11 +199,12 @@ pub async fn spawn_forwarder(
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, _addr)) => {
-                            let cid = container_id_owned.clone();
-                            let pt = provider_type;
+                            let cid = container_id.clone();
+                            let prog = program.clone();
+                            let pfx = prefix.clone();
                             let rp = remote_port;
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, pt, &cid, rp).await {
+                                if let Err(e) = handle_connection(stream, &prog, &pfx, &cid, rp).await {
                                     tracing::debug!("Connection error: {}", e);
                                 }
                             });
@@ -281,15 +230,16 @@ pub async fn spawn_forwarder(
 /// Handle a single TCP connection by forwarding it through container exec
 async fn handle_connection(
     tcp_stream: tokio::net::TcpStream,
-    provider_type: ProviderType,
+    program: &str,
+    prefix: &[String],
     container_id: &str,
     remote_port: u16,
 ) -> Result<(), std::io::Error> {
-    // Build exec command
-    let (cmd, args) = build_exec_command(provider_type, container_id, remote_port);
+    let socat_cmd = format!("socat - TCP:localhost:{}", remote_port);
 
-    let mut child = Command::new(&cmd)
-        .args(&args)
+    let mut child = Command::new(program)
+        .args(prefix)
+        .args(["exec", "-i", container_id, "sh", "-c", &socat_cmd])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -333,59 +283,6 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Build the exec command for forwarding via socat
-fn build_exec_command(
-    provider_type: ProviderType,
-    container_id: &str,
-    remote_port: u16,
-) -> (String, Vec<String>) {
-    let socat_cmd = format!("socat - TCP:localhost:{}", remote_port);
-
-    match provider_type {
-        ProviderType::Docker => (
-            "docker".to_string(),
-            vec![
-                "exec".to_string(),
-                "-i".to_string(),
-                container_id.to_string(),
-                "sh".to_string(),
-                "-c".to_string(),
-                socat_cmd,
-            ],
-        ),
-        ProviderType::Podman => {
-            // Check if running in flatpak
-            if std::env::var("FLATPAK_ID").is_ok() {
-                (
-                    "flatpak-spawn".to_string(),
-                    vec![
-                        "--host".to_string(),
-                        "podman".to_string(),
-                        "exec".to_string(),
-                        "-i".to_string(),
-                        container_id.to_string(),
-                        "sh".to_string(),
-                        "-c".to_string(),
-                        socat_cmd,
-                    ],
-                )
-            } else {
-                (
-                    "podman".to_string(),
-                    vec![
-                        "exec".to_string(),
-                        "-i".to_string(),
-                        container_id.to_string(),
-                        "sh".to_string(),
-                        "-c".to_string(),
-                        socat_cmd,
-                    ],
-                )
-            }
-        }
-    }
-}
-
 /// Open a URL in the default browser
 pub fn open_in_browser(port: u16, protocol: Option<&str>) -> Result<(), String> {
     let scheme = if protocol == Some("https") { "https" } else { "http" };
@@ -424,29 +321,6 @@ mod tests {
     use super::*;
     use std::net::TcpStream;
 
-    #[test]
-    fn test_build_exec_command_docker() {
-        let (cmd, args) = build_exec_command(ProviderType::Docker, "abc123", 3000);
-        assert_eq!(cmd, "docker");
-        assert_eq!(
-            args,
-            vec!["exec", "-i", "abc123", "sh", "-c", "socat - TCP:localhost:3000"]
-        );
-    }
-
-    #[test]
-    fn test_build_exec_command_podman() {
-        // Clear FLATPAK_ID if set
-        std::env::remove_var("FLATPAK_ID");
-
-        let (cmd, args) = build_exec_command(ProviderType::Podman, "def456", 8080);
-        assert_eq!(cmd, "podman");
-        assert_eq!(
-            args,
-            vec!["exec", "-i", "def456", "sh", "-c", "socat - TCP:localhost:8080"]
-        );
-    }
-
     /// Helper to check if a port is available (not bound)
     fn port_is_available(port: u16) -> bool {
         std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
@@ -470,7 +344,7 @@ mod tests {
         assert!(port_is_available(port), "Port should be available before test");
 
         // Spawn forwarder (will fail to connect to container, but that's ok - we just want to test port binding)
-        let forwarder = spawn_forwarder(ProviderType::Docker, "fake-container", port, 3000)
+        let forwarder = spawn_forwarder("docker".to_string(), vec![], "fake-container".to_string(), port, 3000)
             .await
             .expect("Should bind port");
 
@@ -502,7 +376,7 @@ mod tests {
 
         {
             // Spawn forwarder in a scope
-            let forwarder = spawn_forwarder(ProviderType::Docker, "fake-container", port, 3000)
+            let forwarder = spawn_forwarder("docker".to_string(), vec![], "fake-container".to_string(), port, 3000)
                 .await
                 .expect("Should bind port");
 
@@ -528,7 +402,7 @@ mod tests {
             .expect("Should bind port");
 
         // Try to spawn forwarder on same port
-        let result = spawn_forwarder(ProviderType::Docker, "fake-container", port, 3000).await;
+        let result = spawn_forwarder("docker".to_string(), vec![], "fake-container".to_string(), port, 3000).await;
 
         assert!(result.is_err(), "Should fail when port is in use");
         match result {
@@ -542,11 +416,11 @@ mod tests {
         let port1 = 19879;
         let port2 = 19880;
 
-        let forwarder1 = spawn_forwarder(ProviderType::Docker, "container1", port1, 3000)
+        let forwarder1 = spawn_forwarder("docker".to_string(), vec![], "container1".to_string(), port1, 3000)
             .await
             .expect("Should bind port1");
 
-        let forwarder2 = spawn_forwarder(ProviderType::Docker, "container2", port2, 8080)
+        let forwarder2 = spawn_forwarder("docker".to_string(), vec![], "container2".to_string(), port2, 8080)
             .await
             .expect("Should bind port2");
 
@@ -573,7 +447,7 @@ mod tests {
     async fn test_forwarder_accepts_connections() {
         let port = 19881;
 
-        let forwarder = spawn_forwarder(ProviderType::Docker, "fake-container", port, 3000)
+        let forwarder = spawn_forwarder("docker".to_string(), vec![], "fake-container".to_string(), port, 3000)
             .await
             .expect("Should bind port");
 
@@ -586,70 +460,6 @@ mod tests {
         assert!(connect_result.is_ok(), "Should accept connection");
 
         forwarder.stop().await;
-    }
-
-    #[test]
-    fn test_build_check_command_docker() {
-        let (cmd, args) = build_check_command(ProviderType::Docker, "abc123", "socat");
-        assert_eq!(cmd, "docker");
-        assert_eq!(
-            args,
-            vec!["exec", "abc123", "sh", "-c", "command -v socat"]
-        );
-    }
-
-    #[test]
-    fn test_build_check_command_podman() {
-        let (cmd, args) = build_check_command(ProviderType::Podman, "def456", "apt-get");
-        assert_eq!(cmd, "podman");
-        assert_eq!(
-            args,
-            vec!["exec", "def456", "sh", "-c", "command -v apt-get"]
-        );
-    }
-
-    #[test]
-    fn test_build_install_command_docker() {
-        let (cmd, args) = build_install_command(
-            ProviderType::Docker,
-            "abc123",
-            "apt-get update && apt-get install -y socat",
-        );
-        assert_eq!(cmd, "docker");
-        assert_eq!(
-            args,
-            vec![
-                "exec",
-                "-u",
-                "root",
-                "abc123",
-                "sh",
-                "-c",
-                "apt-get update && apt-get install -y socat"
-            ]
-        );
-    }
-
-    #[test]
-    fn test_build_install_command_podman() {
-        let (cmd, args) = build_install_command(
-            ProviderType::Podman,
-            "def456",
-            "apk add --no-cache socat",
-        );
-        assert_eq!(cmd, "podman");
-        assert_eq!(
-            args,
-            vec![
-                "exec",
-                "-u",
-                "root",
-                "def456",
-                "sh",
-                "-c",
-                "apk add --no-cache socat"
-            ]
-        );
     }
 
     #[test]

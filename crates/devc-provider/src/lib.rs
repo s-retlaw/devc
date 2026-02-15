@@ -119,6 +119,11 @@ pub trait ContainerProvider: Send + Sync {
         project_dir: &std::path::Path,
     ) -> Result<()>;
 
+    /// Get (program, prefix_args) for building raw CLI commands.
+    /// Callers build: `program [prefix_args...] exec [flags...] container_id [cmd...]`
+    /// Returns e.g. ("docker", []) or ("flatpak-spawn", ["--host", "podman"])
+    fn runtime_args(&self) -> (String, Vec<String>);
+
     /// List services in a Docker Compose project
     async fn compose_ps(
         &self,

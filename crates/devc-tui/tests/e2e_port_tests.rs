@@ -197,8 +197,8 @@ async fn test_e2e_socat_forwarding_roundtrip() {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // Spawn forwarder: localhost:14000 -> container:4000
-    let provider_type = provider.info().provider_type;
-    let forwarder = spawn_forwarder(provider_type, &id.0, 14000, 4000)
+    let (program, prefix) = provider.runtime_args();
+    let forwarder = spawn_forwarder(program, prefix, id.0.clone(), 14000, 4000)
         .await
         .expect("spawn_forwarder should succeed");
 
@@ -325,8 +325,8 @@ services:
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // Spawn forwarder: localhost:13000 -> container:3000
-    let provider_type = provider.info().provider_type;
-    let forwarder = spawn_forwarder(provider_type, &app_id.0, 13000, 3000)
+    let (program, prefix) = provider.runtime_args();
+    let forwarder = spawn_forwarder(program, prefix, app_id.0.clone(), 13000, 3000)
         .await
         .expect("spawn_forwarder should succeed");
 

@@ -325,6 +325,10 @@ impl ContainerProvider for MockProvider {
         clone_result(&self.ping_result)
     }
 
+    fn runtime_args(&self) -> (String, Vec<String>) {
+        (self.provider_type.to_string(), vec![])
+    }
+
     fn info(&self) -> ProviderInfo {
         ProviderInfo {
             provider_type: self.provider_type,
