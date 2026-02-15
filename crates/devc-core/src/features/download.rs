@@ -3,8 +3,74 @@
 use super::resolve::{FeatureMetadata, FeatureSource};
 use crate::{CoreError, Result};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::sync::mpsc;
+
+/// Safely extract a tar archive, rejecting path traversal and absolute paths.
+///
+/// Iterates entries manually and validates each path before extraction:
+/// - Rejects absolute paths
+/// - Rejects entries containing `..` components (path traversal)
+/// - Rejects symlinks pointing outside the destination directory
+fn safe_unpack<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    dest: &Path,
+) -> std::result::Result<(), String> {
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?;
+
+        // Reject absolute paths
+        if path.is_absolute() {
+            return Err(format!("Tar contains absolute path: {}", path.display()));
+        }
+
+        // Reject path traversal (.. components)
+        for component in path.components() {
+            if matches!(component, Component::ParentDir) {
+                return Err(format!(
+                    "Tar contains path traversal: {}",
+                    path.display()
+                ));
+            }
+        }
+
+        // Reject symlinks that point outside dest
+        if entry.header().entry_type().is_symlink() {
+            if let Ok(Some(target)) = entry.link_name() {
+                // Check for .. in the symlink target
+                for component in target.components() {
+                    if matches!(component, Component::ParentDir) {
+                        return Err(format!(
+                            "Tar contains symlink escape: {} -> {}",
+                            path.display(),
+                            target.display()
+                        ));
+                    }
+                }
+                // Also check the resolved path doesn't escape
+                if let Some(parent) = dest.join(&path).parent().map(|p| p.to_path_buf()) {
+                    let resolved = parent.join(&*target);
+                    if resolved.is_absolute() && !resolved.starts_with(dest) {
+                        return Err(format!(
+                            "Tar contains symlink escape: {} -> {}",
+                            path.display(),
+                            target.display()
+                        ));
+                    }
+                }
+            }
+        }
+
+        let target = dest.join(&path);
+        // Create parent directories for nested entries
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        entry.unpack(&target).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 /// Download or prepare a feature, returning the path to its directory.
 ///
@@ -191,7 +257,7 @@ async fn download_oci_feature(
 
     let cursor = std::io::Cursor::new(&blob_bytes);
     let mut archive = tar::Archive::new(cursor);
-    archive.unpack(&feature_cache).map_err(|e| {
+    safe_unpack(&mut archive, &feature_cache).map_err(|e| {
         // Clean up on failure
         let _ = std::fs::remove_dir_all(&feature_cache);
         CoreError::FeatureDownloadFailed {
@@ -241,6 +307,18 @@ async fn download_tarball_feature(
     cache_dir: &Path,
     progress: &Option<mpsc::UnboundedSender<String>>,
 ) -> Result<PathBuf> {
+    // Enforce HTTPS for remote URLs (allow localhost for local development)
+    if !url.starts_with("https://")
+        && !url.starts_with("http://localhost")
+        && !url.starts_with("http://127.0.0.1")
+        && !url.starts_with("http://[::1]")
+    {
+        return Err(CoreError::FeatureDownloadFailed {
+            feature: url.to_string(),
+            reason: "Only HTTPS URLs are allowed for feature downloads (except localhost)".into(),
+        });
+    }
+
     let hash = tarball_cache_key(url);
     let feature_cache = cache_dir.join("urls").join(&hash);
 
@@ -280,10 +358,10 @@ async fn download_tarball_feature(
     let extract_result = if is_gzip(&bytes) {
         let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(&bytes));
         let mut archive = tar::Archive::new(decoder);
-        archive.unpack(&feature_cache)
+        safe_unpack(&mut archive, &feature_cache)
     } else {
         let mut archive = tar::Archive::new(std::io::Cursor::new(&bytes));
-        archive.unpack(&feature_cache)
+        safe_unpack(&mut archive, &feature_cache)
     };
 
     extract_result.map_err(|e| {
@@ -581,6 +659,179 @@ mod tests {
         assert!(!is_gzip(&[0x1f]));
         // Empty
         assert!(!is_gzip(&[]));
+    }
+
+    // ==================== safe_unpack tests ====================
+
+    /// Build a raw tar archive with an arbitrary path, bypassing the tar crate's
+    /// safety checks. This is needed to test our safe_unpack validation.
+    fn build_raw_tar_with_path(path: &str, data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // 512-byte tar header
+        let mut header = [0u8; 512];
+        // Name field: bytes 0..100
+        let path_bytes = path.as_bytes();
+        header[..path_bytes.len()].copy_from_slice(path_bytes);
+        // Mode: bytes 100..108 — "0000644\0"
+        header[100..108].copy_from_slice(b"0000644\0");
+        // UID: bytes 108..116
+        header[108..116].copy_from_slice(b"0001000\0");
+        // GID: bytes 116..124
+        header[116..124].copy_from_slice(b"0001000\0");
+        // Size: bytes 124..136 — octal
+        let size_str = format!("{:011o}\0", data.len());
+        header[124..136].copy_from_slice(size_str.as_bytes());
+        // Mtime: bytes 136..148
+        header[136..148].copy_from_slice(b"00000000000\0");
+        // Typeflag: byte 156 — '0' for regular file
+        header[156] = b'0';
+        // Magic: bytes 257..263
+        header[257..263].copy_from_slice(b"ustar\0");
+        // Version: bytes 263..265
+        header[263..265].copy_from_slice(b"00");
+
+        // Compute checksum: sum of all header bytes, treating checksum field (148..156) as spaces
+        header[148..156].copy_from_slice(b"        ");
+        let cksum: u32 = header.iter().map(|&b| b as u32).sum();
+        let cksum_str = format!("{:06o}\0 ", cksum);
+        header[148..156].copy_from_slice(cksum_str.as_bytes());
+
+        buf.extend_from_slice(&header);
+        buf.extend_from_slice(data);
+        // Pad data to 512-byte boundary
+        let padding = (512 - (data.len() % 512)) % 512;
+        buf.extend(std::iter::repeat(0u8).take(padding));
+        // Two 512-byte zero blocks as end-of-archive marker
+        buf.extend(std::iter::repeat(0u8).take(1024));
+        buf
+    }
+
+    #[test]
+    fn test_safe_unpack_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_bytes = build_raw_tar_with_path("../escape.txt", b"malicious content");
+
+        let mut archive = tar::Archive::new(std::io::Cursor::new(&tar_bytes));
+        let result = safe_unpack(&mut archive, tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("path traversal"));
+    }
+
+    #[test]
+    fn test_safe_unpack_rejects_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_bytes = build_raw_tar_with_path("/etc/evil", b"malicious content");
+
+        let mut archive = tar::Archive::new(std::io::Cursor::new(&tar_bytes));
+        let result = safe_unpack(&mut archive, tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("absolute path"));
+    }
+
+    #[test]
+    fn test_safe_unpack_allows_normal_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_bytes = {
+            let buf = Vec::new();
+            let mut archive = tar::Builder::new(buf);
+
+            let data = b"#!/bin/bash\necho hi";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "install.sh", &data[..])
+                .unwrap();
+
+            let data2 = b"nested content";
+            let mut header2 = tar::Header::new_gnu();
+            header2.set_size(data2.len() as u64);
+            header2.set_mode(0o644);
+            header2.set_cksum();
+            archive
+                .append_data(&mut header2, "subdir/file.txt", &data2[..])
+                .unwrap();
+
+            archive.into_inner().unwrap()
+        };
+
+        let mut archive = tar::Archive::new(std::io::Cursor::new(&tar_bytes));
+        let result = safe_unpack(&mut archive, tmp.path());
+        assert!(result.is_ok());
+        assert!(tmp.path().join("install.sh").exists());
+        assert!(tmp.path().join("subdir/file.txt").exists());
+    }
+
+    #[test]
+    fn test_safe_unpack_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_bytes = {
+            let buf = Vec::new();
+            let mut archive = tar::Builder::new(buf);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_cksum();
+            archive
+                .append_link(&mut header, "evil-link", "../../../etc/passwd")
+                .unwrap();
+
+            archive.into_inner().unwrap()
+        };
+
+        let mut archive = tar::Archive::new(std::io::Cursor::new(&tar_bytes));
+        let result = safe_unpack(&mut archive, tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("symlink escape"));
+    }
+
+    // ==================== HTTPS enforcement tests ====================
+
+    #[tokio::test]
+    async fn test_tarball_url_rejects_http() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let result =
+            download_tarball_feature("http://example.com/f.tar.gz", cache_dir.path(), &None).await;
+        assert!(result.is_err());
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(err.contains("HTTPS"));
+    }
+
+    #[tokio::test]
+    async fn test_tarball_url_allows_https() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        // This will fail on network (no server), but should NOT fail on URL validation
+        let result = download_tarball_feature(
+            "https://example.com/feature.tar.gz",
+            cache_dir.path(),
+            &None,
+        )
+        .await;
+        // Should fail with a network error, not a URL validation error
+        assert!(result.is_err());
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(!err.contains("HTTPS"), "Should not fail on URL validation");
+    }
+
+    #[tokio::test]
+    async fn test_tarball_url_allows_localhost_http() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        // These should pass URL validation (will fail on network since no server)
+        let result =
+            download_tarball_feature("http://localhost:8080/f.tar.gz", cache_dir.path(), &None)
+                .await;
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(!err.contains("HTTPS"), "localhost should be allowed over HTTP");
+
+        let result =
+            download_tarball_feature("http://127.0.0.1:8080/f.tar.gz", cache_dir.path(), &None)
+                .await;
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(!err.contains("HTTPS"), "127.0.0.1 should be allowed over HTTP");
     }
 
     #[tokio::test]

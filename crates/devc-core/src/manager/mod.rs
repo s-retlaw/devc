@@ -307,7 +307,7 @@ impl ContainerManager {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, content)?;
+        crate::state::atomic_write(&path, content.as_bytes())?;
         Ok(())
     }
 

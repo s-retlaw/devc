@@ -8,7 +8,21 @@ use devc_config::GlobalConfig;
 use devc_provider::{DevcontainerSource, ProviderType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Write content to a file atomically using a temp-file-then-rename pattern.
+///
+/// Writes to a temporary file in the same directory, then renames it to the
+/// target path. This ensures the file is never partially written — a crash
+/// during write leaves the old file intact.
+pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(content)?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
 
 /// Container state stored on disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +170,7 @@ impl StateStore {
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        atomic_write(path, content.as_bytes())?;
 
         Ok(())
     }
@@ -304,6 +318,67 @@ mod tests {
         cs.status = status;
         cs
     }
+
+    // ==================== atomic_write tests ====================
+
+    #[test]
+    fn test_save_to_atomic_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+
+        let mut store = StateStore::new();
+        store.add(make_state("atomic-test", DevcContainerStatus::Running));
+        store.save_to(&path).unwrap();
+
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        let loaded: StateStore = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded.containers.len(), 1);
+    }
+
+    #[test]
+    fn test_save_to_atomic_no_temp_file_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+
+        let store = StateStore::new();
+        store.save_to(&path).unwrap();
+
+        // Check that no .tmp files remain in the directory
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        for entry in &entries {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                !name.contains(".tmp"),
+                "Temp file left behind: {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_to_atomic_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+
+        let mut store1 = StateStore::new();
+        store1.add(make_state("first", DevcContainerStatus::Running));
+        store1.save_to(&path).unwrap();
+
+        let mut store2 = StateStore::new();
+        store2.add(make_state("second", DevcContainerStatus::Stopped));
+        store2.save_to(&path).unwrap();
+
+        let loaded = StateStore::load_from(&path).unwrap();
+        assert_eq!(loaded.containers.len(), 1);
+        assert!(loaded.find_by_name("second").is_some());
+        assert!(loaded.find_by_name("first").is_none());
+    }
+
+    // ==================== ContainerState tests ====================
 
     #[test]
     fn test_container_state_new() {
