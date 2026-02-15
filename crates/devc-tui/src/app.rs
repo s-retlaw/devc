@@ -446,6 +446,16 @@ impl App {
         }
     }
 
+    /// Send a key event to the app for testing
+    ///
+    /// This delegates to the private `handle_key` method, allowing integration
+    /// tests to simulate keystrokes without needing access to private internals.
+    /// Not gated behind `#[cfg(test)]` because integration tests compile the
+    /// library as an external crate where `cfg(test)` is false.
+    pub async fn send_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> AppResult<()> {
+        self.handle_key(code, modifiers).await
+    }
+
     /// Create a test container state for testing
     ///
     /// This is useful for unit tests and snapshot tests.

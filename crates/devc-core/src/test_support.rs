@@ -60,8 +60,12 @@ pub struct MockProvider {
     pub exec_output: Arc<Mutex<String>>,
     /// Error for exec calls (if Some, exec returns this error)
     pub exec_error: Arc<Mutex<Option<ProviderError>>>,
+    /// Per-call exec response queue: (exit_code, output). Popped before falling back to exec_exit_code/exec_output.
+    pub exec_responses: Arc<Mutex<Vec<(i64, String)>>>,
     /// Result for inspect calls
     pub inspect_result: Arc<Mutex<Result<ContainerDetails>>>,
+    /// Per-call inspect response queue. Popped before falling back to inspect_result.
+    pub inspect_responses: Arc<Mutex<Vec<Result<ContainerDetails>>>>,
     /// Result for list calls
     pub list_result: Arc<Mutex<Result<Vec<ContainerInfo>>>>,
     /// Result for ping calls
@@ -105,6 +109,8 @@ impl MockProvider {
             discover_result: Arc::new(Mutex::new(Ok(Vec::new()))),
             copy_into_result: Arc::new(Mutex::new(Ok(()))),
             copy_from_result: Arc::new(Mutex::new(Ok(()))),
+            exec_responses: Arc::new(Mutex::new(Vec::new())),
+            inspect_responses: Arc::new(Mutex::new(Vec::new())),
             compose_up_result: Arc::new(Mutex::new(Ok(()))),
             compose_down_result: Arc::new(Mutex::new(Ok(()))),
             compose_ps_result: Arc::new(Mutex::new(Ok(Vec::new()))),
@@ -125,6 +131,73 @@ impl MockProvider {
     pub fn was_called(&self, call: &MockCall) -> bool {
         self.calls.lock().unwrap().contains(call)
     }
+
+    /// Count calls matching a predicate
+    pub fn call_count<F: Fn(&MockCall) -> bool>(&self, filter: F) -> usize {
+        self.calls.lock().unwrap().iter().filter(|c| filter(c)).count()
+    }
+
+    /// Get all exec command vecs (convenience)
+    pub fn exec_commands(&self) -> Vec<Vec<String>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::Exec { cmd, .. } => Some(cmd.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Assert that calls were made in a specific order (by variant name prefix).
+    /// Example: `mock.assert_call_order(&["Build", "Create", "Start", "Exec"])`
+    pub fn assert_call_order(&self, expected: &[&str]) {
+        let calls = self.calls.lock().unwrap();
+        let actual_names: Vec<String> = calls.iter().map(mock_call_name).collect();
+
+        let mut expected_idx = 0;
+        for name in &actual_names {
+            if expected_idx < expected.len() && name == expected[expected_idx] {
+                expected_idx += 1;
+            }
+        }
+
+        assert_eq!(
+            expected_idx,
+            expected.len(),
+            "Expected call order {:?} but got calls: {:?}",
+            expected,
+            actual_names,
+        );
+    }
+}
+
+/// Get the variant name of a MockCall (for assertion helpers)
+fn mock_call_name(call: &MockCall) -> String {
+    match call {
+        MockCall::Build { .. } => "Build",
+        MockCall::BuildWithProgress { .. } => "BuildWithProgress",
+        MockCall::Pull { .. } => "Pull",
+        MockCall::Create { .. } => "Create",
+        MockCall::Start { .. } => "Start",
+        MockCall::Stop { .. } => "Stop",
+        MockCall::Remove { .. } => "Remove",
+        MockCall::RemoveByName { .. } => "RemoveByName",
+        MockCall::Exec { .. } => "Exec",
+        MockCall::ExecInteractive { .. } => "ExecInteractive",
+        MockCall::Inspect { .. } => "Inspect",
+        MockCall::List { .. } => "List",
+        MockCall::Logs { .. } => "Logs",
+        MockCall::Ping => "Ping",
+        MockCall::ComposeUp { .. } => "ComposeUp",
+        MockCall::ComposeDown { .. } => "ComposeDown",
+        MockCall::ComposePs { .. } => "ComposePs",
+        MockCall::Discover => "Discover",
+        MockCall::CopyInto { .. } => "CopyInto",
+        MockCall::CopyFrom { .. } => "CopyFrom",
+    }
+    .to_string()
 }
 
 /// Helper to clone a Result<T> from an Arc<Mutex<Result<T>>>
@@ -283,6 +356,13 @@ impl ContainerProvider for MockProvider {
         if let Some(err) = self.exec_error.lock().unwrap().as_ref() {
             return Err(clone_provider_error(err));
         }
+        // Pop from queue if available, otherwise fall back to single-value fields
+        let mut queue = self.exec_responses.lock().unwrap();
+        if !queue.is_empty() {
+            let (exit_code, output) = queue.remove(0);
+            return Ok(ExecResult { exit_code, output });
+        }
+        drop(queue);
         Ok(ExecResult {
             exit_code: *self.exec_exit_code.lock().unwrap(),
             output: self.exec_output.lock().unwrap().clone(),
@@ -309,6 +389,15 @@ impl ContainerProvider for MockProvider {
 
     async fn inspect(&self, id: &ContainerId) -> Result<ContainerDetails> {
         self.record(MockCall::Inspect { id: id.0.clone() });
+        // Pop from queue if available, otherwise fall back to single-value field
+        let mut queue = self.inspect_responses.lock().unwrap();
+        if !queue.is_empty() {
+            return match queue.remove(0) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(clone_provider_error(&e)),
+            };
+        }
+        drop(queue);
         clone_result(&self.inspect_result)
     }
 

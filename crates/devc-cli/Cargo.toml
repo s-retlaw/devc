@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "CLI entry point for devc"
 
+[lib]
+name = "devc_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "devc"
 path = "src/main.rs"
@@ -27,3 +31,10 @@ directories = { workspace = true }
 serde_json = { workspace = true }
 mimalloc = "0.1"
 shell-words = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+devc-core = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -1,36 +1,15 @@
 //! Snapshot tests for UI rendering using insta
 
+mod helpers;
+
 use devc_core::DevcContainerStatus;
 use devc_provider::{
     ContainerDetails, ContainerId, ContainerStatus, DevcontainerSource, DiscoveredContainer,
     MountInfo, NetworkInfo, NetworkSettings, PortInfo, ProviderType,
 };
 use devc_tui::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
-use ratatui::{backend::TestBackend, Terminal};
 
-/// Helper to render the app and capture output as a string
-fn render_app(app: &mut App, width: u16, height: u16) -> String {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| devc_tui::ui::draw(frame, app))
-        .unwrap();
-    let buffer = terminal.backend().buffer().clone();
-    buffer_to_string(&buffer)
-}
-
-/// Convert a ratatui buffer to a string representation
-fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
-    let mut output = String::new();
-    for y in 0..buffer.area.height {
-        for x in 0..buffer.area.width {
-            let cell = buffer.get(x, y);
-            output.push_str(cell.symbol());
-        }
-        output.push('\n');
-    }
-    output
-}
+use helpers::render_app;
 
 /// Test empty containers view rendering
 #[test]

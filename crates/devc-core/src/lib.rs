@@ -26,5 +26,5 @@ pub use manager::*;
 pub use ssh::*;
 pub use state::*;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

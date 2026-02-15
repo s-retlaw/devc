@@ -103,7 +103,7 @@ impl ContainerManager {
     }
 
     /// Create a manager for testing with injectable dependencies
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_testing(
         provider: Box<dyn ContainerProvider>,
         global_config: GlobalConfig,
@@ -122,7 +122,7 @@ impl ContainerManager {
     }
 
     /// Create a manager with multiple providers for testing cross-provider operations
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_testing_multi(
         providers_list: Vec<Box<dyn ContainerProvider>>,
         default_type: ProviderType,
@@ -143,7 +143,7 @@ impl ContainerManager {
     }
 
     /// Create a disconnected manager for testing
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn disconnected_for_testing(
         global_config: GlobalConfig,
         state: StateStore,
@@ -4468,5 +4468,273 @@ mod tests {
             "Should NOT call provider.remove() for adopted container, got: {:?}",
             *recorded,
         );
+    }
+
+    // ==================== Discovery: forget ====================
+
+    #[tokio::test]
+    async fn test_forget_removes_from_state() {
+        let workspace = create_test_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.forget(&id).await.unwrap();
+
+        let found = mgr.get(&id).await.unwrap();
+        assert!(found.is_none(), "forget should remove from state");
+    }
+
+    #[tokio::test]
+    async fn test_forget_nonexistent_succeeds() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mgr = test_manager(mock);
+        // Forgetting a non-existent ID should not error
+        mgr.forget("nonexistent-id").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_discover_calls_provider() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+        let mgr = test_manager(mock);
+
+        let result = mgr.discover().await.unwrap();
+        assert!(result.is_empty()); // default mock returns empty vec
+
+        let recorded = calls.lock().unwrap();
+        assert!(recorded.iter().any(|c| matches!(c, MockCall::Discover)));
+    }
+
+    // ==================== Lifecycle: edge cases ====================
+
+    #[tokio::test]
+    async fn test_first_create_lifecycle_skips_absent_commands() {
+        // Only postCreateCommand is set — verify only one lifecycle exec runs
+        let workspace = create_test_workspace();
+        std::fs::write(
+            workspace.path().join(".devcontainer/devcontainer.json"),
+            r#"{"image": "ubuntu:22.04", "postCreateCommand": "echo only-post-create"}"#,
+        )
+        .unwrap();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Built,
+            Some("sha256:mock_image_id"),
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        mgr.up(&id).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+        let execs = exec_commands(&recorded);
+        // Should have exactly one lifecycle exec (postCreate) plus one for postStart (none configured → 0)
+        let cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
+        assert!(
+            cmds.contains(&"echo only-post-create"),
+            "postCreateCommand should run; got {:?}",
+            cmds
+        );
+        assert!(!cmds.contains(&"echo on-create"), "onCreateCommand should NOT run when absent");
+        assert!(!cmds.contains(&"echo update-content"), "updateContentCommand should NOT run when absent");
+    }
+
+    #[tokio::test]
+    async fn test_post_attach_no_config_succeeds() {
+        // devcontainer.json has no postAttachCommand — should succeed with no execs
+        let workspace = create_test_workspace();
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        mgr.run_post_attach_command(&id).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+        let execs = exec_commands(&recorded);
+        assert!(execs.is_empty(), "No postAttachCommand → no execs; got {:?}", execs);
+    }
+
+    // ==================== Compose: edge cases ====================
+
+    #[tokio::test]
+    async fn test_up_compose_stores_metadata() {
+        let workspace = create_compose_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
+            service_name: "app".to_string(),
+            container_id: ContainerId::new("compose_meta_abc"),
+            status: ContainerStatus::Running,
+        }]);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        mgr.up(&id).await.unwrap();
+
+        let cs = mgr.get(&id).await.unwrap().unwrap();
+        assert_eq!(cs.container_id, Some("compose_meta_abc".to_string()));
+        assert!(cs.compose_project.is_some(), "compose_project should be stored");
+        assert_eq!(cs.compose_service, Some("app".to_string()));
+        assert_eq!(cs.status, DevcContainerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_up_compose_service_not_found_fails() {
+        let workspace = create_compose_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        // compose_ps returns a service that does NOT match "app"
+        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
+            service_name: "wrong-service".to_string(),
+            container_id: ContainerId::new("wrong_id"),
+            status: ContainerStatus::Running,
+        }]);
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_with_state(mock, state);
+        let result = mgr.up(&id).await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("not found"), "Expected 'not found' in: {}", err);
+    }
+
+    // ==================== MockProvider assertion helpers ====================
+
+    #[tokio::test]
+    async fn test_mock_exec_responses_queue() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses.lock().unwrap().extend(vec![
+            (0, "first".to_string()),
+            (1, "second".to_string()),
+        ]);
+
+        let cid = ContainerId::new("test");
+        let cfg = devc_provider::ExecConfig {
+            cmd: vec!["echo".to_string()],
+            env: HashMap::new(),
+            working_dir: None,
+            user: None,
+            tty: false,
+            stdin: false,
+            privileged: false,
+        };
+
+        let r1 = mock.exec(&cid, &cfg).await.unwrap();
+        assert_eq!(r1.output, "first");
+        assert_eq!(r1.exit_code, 0);
+
+        let r2 = mock.exec(&cid, &cfg).await.unwrap();
+        assert_eq!(r2.output, "second");
+        assert_eq!(r2.exit_code, 1);
+
+        // Queue exhausted — falls back to default
+        let r3 = mock.exec(&cid, &cfg).await.unwrap();
+        assert_eq!(r3.exit_code, 0);
+        assert!(r3.output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_inspect_responses_queue() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.inspect_responses.lock().unwrap().push(
+            Ok(mock_container_details("queued_id", ContainerStatus::Exited)),
+        );
+
+        let cid = ContainerId::new("test");
+        let r1 = mock.inspect(&cid).await.unwrap();
+        assert_eq!(r1.status, ContainerStatus::Exited);
+
+        // Queue exhausted — falls back to default (Running)
+        let r2 = mock.inspect(&cid).await.unwrap();
+        assert_eq!(r2.status, ContainerStatus::Running);
+    }
+
+    #[test]
+    fn test_mock_call_count() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.calls.lock().unwrap().extend(vec![
+            MockCall::Exec { id: "a".into(), cmd: vec![], working_dir: None, user: None },
+            MockCall::Start { id: "a".into() },
+            MockCall::Exec { id: "b".into(), cmd: vec![], working_dir: None, user: None },
+        ]);
+
+        assert_eq!(mock.call_count(|c| matches!(c, MockCall::Exec { .. })), 2);
+        assert_eq!(mock.call_count(|c| matches!(c, MockCall::Start { .. })), 1);
+        assert_eq!(mock.call_count(|c| matches!(c, MockCall::Stop { .. })), 0);
+    }
+
+    #[test]
+    fn test_mock_assert_call_order() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.calls.lock().unwrap().extend(vec![
+            MockCall::Build { tag: "t".into() },
+            MockCall::Create { image: "i".into(), name: None },
+            MockCall::Start { id: "x".into() },
+            MockCall::Exec { id: "x".into(), cmd: vec![], working_dir: None, user: None },
+        ]);
+
+        // This should pass — subsequence matches
+        mock.assert_call_order(&["Build", "Create", "Start", "Exec"]);
+        // Partial subsequence should also pass
+        mock.assert_call_order(&["Build", "Exec"]);
+    }
+
+    #[test]
+    fn test_mock_exec_commands_helper() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.calls.lock().unwrap().extend(vec![
+            MockCall::Start { id: "a".into() },
+            MockCall::Exec { id: "a".into(), cmd: vec!["echo".into(), "hello".into()], working_dir: None, user: None },
+            MockCall::Exec { id: "b".into(), cmd: vec!["ls".into()], working_dir: None, user: None },
+        ]);
+
+        let cmds = mock.exec_commands();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0], vec!["echo", "hello"]);
+        assert_eq!(cmds[1], vec!["ls"]);
     }
 }
