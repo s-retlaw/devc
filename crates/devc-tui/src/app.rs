@@ -163,6 +163,22 @@ pub enum ContainerOpResult {
     Failed(ContainerOperation, String),
 }
 
+/// Unified async event channel for all background task communication
+pub enum AsyncEvent {
+    /// Build/rebuild progress line
+    BuildProgress(String),
+    /// Port detection update (from manual ports popup)
+    PortDetected(PortDetectionUpdate),
+    /// Container operation completed (start/stop/delete/up)
+    OperationComplete(ContainerOpResult),
+    /// Container operation progress update (e.g. Up steps)
+    OperationProgress(String),
+    /// initializeCommand output line
+    UpOutput(String),
+    /// socat install result
+    InstallResult(InstallResult),
+}
+
 /// Provider status information
 #[derive(Debug, Clone)]
 pub struct ProviderStatus {
@@ -222,8 +238,6 @@ pub struct App {
     pub build_auto_scroll: bool,
     /// Whether the build has completed (success or error)
     pub build_complete: bool,
-    /// Channel receiver for build progress updates
-    pub build_progress_rx: Option<mpsc::UnboundedReceiver<String>>,
     /// Container logs
     pub logs: Vec<String>,
     /// Logs scroll position (line offset from top)
@@ -280,16 +294,12 @@ pub struct App {
     pub selected_port: usize,
     /// Table state for port list
     pub ports_table_state: TableState,
-    /// Receiver for port detection updates
-    pub port_detect_rx: Option<mpsc::UnboundedReceiver<PortDetectionUpdate>>,
     /// Whether socat is installed in the container (None = not checked yet)
     pub socat_installed: Option<bool>,
     /// Whether socat installation is in progress
     pub socat_installing: bool,
     /// Spinner frame for install animation
     pub spinner_frame: usize,
-    /// Channel receiver for install result
-    pub install_result_rx: Option<mpsc::UnboundedReceiver<InstallResult>>,
 
     // Port forwarder management (persists across views)
     /// Active port forwarders: (container_id, port) -> PortForwarder
@@ -304,14 +314,8 @@ pub struct App {
     // Container operation spinner state
     /// Current container operation in progress (shown as spinner modal)
     pub container_op: Option<ContainerOperation>,
-    /// Channel receiver for container operation results
-    pub container_op_rx: Option<mpsc::UnboundedReceiver<ContainerOpResult>>,
-    /// Channel receiver for container operation progress updates (e.g. Up steps)
-    pub container_op_progress_rx: Option<mpsc::UnboundedReceiver<String>>,
     /// Captured output lines from initializeCommand (shown in spinner popup)
     pub up_output: Vec<String>,
-    /// Channel receiver for initializeCommand output lines
-    pub up_output_rx: Option<mpsc::UnboundedReceiver<String>>,
 
     // Compose service visibility state
     /// Cached compose service info keyed by devc container ID
@@ -336,6 +340,14 @@ pub struct App {
     pub auto_opened_ports: HashSet<(String, u16)>,
     /// Cached runtime args per provider container ID (for auto-forwarding)
     auto_runtime_args: HashMap<String, (String, Vec<String>)>,
+
+    // Unified async event channel
+    /// Sender for background tasks to communicate with the main loop
+    pub async_event_tx: mpsc::UnboundedSender<AsyncEvent>,
+    /// Receiver for background task events (build progress, operation results, etc.)
+    async_event_rx: mpsc::UnboundedReceiver<AsyncEvent>,
+    /// Handle for the active port detection task (aborted when ports view is closed)
+    port_detect_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -346,6 +358,7 @@ impl App {
         use devc_provider::ProviderType;
 
         let config = GlobalConfig::default();
+        let (async_event_tx, async_event_rx) = mpsc::unbounded_channel();
         let manager = ContainerManager::disconnected(config.clone(), "Test mode".to_string())
             .expect("Failed to create test manager");
 
@@ -381,7 +394,6 @@ impl App {
             build_output_scroll: 0,
             build_auto_scroll: true,
             build_complete: false,
-            build_progress_rx: None,
             logs: Vec::new(),
             logs_scroll: 0,
             status_message: None,
@@ -410,19 +422,14 @@ impl App {
             detected_ports: Vec::new(),
             selected_port: 0,
             ports_table_state: TableState::default().with_selected(0),
-            port_detect_rx: None,
             socat_installed: None,
             socat_installing: false,
             spinner_frame: 0,
-            install_result_rx: None,
             active_forwarders: HashMap::new(),
             shell_sessions: HashMap::new(),
             active_shell_container: None,
             container_op: None,
-            container_op_rx: None,
-            container_op_progress_rx: None,
             up_output: Vec::new(),
-            up_output_rx: None,
             compose_services: HashMap::new(),
             compose_services_table_state: TableState::default(),
             compose_selected_service: 0,
@@ -433,6 +440,9 @@ impl App {
             auto_forwarded_ports: HashSet::new(),
             auto_opened_ports: HashSet::new(),
             auto_runtime_args: HashMap::new(),
+            async_event_tx,
+            async_event_rx,
+            port_detect_handle: None,
         }
     }
 
@@ -503,6 +513,7 @@ impl App {
 
     /// Create a new application
     pub async fn new(manager: ContainerManager, workspace_dir: Option<&std::path::Path>) -> AppResult<Self> {
+        let (async_event_tx, async_event_rx) = mpsc::unbounded_channel();
         let mut containers = manager.list().await?;
 
         // Append ephemeral Available entries for unregistered configs
@@ -564,7 +575,6 @@ impl App {
             build_output_scroll: 0,
             build_auto_scroll: true,
             build_complete: false,
-            build_progress_rx: None,
             logs: Vec::new(),
             logs_scroll: 0,
             status_message: None,
@@ -593,19 +603,14 @@ impl App {
             detected_ports: Vec::new(),
             selected_port: 0,
             ports_table_state: TableState::default().with_selected(0),
-            port_detect_rx: None,
             socat_installed: None,
             socat_installing: false,
             spinner_frame: 0,
-            install_result_rx: None,
             active_forwarders: HashMap::new(),
             shell_sessions: HashMap::new(),
             active_shell_container: None,
             container_op: None,
-            container_op_rx: None,
-            container_op_progress_rx: None,
             up_output: Vec::new(),
-            up_output_rx: None,
             compose_services: HashMap::new(),
             compose_services_table_state: TableState::default(),
             compose_selected_service: 0,
@@ -616,6 +621,9 @@ impl App {
             auto_forwarded_ports: HashSet::new(),
             auto_opened_ports: HashSet::new(),
             auto_runtime_args: HashMap::new(),
+            async_event_tx,
+            async_event_rx,
+            port_detect_handle: None,
         })
     }
 
@@ -702,17 +710,24 @@ impl App {
         self.build_auto_scroll = true;
         self.build_complete = false;
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.build_progress_rx = Some(rx);
+        let event_tx = self.async_event_tx.clone();
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        // Forward build progress to unified event channel
+        let fwd_tx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(line) = progress_rx.recv().await {
+                if fwd_tx.send(AsyncEvent::BuildProgress(line)).is_err() { break; }
+            }
+        });
 
         let manager = Arc::clone(&self.manager);
         tokio::spawn(async move {
-            match manager.read().await.rebuild_with_progress(&id, false, tx.clone()).await {
+            match manager.read().await.rebuild_with_progress(&id, false, progress_tx.clone()).await {
                 Ok(()) => {
                     // Success message is sent by rebuild_with_progress
                 }
                 Err(e) => {
-                    let _ = tx.send(format!("Error: Build failed: {}", e));
+                    let _ = progress_tx.send(format!("Error: Build failed: {}", e));
                 }
             }
         });
@@ -764,7 +779,7 @@ impl App {
             // Get event handler (should always be Some when not in shell mode)
             let handler = events.as_mut().expect("EventHandler missing outside shell mode");
 
-            // Use select to handle multiple event sources for immediate updates
+            // Use select to handle terminal events and unified async events
             tokio::select! {
                 // Terminal/keyboard events
                 event = handler.next() => {
@@ -772,44 +787,10 @@ impl App {
                         self.handle_event(e).await?;
                     }
                 }
-                // Build progress updates (immediate, no tick delay)
-                progress = Self::recv_progress(&mut self.build_progress_rx) => {
-                    if let Some(line) = progress {
-                        self.handle_build_progress(line).await?;
-                    }
-                }
-                // Port detection updates
-                ports = Self::recv_port_update(&mut self.port_detect_rx) => {
-                    if let Some(update) = ports {
-                        self.handle_port_update(update);
-                    }
-                }
-                // Install result
-                result = Self::recv_install_result(&mut self.install_result_rx) => {
-                    if let Some(result) = result {
-                        self.handle_install_result(result);
-                    }
-                }
-                // Container operation result
-                result = Self::recv_operation_result(&mut self.container_op_rx) => {
-                    if let Some(result) = result {
-                        self.handle_operation_result(result).await?;
-                    }
-                }
-                // Container operation progress updates (e.g. Up steps)
-                progress = Self::recv_op_progress(&mut self.container_op_progress_rx) => {
-                    if let Some(msg) = progress {
-                        if let Some(ref mut op) = self.container_op {
-                            if let ContainerOperation::Up { progress, .. } = op {
-                                *progress = msg;
-                            }
-                        }
-                    }
-                }
-                // initializeCommand output lines
-                line = Self::recv_up_output(&mut self.up_output_rx) => {
-                    if let Some(line) = line {
-                        self.up_output.push(line);
+                // All background task events (build progress, port detection, operation results, etc.)
+                event = self.async_event_rx.recv() => {
+                    if let Some(event) = event {
+                        self.handle_async_event(event).await?;
                     }
                 }
             }
@@ -824,38 +805,33 @@ impl App {
         Ok(())
     }
 
-    /// Helper to receive from optional channel
-    async fn recv_progress(rx: &mut Option<mpsc::UnboundedReceiver<String>>) -> Option<String> {
-        match rx {
-            Some(ref mut receiver) => receiver.recv().await,
-            None => std::future::pending().await,
+    /// Handle a unified async event from background tasks
+    async fn handle_async_event(&mut self, event: AsyncEvent) -> AppResult<()> {
+        match event {
+            AsyncEvent::BuildProgress(line) => {
+                self.handle_build_progress(line).await?;
+            }
+            AsyncEvent::PortDetected(update) => {
+                self.handle_port_update(update);
+            }
+            AsyncEvent::OperationComplete(result) => {
+                self.handle_operation_result(result).await?;
+            }
+            AsyncEvent::OperationProgress(msg) => {
+                if let Some(ref mut op) = self.container_op {
+                    if let ContainerOperation::Up { progress, .. } = op {
+                        *progress = msg;
+                    }
+                }
+            }
+            AsyncEvent::UpOutput(line) => {
+                self.up_output.push(line);
+            }
+            AsyncEvent::InstallResult(result) => {
+                self.handle_install_result(result);
+            }
         }
-    }
-
-    /// Helper to receive container operation progress updates
-    async fn recv_op_progress(rx: &mut Option<mpsc::UnboundedReceiver<String>>) -> Option<String> {
-        match rx {
-            Some(ref mut receiver) => receiver.recv().await,
-            None => std::future::pending().await,
-        }
-    }
-
-    /// Helper to receive initializeCommand output lines
-    async fn recv_up_output(rx: &mut Option<mpsc::UnboundedReceiver<String>>) -> Option<String> {
-        match rx {
-            Some(ref mut receiver) => receiver.recv().await,
-            None => std::future::pending().await,
-        }
-    }
-
-    /// Helper to receive port detection updates
-    async fn recv_port_update(
-        rx: &mut Option<mpsc::UnboundedReceiver<PortDetectionUpdate>>,
-    ) -> Option<PortDetectionUpdate> {
-        match rx {
-            Some(ref mut receiver) => receiver.recv().await,
-            None => std::future::pending().await,
-        }
+        Ok(())
     }
 
     /// Handle port detection update
@@ -1167,7 +1143,6 @@ impl App {
         if is_complete {
             self.loading = false;
             self.build_complete = true;
-            self.build_progress_rx = None;
             self.refresh_containers().await?;
         }
 
@@ -1208,7 +1183,6 @@ impl App {
         // Dismiss container operation spinner modal (Esc only)
         if self.container_op.is_some() && code == KeyCode::Esc {
             self.container_op = None;
-            // Keep container_op_rx alive so result is still received
             self.status_message = Some("Operation continues in background...".to_string());
             return Ok(());
         }
@@ -1218,8 +1192,6 @@ impl App {
             && ((code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 || code == KeyCode::Esc)
         {
-            // Cancel install - drop the receiver, reset state
-            self.install_result_rx = None;
             self.socat_installing = false;
             self.status_message = Some("Install cancelled".to_string());
             return Ok(());
@@ -2276,8 +2248,14 @@ impl App {
             Ok(provider) => {
                 let provider_arc: Arc<dyn ContainerProvider + Send + Sync> = Arc::new(provider);
                 let container_id = devc_provider::ContainerId::new(&provider_container_id);
-                let rx = spawn_port_detector(provider_arc, container_id, container.provider, forwarded_ports);
-                self.port_detect_rx = Some(rx);
+                let mut rx = spawn_port_detector(provider_arc, container_id, container.provider, forwarded_ports);
+                let tx = self.async_event_tx.clone();
+                let handle = tokio::spawn(async move {
+                    while let Some(update) = rx.recv().await {
+                        if tx.send(AsyncEvent::PortDetected(update)).is_err() { break; }
+                    }
+                });
+                self.port_detect_handle = Some(handle);
                 self.status_message = Some("Detecting ports...".to_string());
             }
             Err(e) => {
@@ -2295,7 +2273,7 @@ impl App {
         self.ports_provider_container_id = None;
         self.ports_runtime_program = None;
         self.ports_runtime_prefix.clear();
-        self.port_detect_rx = None; // Stops the polling task
+        if let Some(handle) = self.port_detect_handle.take() { handle.abort(); }
         self.detected_ports.clear();
         self.socat_installed = None;
         self.socat_installing = false;
@@ -2384,9 +2362,7 @@ impl App {
         let program = self.ports_runtime_program.clone().unwrap_or_else(|| "docker".to_string());
         let prefix = self.ports_runtime_prefix.clone();
 
-        // Create channel for result
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.install_result_rx = Some(rx);
+        let tx = self.async_event_tx.clone();
         self.socat_installing = true;
         self.spinner_frame = 0;
         self.status_message = Some("Installing socat...".to_string());
@@ -2394,14 +2370,13 @@ impl App {
         // Spawn background task
         tokio::spawn(async move {
             let result = install_socat(&program, &prefix, &container_id).await;
-            let _ = tx.send(result);
+            let _ = tx.send(AsyncEvent::InstallResult(result));
         });
     }
 
     /// Handle install result from background task
     fn handle_install_result(&mut self, result: InstallResult) {
         self.socat_installing = false;
-        self.install_result_rx = None;
 
         match result {
             InstallResult::Success => {
@@ -2417,32 +2392,9 @@ impl App {
         }
     }
 
-    /// Helper to receive install result
-    async fn recv_install_result(
-        rx: &mut Option<mpsc::UnboundedReceiver<InstallResult>>,
-    ) -> Option<InstallResult> {
-        match rx {
-            Some(ref mut receiver) => receiver.recv().await,
-            None => std::future::pending().await,
-        }
-    }
-
-    /// Helper to receive container operation result
-    async fn recv_operation_result(
-        rx: &mut Option<mpsc::UnboundedReceiver<ContainerOpResult>>,
-    ) -> Option<ContainerOpResult> {
-        match rx {
-            Some(ref mut receiver) => receiver.recv().await,
-            None => std::future::pending().await,
-        }
-    }
-
     /// Handle container operation result from background task
     async fn handle_operation_result(&mut self, result: ContainerOpResult) -> AppResult<()> {
         self.container_op = None;
-        self.container_op_rx = None;
-        self.container_op_progress_rx = None;
-        self.up_output_rx = None;
         self.up_output.clear();
 
         let affected_id = match &result {
@@ -2876,20 +2828,19 @@ impl App {
         self.loading = true;
         self.spinner_frame = 0;
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.container_op_rx = Some(rx);
+        let tx = self.async_event_tx.clone();
 
         let manager = Arc::clone(&self.manager);
         tokio::spawn(async move {
             if is_start {
                 match manager.read().await.start(&id).await {
-                    Ok(()) => { let _ = tx.send(ContainerOpResult::Success(op)); }
-                    Err(e) => { let _ = tx.send(ContainerOpResult::Failed(op, e.to_string())); }
+                    Ok(()) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
+                    Err(e) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
                 }
             } else {
                 match manager.read().await.stop(&id).await {
-                    Ok(()) => { let _ = tx.send(ContainerOpResult::Success(op)); }
-                    Err(e) => { let _ = tx.send(ContainerOpResult::Failed(op, e.to_string())); }
+                    Ok(()) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
+                    Err(e) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
                 }
             }
         });
@@ -2944,21 +2895,31 @@ impl App {
         self.loading = true;
         self.spinner_frame = 0;
 
-        let (result_tx, result_rx) = mpsc::unbounded_channel();
-        self.container_op_rx = Some(result_rx);
-
-        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-        self.container_op_progress_rx = Some(progress_rx);
-
-        let (output_tx, output_rx) = mpsc::unbounded_channel();
+        let event_tx = self.async_event_tx.clone();
         self.up_output = Vec::new();
-        self.up_output_rx = Some(output_rx);
+
+        // Create intermediate channels for ContainerManager API, bridged to unified event channel
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<String>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<String>();
+
+        let fwd_tx1 = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = progress_rx.recv().await {
+                if fwd_tx1.send(AsyncEvent::OperationProgress(msg)).is_err() { break; }
+            }
+        });
+        let fwd_tx2 = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(line) = output_rx.recv().await {
+                if fwd_tx2.send(AsyncEvent::UpOutput(line)).is_err() { break; }
+            }
+        });
 
         let manager = Arc::clone(&self.manager);
         tokio::spawn(async move {
             match manager.read().await.up_with_progress(&id, Some(&progress_tx), Some(&output_tx)).await {
-                Ok(()) => { let _ = result_tx.send(ContainerOpResult::Success(op)); }
-                Err(e) => { let _ = result_tx.send(ContainerOpResult::Failed(op, e.to_string())); }
+                Ok(()) => { let _ = event_tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
+                Err(e) => { let _ = event_tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
             }
         });
 
@@ -3082,14 +3043,13 @@ impl App {
                 self.loading = true;
                 self.spinner_frame = 0;
 
-                let (tx, rx) = mpsc::unbounded_channel();
-                self.container_op_rx = Some(rx);
+                let tx = self.async_event_tx.clone();
 
                 let manager = Arc::clone(&self.manager);
                 tokio::spawn(async move {
                     match manager.read().await.remove(&id, true).await {
-                        Ok(()) => { let _ = tx.send(ContainerOpResult::Success(op)); }
-                        Err(e) => { let _ = tx.send(ContainerOpResult::Failed(op, e.to_string())); }
+                        Ok(()) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
+                        Err(e) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
                     }
                 });
             }
@@ -3110,14 +3070,13 @@ impl App {
                 self.loading = true;
                 self.spinner_frame = 0;
 
-                let (tx, rx) = mpsc::unbounded_channel();
-                self.container_op_rx = Some(rx);
+                let tx = self.async_event_tx.clone();
 
                 let manager = Arc::clone(&self.manager);
                 tokio::spawn(async move {
                     match manager.read().await.stop(&id).await {
-                        Ok(()) => { let _ = tx.send(ContainerOpResult::Success(op)); }
-                        Err(e) => { let _ = tx.send(ContainerOpResult::Failed(op, e.to_string())); }
+                        Ok(()) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(op))); }
+                        Err(e) => { let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(op, e.to_string()))); }
                     }
                 });
             }
@@ -3129,9 +3088,15 @@ impl App {
                 self.build_auto_scroll = true;
                 self.build_complete = false;
 
-                // Create channel for progress updates
-                let (tx, rx) = mpsc::unbounded_channel();
-                self.build_progress_rx = Some(rx);
+                let event_tx = self.async_event_tx.clone();
+                let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+                // Forward build progress to unified event channel
+                let fwd_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(line) = progress_rx.recv().await {
+                        if fwd_tx.send(AsyncEvent::BuildProgress(line)).is_err() { break; }
+                    }
+                });
 
                 // Clone values for the background task
                 let manager = Arc::clone(&self.manager);
@@ -3140,13 +3105,13 @@ impl App {
 
                 // Spawn background task for rebuild
                 tokio::spawn(async move {
-                    let _ = tx.send("Starting rebuild...".to_string());
-                    match manager.read().await.rebuild_with_progress(&id, no_cache, tx.clone()).await {
+                    let _ = progress_tx.send("Starting rebuild...".to_string());
+                    match manager.read().await.rebuild_with_progress(&id, no_cache, progress_tx.clone()).await {
                         Ok(()) => {
                             // Success message is sent by rebuild_with_progress
                         }
                         Err(e) => {
-                            let _ = tx.send(format!("Error: Rebuild failed: {}", e));
+                            let _ = progress_tx.send(format!("Error: Rebuild failed: {}", e));
                         }
                     }
                 });
@@ -3224,7 +3189,6 @@ impl App {
             }
             ConfirmAction::CancelBuild => {
                 // Cancel the in-progress build and return to main view
-                self.build_progress_rx = None; // Drop the receiver, which stops the build task
                 self.loading = false;
                 self.build_complete = false;
                 self.build_output.clear();
@@ -3281,7 +3245,7 @@ impl App {
             View::Ports => {
                 self.ports_container_id = None;
                 self.ports_provider_container_id = None;
-                self.port_detect_rx = None;
+                if let Some(handle) = self.port_detect_handle.take() { handle.abort(); }
                 self.detected_ports.clear();
                 self.socat_installed = None;
                 self.socat_installing = false;

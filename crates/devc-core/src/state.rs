@@ -161,6 +161,12 @@ impl StateStore {
         Ok(())
     }
 
+    /// Serialize state to JSON without writing to disk.
+    /// Use this to snapshot state under a lock, then write after releasing.
+    pub fn serialize(&self) -> Result<String> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
     /// Get the default state file path
     pub fn state_path() -> Result<PathBuf> {
         let data_dir = GlobalConfig::data_dir()?;

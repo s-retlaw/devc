@@ -499,249 +499,12 @@ impl ContainerProvider for CliProvider {
         };
 
         let output = self.run_cmd(&args).await?;
-
-        let mut containers = Vec::new();
-        for line in output.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() >= 4 {
-                containers.push(ContainerInfo {
-                    id: ContainerId::new(parts[0]),
-                    name: parts[1].to_string(),
-                    image: parts[2].to_string(),
-                    status: ContainerStatus::from(parts[3]),
-                    created: 0, // Would need to parse
-                    labels: HashMap::new(),
-                });
-            }
-        }
-
-        Ok(containers)
+        Ok(parse_list_output(&output))
     }
 
     async fn inspect(&self, id: &ContainerId) -> Result<ContainerDetails> {
         let output = self.run_cmd(&["inspect", "--format=json", &id.0]).await?;
-
-        let inspect: Vec<serde_json::Value> = serde_json::from_str(&output)
-            .map_err(|e: serde_json::Error| ProviderError::RuntimeError(e.to_string()))?;
-
-        let info = inspect
-            .first()
-            .ok_or_else(|| ProviderError::ContainerNotFound(id.0.clone()))?;
-
-        let state = info.get("State").and_then(serde_json::Value::as_object);
-        let config = info.get("Config").and_then(serde_json::Value::as_object);
-
-        let status = state
-            .and_then(|s| s.get("Status"))
-            .and_then(serde_json::Value::as_str)
-            .map(ContainerStatus::from)
-            .unwrap_or(ContainerStatus::Unknown);
-
-        let name = info
-            .get("Name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .trim_start_matches('/')
-            .to_string();
-
-        let image = config
-            .and_then(|c| c.get("Image"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        let image_id = info
-            .get("Image")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        let exit_code = state
-            .and_then(|s| s.get("ExitCode"))
-            .and_then(serde_json::Value::as_i64);
-
-        let labels: HashMap<String, String> = config
-            .and_then(|c| c.get("Labels"))
-            .and_then(serde_json::Value::as_object)
-            .map(|l| {
-                l.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Parse environment variables
-        let env: Vec<String> = config
-            .and_then(|c| c.get("Env"))
-            .and_then(serde_json::Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Parse mounts
-        let mounts: Vec<MountInfo> = info
-            .get("Mounts")
-            .and_then(serde_json::Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .map(|m| {
-                        let mount_type = m.get("Type").and_then(|v| v.as_str()).unwrap_or("bind");
-                        let source = m
-                            .get("Source")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let destination = m
-                            .get("Destination")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let rw = m.get("RW").and_then(|v| v.as_bool()).unwrap_or(true);
-
-                        MountInfo {
-                            mount_type: mount_type.to_string(),
-                            source,
-                            destination,
-                            read_only: !rw,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Parse ports from NetworkSettings
-        let network_settings_json = info.get("NetworkSettings");
-        let mut ports: Vec<PortInfo> = Vec::new();
-
-        if let Some(ns) = network_settings_json.and_then(|n| n.as_object()) {
-            if let Some(port_map) = ns.get("Ports").and_then(|p| p.as_object()) {
-                for (container_port_str, bindings) in port_map {
-                    // Parse "80/tcp" format
-                    let parts: Vec<&str> = container_port_str.split('/').collect();
-                    let port_num: u16 = parts[0].parse().unwrap_or(0);
-                    let protocol = parts.get(1).unwrap_or(&"tcp").to_string();
-
-                    if let Some(binding_array) = bindings.as_array() {
-                        for binding in binding_array {
-                            let host_ip = binding
-                                .get("HostIp")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            let host_port = binding
-                                .get("HostPort")
-                                .and_then(|v| v.as_str())
-                                .and_then(|s| s.parse().ok());
-
-                            ports.push(PortInfo {
-                                container_port: port_num,
-                                host_port,
-                                protocol: protocol.clone(),
-                                host_ip,
-                            });
-                        }
-                    } else if !bindings.is_null() {
-                        // No bindings
-                        ports.push(PortInfo {
-                            container_port: port_num,
-                            host_port: None,
-                            protocol,
-                            host_ip: None,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Parse network settings
-        let network_settings = network_settings_json
-            .and_then(|ns| ns.as_object())
-            .map(|ns| {
-                let ip_address = ns.get("IPAddress").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let gateway = ns.get("Gateway").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                let networks = ns
-                    .get("Networks")
-                    .and_then(|n| n.as_object())
-                    .map(|nets| {
-                        nets.iter()
-                            .map(|(name, net)| {
-                                let network_id = net
-                                    .get("NetworkID")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let net_ip = net
-                                    .get("IPAddress")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                let net_gateway = net
-                                    .get("Gateway")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-
-                                (
-                                    name.clone(),
-                                    NetworkInfo {
-                                        network_id,
-                                        ip_address: net_ip,
-                                        gateway: net_gateway,
-                                    },
-                                )
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                NetworkSettings {
-                    ip_address,
-                    gateway,
-                    networks,
-                }
-            })
-            .unwrap_or_default();
-
-        // Parse timestamps
-        let created = info
-            .get("Created")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.timestamp())
-            .unwrap_or(0);
-
-        let started_at = state
-            .and_then(|s| s.get("StartedAt"))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.timestamp());
-
-        let finished_at = state
-            .and_then(|s| s.get("FinishedAt"))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.timestamp());
-
-        Ok(ContainerDetails {
-            id: id.clone(),
-            name,
-            image,
-            image_id,
-            status,
-            created,
-            started_at,
-            finished_at,
-            exit_code,
-            labels,
-            env,
-            mounts,
-            ports,
-            network_settings,
-        })
+        parse_inspect_output(&output, id)
     }
 
     async fn logs(&self, id: &ContainerId, config: &LogConfig) -> Result<LogStream> {
@@ -947,50 +710,296 @@ impl ContainerProvider for CliProvider {
         // List ALL containers with detailed format including labels
         let format = "--format={{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Labels}}|{{.CreatedAt}}";
         let output = self.run_cmd(&["ps", "-a", "--no-trunc", format]).await?;
+        Ok(parse_discover_output(&output, self.provider_type))
+    }
+}
 
-        let mut discovered = Vec::new();
-        for line in output.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() < 6 {
-                continue;
-            }
-
-            let labels = parse_cli_labels(parts[4]);
-            let (is_devcontainer, source, _managed) = detect_devcontainer_source_from_labels(&labels);
-
-            if !is_devcontainer {
-                continue;
-            }
-
-            // Extract workspace path from labels (fall back through multiple label keys)
-            let workspace_path = labels
-                .get("devcontainer.local_folder")
-                .or_else(|| labels.get("devc.workspace"))
-                .cloned();
-
-            let created = {
-                let raw = parts[5].trim();
-                if raw.is_empty() { None } else { Some(raw.to_string()) }
-            };
-
-            discovered.push(DiscoveredContainer {
+/// Parse the pipe-delimited output of `docker/podman ps` into ContainerInfo items
+fn parse_list_output(output: &str) -> Vec<ContainerInfo> {
+    let mut containers = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() >= 4 {
+            containers.push(ContainerInfo {
                 id: ContainerId::new(parts[0]),
                 name: parts[1].to_string(),
                 image: parts[2].to_string(),
                 status: ContainerStatus::from(parts[3]),
-                source,
-                workspace_path,
-                labels,
-                provider: self.provider_type,
-                created,
+                created: 0,
+                labels: HashMap::new(),
             });
         }
-
-        Ok(discovered)
     }
+    containers
+}
+
+/// Parse JSON output of `docker/podman inspect --format=json` into ContainerDetails
+fn parse_inspect_output(output: &str, id: &ContainerId) -> Result<ContainerDetails> {
+    let inspect: Vec<serde_json::Value> = serde_json::from_str(output)
+        .map_err(|e: serde_json::Error| ProviderError::RuntimeError(e.to_string()))?;
+
+    let info = inspect
+        .first()
+        .ok_or_else(|| ProviderError::ContainerNotFound(id.0.clone()))?;
+
+    let state = info.get("State").and_then(serde_json::Value::as_object);
+    let config = info.get("Config").and_then(serde_json::Value::as_object);
+
+    let status = state
+        .and_then(|s| s.get("Status"))
+        .and_then(serde_json::Value::as_str)
+        .map(ContainerStatus::from)
+        .unwrap_or(ContainerStatus::Unknown);
+
+    let name = info
+        .get("Name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim_start_matches('/')
+        .to_string();
+
+    let image = config
+        .and_then(|c| c.get("Image"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let image_id = info
+        .get("Image")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let exit_code = state
+        .and_then(|s| s.get("ExitCode"))
+        .and_then(serde_json::Value::as_i64);
+
+    let labels: HashMap<String, String> = config
+        .and_then(|c| c.get("Labels"))
+        .and_then(serde_json::Value::as_object)
+        .map(|l| {
+            l.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Parse environment variables
+    let env: Vec<String> = config
+        .and_then(|c| c.get("Env"))
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Parse mounts
+    let mounts: Vec<MountInfo> = info
+        .get("Mounts")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|m| {
+                    let mount_type = m.get("Type").and_then(|v| v.as_str()).unwrap_or("bind");
+                    let source = m
+                        .get("Source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let destination = m
+                        .get("Destination")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let rw = m.get("RW").and_then(|v| v.as_bool()).unwrap_or(true);
+
+                    MountInfo {
+                        mount_type: mount_type.to_string(),
+                        source,
+                        destination,
+                        read_only: !rw,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Parse ports from NetworkSettings
+    let network_settings_json = info.get("NetworkSettings");
+    let mut ports: Vec<PortInfo> = Vec::new();
+
+    if let Some(ns) = network_settings_json.and_then(|n| n.as_object()) {
+        if let Some(port_map) = ns.get("Ports").and_then(|p| p.as_object()) {
+            for (container_port_str, bindings) in port_map {
+                // Parse "80/tcp" format
+                let parts: Vec<&str> = container_port_str.split('/').collect();
+                let port_num: u16 = parts[0].parse().unwrap_or(0);
+                let protocol = parts.get(1).unwrap_or(&"tcp").to_string();
+
+                if let Some(binding_array) = bindings.as_array() {
+                    for binding in binding_array {
+                        let host_ip = binding
+                            .get("HostIp")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let host_port = binding
+                            .get("HostPort")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok());
+
+                        ports.push(PortInfo {
+                            container_port: port_num,
+                            host_port,
+                            protocol: protocol.clone(),
+                            host_ip,
+                        });
+                    }
+                } else if !bindings.is_null() {
+                    ports.push(PortInfo {
+                        container_port: port_num,
+                        host_port: None,
+                        protocol,
+                        host_ip: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // Parse network settings
+    let network_settings = network_settings_json
+        .and_then(|ns| ns.as_object())
+        .map(|ns| {
+            let ip_address = ns.get("IPAddress").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let gateway = ns.get("Gateway").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+            let networks = ns
+                .get("Networks")
+                .and_then(|n| n.as_object())
+                .map(|nets| {
+                    nets.iter()
+                        .map(|(name, net)| {
+                            let network_id = net
+                                .get("NetworkID")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let net_ip = net
+                                .get("IPAddress")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let net_gateway = net
+                                .get("Gateway")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+
+                            (
+                                name.clone(),
+                                NetworkInfo {
+                                    network_id,
+                                    ip_address: net_ip,
+                                    gateway: net_gateway,
+                                },
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            NetworkSettings {
+                ip_address,
+                gateway,
+                networks,
+            }
+        })
+        .unwrap_or_default();
+
+    // Parse timestamps
+    let created = info
+        .get("Created")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0);
+
+    let started_at = state
+        .and_then(|s| s.get("StartedAt"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp());
+
+    let finished_at = state
+        .and_then(|s| s.get("FinishedAt"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp());
+
+    Ok(ContainerDetails {
+        id: id.clone(),
+        name,
+        image,
+        image_id,
+        status,
+        created,
+        started_at,
+        finished_at,
+        exit_code,
+        labels,
+        env,
+        mounts,
+        ports,
+        network_settings,
+    })
+}
+
+/// Parse the pipe-delimited output of `docker/podman ps -a` for discovery
+fn parse_discover_output(output: &str, provider_type: ProviderType) -> Vec<DiscoveredContainer> {
+    let mut discovered = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+
+        let labels = parse_cli_labels(parts[4]);
+        let (is_devcontainer, source, _managed) = detect_devcontainer_source_from_labels(&labels);
+
+        if !is_devcontainer {
+            continue;
+        }
+
+        // Extract workspace path from labels (fall back through multiple label keys)
+        let workspace_path = labels
+            .get("devcontainer.local_folder")
+            .or_else(|| labels.get("devc.workspace"))
+            .cloned();
+
+        let created = {
+            let raw = parts[5].trim();
+            if raw.is_empty() { None } else { Some(raw.to_string()) }
+        };
+
+        discovered.push(DiscoveredContainer {
+            id: ContainerId::new(parts[0]),
+            name: parts[1].to_string(),
+            image: parts[2].to_string(),
+            status: ContainerStatus::from(parts[3]),
+            source,
+            workspace_path,
+            labels,
+            provider: provider_type,
+            created,
+        });
+    }
+    discovered
 }
 
 /// Parse CLI labels format "key=value,key2=value2" into HashMap
@@ -1233,6 +1242,351 @@ mod tests {
         assert!(parse_compose_ps_output("").is_empty());
         assert!(parse_compose_ps_output("  ").is_empty());
         assert!(parse_compose_ps_output("\n\n").is_empty());
+    }
+
+    // ==================== parse_list_output tests ====================
+
+    #[test]
+    fn test_parse_list_docker_output() {
+        // Docker ps output: ID|Names|Image|State|Created
+        let output = "abc123|my-container|ubuntu:22.04|running|2024-01-15\n\
+                       def456|another-one|node:18|exited|2024-01-14\n";
+
+        let containers = parse_list_output(output);
+        assert_eq!(containers.len(), 2);
+
+        assert_eq!(containers[0].id.0, "abc123");
+        assert_eq!(containers[0].name, "my-container");
+        assert_eq!(containers[0].image, "ubuntu:22.04");
+        assert_eq!(containers[0].status, ContainerStatus::Running);
+
+        assert_eq!(containers[1].id.0, "def456");
+        assert_eq!(containers[1].name, "another-one");
+        assert_eq!(containers[1].image, "node:18");
+        assert_eq!(containers[1].status, ContainerStatus::Exited);
+    }
+
+    #[test]
+    fn test_parse_list_podman_output() {
+        // Podman uses the same format but may have different status strings
+        let output = "aabbcc|podman-ctr|alpine:latest|created|2024-02-01\n";
+        let containers = parse_list_output(output);
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].status, ContainerStatus::Created);
+    }
+
+    #[test]
+    fn test_parse_list_empty_output() {
+        assert!(parse_list_output("").is_empty());
+        assert!(parse_list_output("\n\n").is_empty());
+        assert!(parse_list_output("  \n  \n").is_empty());
+    }
+
+    #[test]
+    fn test_parse_list_malformed_lines() {
+        // Lines with fewer than 4 parts should be skipped
+        let output = "abc|name|image\n\
+                       def|name2|image2|running|extra\n";
+        let containers = parse_list_output(output);
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].id.0, "def");
+    }
+
+    // ==================== parse_inspect_output tests ====================
+
+    #[test]
+    fn test_parse_inspect_docker_output() {
+        // Captured Docker inspect output (simplified)
+        let output = r#"[{
+            "Id": "sha256:abc123",
+            "Created": "2024-01-15T10:30:00.000000000Z",
+            "Name": "/my-devcontainer",
+            "Image": "sha256:img456",
+            "State": {
+                "Status": "running",
+                "Running": true,
+                "ExitCode": 0,
+                "StartedAt": "2024-01-15T10:30:01.000000000Z",
+                "FinishedAt": "0001-01-01T00:00:00Z"
+            },
+            "Config": {
+                "Image": "ubuntu:22.04",
+                "Env": ["PATH=/usr/bin", "TERM=xterm"],
+                "Labels": {
+                    "devc.managed": "true",
+                    "devc.workspace": "/home/user/project"
+                }
+            },
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": "/home/user/project",
+                    "Destination": "/workspace",
+                    "RW": true
+                },
+                {
+                    "Type": "volume",
+                    "Source": "my-vol",
+                    "Destination": "/data",
+                    "RW": false
+                }
+            ],
+            "NetworkSettings": {
+                "IPAddress": "172.17.0.2",
+                "Gateway": "172.17.0.1",
+                "Ports": {
+                    "3000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "3000"}],
+                    "5432/tcp": null
+                },
+                "Networks": {
+                    "bridge": {
+                        "NetworkID": "net123",
+                        "IPAddress": "172.17.0.2",
+                        "Gateway": "172.17.0.1"
+                    }
+                }
+            }
+        }]"#;
+
+        let id = ContainerId::new("abc123");
+        let details = parse_inspect_output(output, &id).unwrap();
+
+        assert_eq!(details.name, "my-devcontainer"); // Leading / stripped
+        assert_eq!(details.image, "ubuntu:22.04");
+        assert_eq!(details.image_id, "sha256:img456");
+        assert_eq!(details.status, ContainerStatus::Running);
+        assert_eq!(details.exit_code, Some(0));
+
+        // Labels
+        assert_eq!(details.labels.get("devc.managed").unwrap(), "true");
+        assert_eq!(details.labels.get("devc.workspace").unwrap(), "/home/user/project");
+
+        // Env
+        assert_eq!(details.env.len(), 2);
+        assert!(details.env.contains(&"PATH=/usr/bin".to_string()));
+        assert!(details.env.contains(&"TERM=xterm".to_string()));
+
+        // Mounts
+        assert_eq!(details.mounts.len(), 2);
+        assert_eq!(details.mounts[0].mount_type, "bind");
+        assert_eq!(details.mounts[0].source, "/home/user/project");
+        assert_eq!(details.mounts[0].destination, "/workspace");
+        assert!(!details.mounts[0].read_only);
+        assert_eq!(details.mounts[1].mount_type, "volume");
+        assert!(details.mounts[1].read_only);
+
+        // Ports
+        assert!(details.ports.len() >= 1);
+        let tcp_3000 = details.ports.iter().find(|p| p.container_port == 3000).unwrap();
+        assert_eq!(tcp_3000.host_port, Some(3000));
+        assert_eq!(tcp_3000.host_ip.as_deref(), Some("0.0.0.0"));
+        assert_eq!(tcp_3000.protocol, "tcp");
+
+        // Network settings
+        assert_eq!(details.network_settings.ip_address.as_deref(), Some("172.17.0.2"));
+        assert_eq!(details.network_settings.gateway.as_deref(), Some("172.17.0.1"));
+        assert!(details.network_settings.networks.contains_key("bridge"));
+
+        // Timestamps
+        assert!(details.created > 0);
+        assert!(details.started_at.is_some());
+    }
+
+    #[test]
+    fn test_parse_inspect_podman_output() {
+        // Podman inspect output differs: Name has no leading /, uses different timestamp format
+        let output = r#"[{
+            "Id": "podman123",
+            "Created": "2024-02-01T15:00:00.000000000Z",
+            "Name": "podman-container",
+            "Image": "sha256:podimg789",
+            "State": {
+                "Status": "exited",
+                "Running": false,
+                "ExitCode": 137,
+                "StartedAt": "2024-02-01T15:00:01.000000000Z",
+                "FinishedAt": "2024-02-01T15:30:00.000000000Z"
+            },
+            "Config": {
+                "Image": "node:18-alpine",
+                "Env": ["NODE_ENV=development"],
+                "Labels": {
+                    "devcontainer.local_folder": "/home/user/webapp",
+                    "devcontainer.config_file": "/home/user/webapp/.devcontainer/devcontainer.json"
+                }
+            },
+            "Mounts": [],
+            "NetworkSettings": {
+                "Ports": {},
+                "Networks": {}
+            }
+        }]"#;
+
+        let id = ContainerId::new("podman123");
+        let details = parse_inspect_output(output, &id).unwrap();
+
+        assert_eq!(details.name, "podman-container"); // No leading /
+        assert_eq!(details.status, ContainerStatus::Exited);
+        assert_eq!(details.exit_code, Some(137));
+        assert_eq!(details.image, "node:18-alpine");
+        assert!(details.mounts.is_empty());
+        assert!(details.ports.is_empty());
+        assert!(details.finished_at.is_some());
+    }
+
+    #[test]
+    fn test_parse_inspect_minimal_fields() {
+        // Minimal inspect output — many optional fields missing
+        let output = r#"[{
+            "Id": "min123",
+            "State": { "Status": "created" },
+            "Config": { "Image": "alpine" }
+        }]"#;
+
+        let id = ContainerId::new("min123");
+        let details = parse_inspect_output(output, &id).unwrap();
+
+        assert_eq!(details.status, ContainerStatus::Created);
+        assert_eq!(details.image, "alpine");
+        assert!(details.name.is_empty());
+        assert!(details.labels.is_empty());
+        assert!(details.env.is_empty());
+        assert!(details.mounts.is_empty());
+        assert!(details.ports.is_empty());
+        assert_eq!(details.exit_code, None);
+    }
+
+    #[test]
+    fn test_parse_inspect_empty_array() {
+        let output = "[]";
+        let id = ContainerId::new("missing");
+        let result = parse_inspect_output(output, &id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_inspect_invalid_json() {
+        let output = "not valid json";
+        let id = ContainerId::new("x");
+        let result = parse_inspect_output(output, &id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_inspect_multiple_port_bindings() {
+        // Port with multiple bindings (IPv4 + IPv6)
+        let output = r#"[{
+            "Id": "ports123",
+            "State": { "Status": "running" },
+            "Config": { "Image": "nginx" },
+            "NetworkSettings": {
+                "Ports": {
+                    "80/tcp": [
+                        {"HostIp": "0.0.0.0", "HostPort": "8080"},
+                        {"HostIp": "::", "HostPort": "8080"}
+                    ],
+                    "443/tcp": [
+                        {"HostIp": "0.0.0.0", "HostPort": "8443"}
+                    ]
+                }
+            }
+        }]"#;
+
+        let id = ContainerId::new("ports123");
+        let details = parse_inspect_output(output, &id).unwrap();
+
+        // Port 80 has 2 bindings (IPv4 + IPv6)
+        let port_80: Vec<_> = details.ports.iter().filter(|p| p.container_port == 80).collect();
+        assert_eq!(port_80.len(), 2);
+
+        // Port 443 has 1 binding
+        let port_443: Vec<_> = details.ports.iter().filter(|p| p.container_port == 443).collect();
+        assert_eq!(port_443.len(), 1);
+        assert_eq!(port_443[0].host_port, Some(8443));
+    }
+
+    // ==================== parse_discover_output tests ====================
+
+    #[test]
+    fn test_parse_discover_devc_container() {
+        let output = "abc123|my-devc|ubuntu:22.04|running|devc.managed=true,devc.workspace=/home/user/proj|2024-01-15\n";
+        let discovered = parse_discover_output(output, ProviderType::Docker);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].name, "my-devc");
+        assert_eq!(discovered[0].source, DevcontainerSource::Devc);
+        assert_eq!(discovered[0].workspace_path.as_deref(), Some("/home/user/proj"));
+        assert_eq!(discovered[0].provider, ProviderType::Docker);
+    }
+
+    #[test]
+    fn test_parse_discover_vscode_container() {
+        let output = "vsc123|vscode_devcontainer_abcdef|node:18|running|devcontainer.local_folder=/home/user/webapp,devcontainer.config_file=/home/user/webapp/.devcontainer/devcontainer.json|2024-02-01\n";
+        let discovered = parse_discover_output(output, ProviderType::Podman);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].source, DevcontainerSource::VsCode);
+        assert_eq!(discovered[0].workspace_path.as_deref(), Some("/home/user/webapp"));
+        assert_eq!(discovered[0].provider, ProviderType::Podman);
+    }
+
+    #[test]
+    fn test_parse_discover_devpod_container() {
+        let output = "dp123|devpod-myproject|alpine|running|devcontainer.metadata={},Devpod.user=vscode,Devpod.workspace=/workspace|2024-03-01\n";
+        let discovered = parse_discover_output(output, ProviderType::Docker);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].source, DevcontainerSource::DevPod);
+    }
+
+    #[test]
+    fn test_parse_discover_skips_non_devcontainer() {
+        let output = "reg123|postgres|postgres:15|running|maintainer=PostgreSQL|2024-01-01\n\
+                       dc456|my-devcontainer|ubuntu|running|devc.managed=true|2024-01-02\n";
+        let discovered = parse_discover_output(output, ProviderType::Docker);
+        // Only the devcontainer should be returned, not the postgres container
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].name, "my-devcontainer");
+    }
+
+    #[test]
+    fn test_parse_discover_mixed_sources() {
+        let output = "a|devc-ctr|img|running|devc.managed=true|2024-01-01\n\
+                       b|vscode-ctr|img|running|devcontainer.local_folder=/proj|2024-01-02\n\
+                       c|normal-ctr|img|running|com.docker.compose.service=web|2024-01-03\n\
+                       d|devpod-ctr|img|exited|devcontainer.metadata={},Devpod.workspace=/ws|2024-01-04\n";
+        let discovered = parse_discover_output(output, ProviderType::Docker);
+        assert_eq!(discovered.len(), 3); // devc + vscode + devpod, but not the compose one
+    }
+
+    #[test]
+    fn test_parse_discover_empty_created() {
+        let output = "abc|my-ctr|img|running|devc.managed=true|\n";
+        let discovered = parse_discover_output(output, ProviderType::Docker);
+        assert_eq!(discovered.len(), 1);
+        assert!(discovered[0].created.is_none());
+    }
+
+    #[test]
+    fn test_parse_discover_too_few_fields() {
+        // Lines with < 6 pipe-separated fields should be skipped
+        let output = "abc|name|image|running|labels\n";
+        let discovered = parse_discover_output(output, ProviderType::Docker);
+        assert!(discovered.is_empty());
+    }
+
+    // ==================== ContainerStatus::from tests ====================
+
+    #[test]
+    fn test_container_status_from_str() {
+        assert_eq!(ContainerStatus::from("running"), ContainerStatus::Running);
+        assert_eq!(ContainerStatus::from("Running"), ContainerStatus::Running);
+        assert_eq!(ContainerStatus::from("RUNNING"), ContainerStatus::Running);
+        assert_eq!(ContainerStatus::from("exited"), ContainerStatus::Exited);
+        assert_eq!(ContainerStatus::from("created"), ContainerStatus::Created);
+        assert_eq!(ContainerStatus::from("paused"), ContainerStatus::Paused);
+        assert_eq!(ContainerStatus::from("restarting"), ContainerStatus::Restarting);
+        assert_eq!(ContainerStatus::from("removing"), ContainerStatus::Removing);
+        assert_eq!(ContainerStatus::from("dead"), ContainerStatus::Dead);
+        assert_eq!(ContainerStatus::from("something_else"), ContainerStatus::Unknown);
+        assert_eq!(ContainerStatus::from(""), ContainerStatus::Unknown);
     }
 
     /// Get a provider for testing (tries toolbox, podman, then docker)

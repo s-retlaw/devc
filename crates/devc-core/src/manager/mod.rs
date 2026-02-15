@@ -1,18 +1,21 @@
 //! Container manager - coordinates all container operations
 
+mod compose;
+mod discovery;
+mod lifecycle;
+
 use crate::{
     run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, ContainerState,
-    CoreError, DevcContainerStatus, DotfilesManager, EnhancedBuildContext, Result, SshManager,
-    StateStore,
+    CoreError, DevcContainerStatus, EnhancedBuildContext, Result, StateStore,
 };
 use devc_config::{GlobalConfig, ImageSource};
 use devc_provider::{
-    ContainerId, ContainerProvider, ContainerStatus, DevcontainerSource, DiscoveredContainer,
+    ContainerId, ContainerProvider, ContainerStatus, DevcontainerSource,
     ExecStream, LogConfig, ProviderType,
 };
 use crate::features;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -353,6 +356,25 @@ impl ContainerManager {
         .await
     }
 
+    /// Save state to disk without holding the write lock during I/O.
+    ///
+    /// Serializes under a read lock, then writes to disk after releasing it.
+    /// Use this after modifying state in a write-lock scope to avoid
+    /// holding the lock during disk I/O.
+    pub(crate) async fn save_state(&self) -> Result<()> {
+        let (content, path) = {
+            let state = self.state.read().await;
+            let content = state.serialize()?;
+            let path = StateStore::state_path()?;
+            (content, path)
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
     /// List all managed containers
     pub async fn list(&self) -> Result<Vec<ContainerState>> {
         let state = self.state.read().await;
@@ -379,117 +401,27 @@ impl ContainerManager {
 
         let container = Container::from_workspace(workspace_path)?;
 
-        let mut state = self.state.write().await;
+        let container_state = {
+            let mut state = self.state.write().await;
 
-        // Check if already exists (by config path for multi-config support)
-        if let Some(existing) = state.find_by_config_path(&container.config_path) {
-            return Err(CoreError::ContainerExists(existing.name.clone()));
-        }
+            // Check if already exists (by config path for multi-config support)
+            if let Some(existing) = state.find_by_config_path(&container.config_path) {
+                return Err(CoreError::ContainerExists(existing.name.clone()));
+            }
 
-        let container_state = ContainerState::new(
-            container.name.clone(),
-            provider_type,
-            container.config_path.clone(),
-            container.workspace_path.clone(),
-        );
+            let container_state = ContainerState::new(
+                container.name.clone(),
+                provider_type,
+                container.config_path.clone(),
+                container.workspace_path.clone(),
+            );
 
-        state.add(container_state.clone());
-        state.save()?;
+            state.add(container_state.clone());
+            container_state
+        };
+        self.save_state().await?;
 
         Ok(container_state)
-    }
-
-    /// Initialize a new container from a specific config path.
-    /// Returns Ok(None) if the config is already registered (not an error).
-    pub async fn init_from_config(&self, config_path: &Path) -> Result<Option<ContainerState>> {
-        let provider_type = self
-            .provider_type()
-            .ok_or_else(|| CoreError::NotConnected("Cannot init: no provider available".to_string()))?;
-
-        let container = self.load_container(config_path)?;
-
-        let mut state = self.state.write().await;
-
-        // Already registered — skip silently
-        if state.find_by_config_path(&container.config_path).is_some() {
-            return Ok(None);
-        }
-
-        let container_state = ContainerState::new(
-            container.name.clone(),
-            provider_type,
-            container.config_path.clone(),
-            container.workspace_path.clone(),
-        );
-
-        state.add(container_state.clone());
-        state.save()?;
-
-        Ok(Some(container_state))
-    }
-
-    /// Auto-discover all devcontainer.json configs in a workspace directory
-    /// and register any that aren't already tracked.
-    /// Returns the list of newly registered container states.
-    pub async fn auto_discover_configs(&self, workspace_dir: &Path) -> Result<Vec<ContainerState>> {
-        use devc_config::DevContainerConfig;
-
-        let all_configs = DevContainerConfig::load_all_from_dir(workspace_dir);
-        let mut newly_registered = Vec::new();
-
-        for (_config, config_path) in all_configs {
-            match self.init_from_config(&config_path).await {
-                Ok(Some(cs)) => newly_registered.push(cs),
-                Ok(None) => {} // already registered
-                Err(e) => {
-                    tracing::warn!(
-                        "Skipping config {}: {}",
-                        config_path.display(),
-                        e
-                    );
-                }
-            }
-        }
-
-        Ok(newly_registered)
-    }
-
-    /// Find devcontainer.json configs on disk that are NOT already registered
-    /// in the state store. Returns (name, config_path, workspace_path) tuples.
-    /// Does NOT register anything — the results are ephemeral.
-    pub async fn find_unregistered_configs(
-        &self,
-        workspace_dir: &Path,
-    ) -> Vec<(String, PathBuf, PathBuf)> {
-        use devc_config::DevContainerConfig;
-
-        let all_configs = DevContainerConfig::load_all_from_dir(workspace_dir);
-        let state = self.state.read().await;
-        let mut unregistered = Vec::new();
-
-        for (_config, config_path) in all_configs {
-            if state.find_by_config_path(&config_path).is_some() {
-                continue; // already registered
-            }
-            match self.load_container(&config_path) {
-                Ok(container) => {
-                    unregistered.push((
-                        container.name.clone(),
-                        container.config_path.clone(),
-                        container.workspace_path.clone(),
-                    ));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Skipping config {}: {}",
-                        config_path.display(),
-                        e
-                    );
-                }
-            }
-        }
-
-        unregistered
     }
 
     /// Build a container image
@@ -518,8 +450,8 @@ impl ContainerManager {
             if let Some(cs) = state.get_mut(id) {
                 cs.status = DevcContainerStatus::Building;
             }
-            state.save()?;
         }
+        self.save_state().await?;
 
         // Check if SSH injection is enabled
         let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(false);
@@ -655,8 +587,8 @@ impl ContainerManager {
                             cs.metadata.insert("feature_properties".to_string(), props_json);
                         }
                     }
-                    state.save()?;
                 }
+                self.save_state().await?;
                 return Ok("compose".to_string());
             }
             ImageSource::None => {
@@ -677,8 +609,8 @@ impl ContainerManager {
                     cs.metadata.insert("feature_properties".to_string(), props_json);
                 }
             }
-            state.save()?;
         }
+        self.save_state().await?;
 
         Ok(image_id)
     }
@@ -736,8 +668,8 @@ impl ContainerManager {
                 cs.container_id = Some(container_id.0.clone());
                 cs.status = DevcContainerStatus::Created;
             }
-            state.save()?;
         }
+        self.save_state().await?;
 
         Ok(container_id)
     }
@@ -1038,8 +970,8 @@ fi
         {
             let mut state = self.state.write().await;
             state.remove(id);
-            state.save()?;
         }
+        self.save_state().await?;
 
         Ok(())
     }
@@ -1124,8 +1056,8 @@ fi
                 // Clear SSH metadata since we'll need to set it up again
                 cs.metadata.remove("ssh_available");
             }
-            state.save()?;
         }
+        self.save_state().await?;
 
         Ok(())
     }
@@ -1170,8 +1102,8 @@ fi
                     cs.container_id = None;
                     cs.status = DevcContainerStatus::Configured;
                 }
-                state.save()?;
             }
+            self.save_state().await?;
             tracing::info!(
                 "Provider migration: {} -> {}",
                 old_provider,
@@ -1230,14 +1162,16 @@ fi
                 "Migrating provider: {} -> {}",
                 old_provider, new_provider
             ));
-            let mut state = self.state.write().await;
-            if let Some(cs) = state.get_mut(id) {
-                cs.provider = new_provider;
-                cs.image_id = None;
-                cs.container_id = None;
-                cs.status = DevcContainerStatus::Configured;
+            {
+                let mut state = self.state.write().await;
+                if let Some(cs) = state.get_mut(id) {
+                    cs.provider = new_provider;
+                    cs.image_id = None;
+                    cs.container_id = None;
+                    cs.status = DevcContainerStatus::Configured;
+                }
             }
-            state.save()?;
+            self.save_state().await?;
         }
 
         // 3. Run initializeCommand on host before build (per spec)
@@ -1283,8 +1217,8 @@ fi
             if let Some(cs) = state.get_mut(id) {
                 cs.status = DevcContainerStatus::Building;
             }
-            state.save()?;
         }
+        self.save_state().await?;
 
         // Check if SSH injection is enabled
         let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(false);
@@ -1435,8 +1369,8 @@ fi
                             cs.metadata.insert("feature_properties".to_string(), props_json);
                         }
                     }
-                    state.save()?;
                 }
+                self.save_state().await?;
                 return Ok("compose".to_string());
             }
             ImageSource::None => {
@@ -1457,8 +1391,8 @@ fi
                     cs.metadata.insert("feature_properties".to_string(), props_json);
                 }
             }
-            state.save()?;
         }
+        self.save_state().await?;
 
         Ok(image_id)
     }
@@ -1569,475 +1503,6 @@ fi
         Ok(())
     }
 
-    /// Run first-create lifecycle commands on a container.
-    ///
-    /// This runs (in order):
-    /// 1. Feature onCreateCommands
-    /// 2. onCreateCommand
-    /// 3. Feature updateContentCommands
-    /// 4. updateContentCommand
-    /// 5. Feature postCreateCommands
-    /// 6. postCreateCommand
-    /// 7. SSH setup (if enabled)
-    /// 8. Dotfiles injection
-    ///
-    /// Used by both `up()` for newly created containers and `adopt()` for running containers.
-    async fn run_first_create_lifecycle(
-        &self,
-        id: &str,
-        container: &Container,
-        provider: &dyn ContainerProvider,
-        container_id: &ContainerId,
-        progress: Option<&mpsc::UnboundedSender<String>>,
-    ) -> Result<()> {
-        let container_state = {
-            let state = self.state.read().await;
-            state
-                .get(id)
-                .cloned()
-                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
-        };
-        let feature_props = get_feature_properties(&container_state);
-        let user = container.devcontainer.effective_user();
-        let workspace_folder = container.devcontainer.workspace_folder.as_deref();
-        let merged_env = merge_remote_env(
-            container.devcontainer.remote_env.as_ref(),
-            &feature_props.remote_env,
-        );
-        let remote_env = merged_env.as_ref();
-
-        // Feature onCreateCommands run first (per spec)
-        if !feature_props.on_create_commands.is_empty() {
-            send_progress(progress, "Running feature onCreateCommand(s)...");
-            let details = provider.inspect(container_id).await?;
-            if details.status != ContainerStatus::Running {
-                provider.start(container_id).await?;
-            }
-            run_feature_lifecycle_commands(
-                provider, container_id, &feature_props.on_create_commands,
-                user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if let Some(ref cmd) = container.devcontainer.on_create_command {
-            send_progress(progress, "Running onCreate command...");
-            let details = provider.inspect(container_id).await?;
-            if details.status != ContainerStatus::Running {
-                provider.start(container_id).await?;
-            }
-            run_lifecycle_command_with_env(
-                provider, container_id, cmd, user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        // Feature updateContentCommands run first (per spec)
-        if !feature_props.update_content_commands.is_empty() {
-            send_progress(progress, "Running feature updateContentCommand(s)...");
-            let details = provider.inspect(container_id).await?;
-            if details.status != ContainerStatus::Running {
-                provider.start(container_id).await?;
-            }
-            run_feature_lifecycle_commands(
-                provider, container_id, &feature_props.update_content_commands,
-                user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if let Some(ref cmd) = container.devcontainer.update_content_command {
-            send_progress(progress, "Running updateContentCommand...");
-            let details = provider.inspect(container_id).await?;
-            if details.status != ContainerStatus::Running {
-                provider.start(container_id).await?;
-            }
-            run_lifecycle_command_with_env(
-                provider, container_id, cmd, user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        // Feature postCreateCommands run first (per spec)
-        if !feature_props.post_create_commands.is_empty() {
-            send_progress(progress, "Running feature postCreateCommand(s)...");
-            let details = provider.inspect(container_id).await?;
-            if details.status != ContainerStatus::Running {
-                provider.start(container_id).await?;
-            }
-            run_feature_lifecycle_commands(
-                provider, container_id, &feature_props.post_create_commands,
-                user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if let Some(ref cmd) = container.devcontainer.post_create_command {
-            send_progress(progress, "Running postCreateCommand...");
-            let details = provider.inspect(container_id).await?;
-            if details.status != ContainerStatus::Running {
-                provider.start(container_id).await?;
-            }
-            run_lifecycle_command_with_env(
-                provider, container_id, cmd, user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        // Setup SSH if enabled (for proper TTY/resize support)
-        if self.global_config.defaults.ssh_enabled.unwrap_or(false) {
-            send_progress(progress, "Setting up SSH...");
-            let details = provider.inspect(container_id).await?;
-            if details.status != ContainerStatus::Running {
-                provider.start(container_id).await?;
-            }
-
-            let ssh_manager = SshManager::new()?;
-            ssh_manager.ensure_keys_exist()?;
-
-            let user = container.devcontainer.effective_user();
-            match ssh_manager
-                .setup_container(provider, container_id, user)
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!("SSH setup completed for container");
-                    let mut state = self.state.write().await;
-                    if let Some(cs) = state.get_mut(id) {
-                        cs.metadata
-                            .insert("ssh_available".to_string(), "true".to_string());
-                        if let Some(u) = user {
-                            cs.metadata
-                                .insert("remote_user".to_string(), u.to_string());
-                        }
-                    }
-                    state.save()?;
-                }
-                Err(e) => {
-                    tracing::warn!("SSH setup failed (will use exec fallback): {}", e);
-                    let mut state = self.state.write().await;
-                    if let Some(cs) = state.get_mut(id) {
-                        cs.metadata
-                            .insert("ssh_available".to_string(), "false".to_string());
-                    }
-                    state.save()?;
-                }
-            }
-        }
-
-        // Inject dotfiles
-        let dotfiles_manager = if let Some(ref dotfiles_config) = container.devcontainer.dotfiles
-        {
-            DotfilesManager::from_devcontainer_config(dotfiles_config, &self.global_config)
-        } else {
-            DotfilesManager::from_global_config(&self.global_config)
-        };
-
-        if dotfiles_manager.is_configured() {
-            send_progress(progress, "Installing dotfiles...");
-            dotfiles_manager
-                .inject_with_progress(
-                    provider,
-                    container_id,
-                    container.devcontainer.effective_user(),
-                    progress,
-                )
-                .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Handle Docker Compose `up` flow
-    ///
-    /// 1. Run `compose up -d --build` to start all services
-    /// 2. Find the dev service container ID via `compose ps`
-    /// 3. Store compose metadata in state
-    /// 4. Run lifecycle commands targeting the dev service container
-    async fn up_compose(
-        &self,
-        id: &str,
-        container: &Container,
-        container_state: &ContainerState,
-        provider: &dyn ContainerProvider,
-        progress: Option<&mpsc::UnboundedSender<String>>,
-        output: Option<&mpsc::UnboundedSender<String>>,
-    ) -> Result<()> {
-        // initializeCommand runs on host before first compose up (per spec)
-        if container_state.container_id.is_none() {
-            if let Some(ref cmd) = container.devcontainer.initialize_command {
-                send_progress(progress, "Running initializeCommand on host...");
-                crate::run_host_command(cmd, &container.workspace_path, output).await?;
-            }
-        }
-
-        let compose_files = container.compose_files().ok_or_else(|| {
-            CoreError::InvalidState("No dockerComposeFile specified".to_string())
-        })?;
-        let service_name = container.compose_service().ok_or_else(|| {
-            CoreError::InvalidState("No service specified for compose project".to_string())
-        })?;
-        let project_name = container.compose_project_name();
-
-        let mut owned = compose_file_strs(&compose_files);
-
-        // Resolve devcontainer features for compose override + exec-based install
-        let config_dir = container.config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let progress_opt: Option<mpsc::UnboundedSender<String>> = progress.map(|p| p.clone());
-        let resolved_features = if let Some(ref feature_map) = container.devcontainer.features {
-            features::resolve_and_prepare_features(feature_map, &config_dir, &progress_opt).await?
-        } else {
-            vec![]
-        };
-        let feature_props = features::merge_feature_properties(&resolved_features);
-
-        // Generate compose override file if features declare container properties
-        let override_file = if feature_props.has_container_properties() {
-            let yaml = features::compose_override::generate_compose_override(
-                service_name, &feature_props,
-            );
-            if let Some(yaml) = yaml {
-                let path = container.workspace_path.join(".devc-compose-override.yml");
-                std::fs::write(&path, &yaml)?;
-                Some(path)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Add override file to compose files list
-        if let Some(ref override_path) = override_file {
-            owned.push(override_path.to_string_lossy().to_string());
-        }
-
-        let compose_file_refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-
-        // 1. Run compose up
-        send_progress(progress, "Running docker compose up...");
-        let progress_tx: Option<mpsc::UnboundedSender<String>> = progress.map(|p| {
-            let p = p.clone();
-            let (real_tx, mut real_rx) = mpsc::unbounded_channel::<String>();
-            tokio::spawn(async move {
-                while let Some(msg) = real_rx.recv().await {
-                    let _ = p.send(msg);
-                }
-            });
-            real_tx
-        });
-
-        provider
-            .compose_up(
-                &compose_file_refs,
-                &project_name,
-                &container.workspace_path,
-                progress_tx,
-            )
-            .await?;
-
-        // Clean up override file
-        if let Some(ref path) = override_file {
-            let _ = std::fs::remove_file(path);
-        }
-
-        // 2. Find the dev service container ID
-        send_progress(progress, "Finding service container...");
-        // Use original compose files (without override) for ps
-        let original_owned = compose_file_strs(&compose_files);
-        let original_refs: Vec<&str> = original_owned.iter().map(|s| s.as_str()).collect();
-        let services = provider
-            .compose_ps(&original_refs, &project_name, &container.workspace_path)
-            .await?;
-
-        let dev_service = services
-            .iter()
-            .find(|s| s.service_name == service_name)
-            .ok_or_else(|| {
-                CoreError::InvalidState(format!(
-                    "Service '{}' not found in compose project",
-                    service_name
-                ))
-            })?;
-
-        let container_id = dev_service.container_id.clone();
-
-        // 3. Install features via exec if any were resolved
-        if !resolved_features.is_empty() {
-            send_progress(progress, "Installing features...");
-            let remote_user = container.devcontainer.effective_user().unwrap_or("root");
-            features::install::install_features_via_exec(
-                provider, &container_id, &resolved_features, remote_user, progress,
-            ).await?;
-        }
-
-        // 4. Store compose metadata in state
-        {
-            let mut state = self.state.write().await;
-            if let Some(cs) = state.get_mut(id) {
-                cs.container_id = Some(container_id.0.clone());
-                cs.image_id = Some("compose".to_string());
-                cs.compose_project = Some(project_name.clone());
-                cs.compose_service = Some(service_name.to_string());
-                cs.status = DevcContainerStatus::Running;
-            }
-            state.save()?;
-        }
-
-        // 5. Run lifecycle commands targeting the dev service container
-        //    Feature lifecycle commands run BEFORE devcontainer.json commands (per spec)
-        let user = container.devcontainer.effective_user();
-        let workspace_folder = container.devcontainer.workspace_folder.as_deref();
-        let merged_env = merge_remote_env(
-            container.devcontainer.remote_env.as_ref(),
-            &feature_props.remote_env,
-        );
-        let remote_env = merged_env.as_ref();
-
-        if !feature_props.on_create_commands.is_empty() {
-            send_progress(progress, "Running feature onCreateCommand(s)...");
-            run_feature_lifecycle_commands(
-                provider, &container_id, &feature_props.on_create_commands,
-                user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if let Some(ref cmd) = container.devcontainer.on_create_command {
-            send_progress(progress, "Running onCreate command...");
-            run_lifecycle_command_with_env(
-                provider, &container_id, cmd, user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if !feature_props.update_content_commands.is_empty() {
-            send_progress(progress, "Running feature updateContentCommand(s)...");
-            run_feature_lifecycle_commands(
-                provider, &container_id, &feature_props.update_content_commands,
-                user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if let Some(ref cmd) = container.devcontainer.update_content_command {
-            send_progress(progress, "Running updateContentCommand...");
-            run_lifecycle_command_with_env(
-                provider, &container_id, cmd, user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if !feature_props.post_create_commands.is_empty() {
-            send_progress(progress, "Running feature postCreateCommand(s)...");
-            run_feature_lifecycle_commands(
-                provider, &container_id, &feature_props.post_create_commands,
-                user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if let Some(ref cmd) = container.devcontainer.post_create_command {
-            send_progress(progress, "Running postCreateCommand...");
-            run_lifecycle_command_with_env(
-                provider, &container_id, cmd, user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        // Setup SSH if enabled
-        if self.global_config.defaults.ssh_enabled.unwrap_or(false) {
-            send_progress(progress, "Setting up SSH...");
-            let ssh_manager = SshManager::new()?;
-            ssh_manager.ensure_keys_exist()?;
-
-            match ssh_manager
-                .setup_container(provider, &container_id, user)
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!("SSH setup completed for compose container");
-                    let mut state = self.state.write().await;
-                    if let Some(cs) = state.get_mut(id) {
-                        cs.metadata
-                            .insert("ssh_available".to_string(), "true".to_string());
-                        if let Some(u) = user {
-                            cs.metadata
-                                .insert("remote_user".to_string(), u.to_string());
-                        }
-                    }
-                    state.save()?;
-                }
-                Err(e) => {
-                    tracing::warn!("SSH setup failed (will use exec fallback): {}", e);
-                    let mut state = self.state.write().await;
-                    if let Some(cs) = state.get_mut(id) {
-                        cs.metadata
-                            .insert("ssh_available".to_string(), "false".to_string());
-                    }
-                    state.save()?;
-                }
-            }
-        }
-
-        if !feature_props.post_start_commands.is_empty() {
-            send_progress(progress, "Running feature postStartCommand(s)...");
-            run_feature_lifecycle_commands(
-                provider, &container_id, &feature_props.post_start_commands,
-                user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        if let Some(ref cmd) = container.devcontainer.post_start_command {
-            send_progress(progress, "Running postStartCommand...");
-            run_lifecycle_command_with_env(
-                provider, &container_id, cmd, user, workspace_folder, remote_env,
-            ).await?;
-        }
-
-        send_progress(progress, "Compose project started!");
-        Ok(())
-    }
-
-    /// Run postAttachCommand for a container (if configured)
-    pub async fn run_post_attach_command(&self, id: &str) -> Result<()> {
-        let container_state = {
-            let state = self.state.read().await;
-            state
-                .get(id)
-                .cloned()
-                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
-        };
-
-        let provider = self.require_container_provider(&container_state)?;
-
-        let container = self.load_container(&container_state.config_path)?;
-        let container_id_str = container_state.container_id.as_ref().ok_or_else(|| {
-            CoreError::InvalidState("Container not created yet".to_string())
-        })?;
-        let cid = ContainerId::new(container_id_str);
-
-        // Feature postAttachCommands run first (per spec)
-        let feature_props = get_feature_properties(&container_state);
-        let merged_env = merge_remote_env(
-            container.devcontainer.remote_env.as_ref(),
-            &feature_props.remote_env,
-        );
-        if !feature_props.post_attach_commands.is_empty() {
-            run_feature_lifecycle_commands(
-                provider,
-                &cid,
-                &feature_props.post_attach_commands,
-                container.devcontainer.effective_user(),
-                container.devcontainer.workspace_folder.as_deref(),
-                merged_env.as_ref(),
-            )
-            .await?;
-        }
-
-        if let Some(ref cmd) = container.devcontainer.post_attach_command {
-            run_lifecycle_command_with_env(
-                provider,
-                &cid,
-                cmd,
-                container.devcontainer.effective_user(),
-                container.devcontainer.workspace_folder.as_deref(),
-                merged_env.as_ref(),
-            )
-            .await?;
-        }
-
-        Ok(())
-    }
-
     /// Execute a command in a container
     pub async fn exec(&self, id: &str, cmd: Vec<String>, tty: bool) -> Result<i64> {
         let result = self.exec_inner(id, cmd, tty).await?;
@@ -2088,8 +1553,8 @@ fi
         {
             let mut state = self.state.write().await;
             state.touch(id);
-            state.save()?;
         }
+        self.save_state().await?;
 
         Ok(result)
     }
@@ -2115,8 +1580,8 @@ fi
         {
             let mut state = self.state.write().await;
             state.touch(id);
-            state.save()?;
         }
+        self.save_state().await?;
 
         Ok(stream)
     }
@@ -2142,8 +1607,8 @@ fi
         {
             let mut state = self.state.write().await;
             state.touch(id);
-            state.save()?;
         }
+        self.save_state().await?;
 
         Ok(stream)
     }
@@ -2249,11 +1714,13 @@ fi
 
     /// Helper to set container status
     async fn set_status(&self, id: &str, status: DevcContainerStatus) -> Result<()> {
-        let mut state = self.state.write().await;
-        if let Some(cs) = state.get_mut(id) {
-            cs.status = status;
+        {
+            let mut state = self.state.write().await;
+            if let Some(cs) = state.get_mut(id) {
+                cs.status = status;
+            }
         }
-        state.save()?;
+        self.save_state().await?;
         Ok(())
     }
 
@@ -2269,256 +1736,18 @@ fi
         Ok(container.devcontainer)
     }
 
-    /// Discover all devcontainers from the current provider
-    /// Includes containers not managed by devc (e.g., VS Code-created)
-    pub async fn discover(&self) -> Result<Vec<DiscoveredContainer>> {
-        let provider = self.require_provider()?;
-        provider.discover_devcontainers().await.map_err(Into::into)
-    }
-
-    /// Discover devcontainers across all available providers (Docker + Podman)
-    /// Returns a merged, deduplicated list of containers from every connected runtime.
-    pub async fn discover_all(&self) -> Vec<DiscoveredContainer> {
-        let available = devc_provider::detect_available_providers(&self.global_config).await;
-
-        let mut all = Vec::new();
-        let mut seen_ids = std::collections::HashSet::new();
-
-        for (provider_type, is_available) in &available {
-            if !is_available {
-                continue;
-            }
-            let provider = match devc_provider::create_provider(*provider_type, &self.global_config).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("Failed to create {} provider for discovery: {}", provider_type, e);
-                    continue;
-                }
-            };
-            match provider.discover_devcontainers().await {
-                Ok(containers) => {
-                    for c in containers {
-                        if seen_ids.insert(c.id.0.clone()) {
-                            all.push(c);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Discovery failed on {}: {}", provider_type, e);
-                }
-            }
-        }
-
-        // Sort by created timestamp descending (newest first)
-        all.sort_by(|a, b| b.created.cmp(&a.created));
-
-        all
-    }
-
-    /// Adopt an existing devcontainer into devc management
-    /// This creates a state entry for a container that was created outside devc
-    pub async fn adopt(
-        &self,
-        container_id: &str,
-        workspace_path: Option<&str>,
-        source: DevcontainerSource,
-        provider_type: ProviderType,
-    ) -> Result<ContainerState> {
-        let provider = self.require_provider_for(provider_type)?;
-
-        // Inspect the container to get details
-        let details = provider
-            .inspect(&ContainerId::new(container_id))
-            .await?;
-
-        // Determine workspace path
-        let workspace = if let Some(path) = workspace_path {
-            std::path::PathBuf::from(path)
-        } else {
-            // Try to detect from mounts or labels
-            let from_labels = details.labels.get("devcontainer.local_folder");
-            if let Some(path) = from_labels {
-                std::path::PathBuf::from(path)
-            } else {
-                // Fall back to current directory
-                std::env::current_dir()?
-            }
-        };
-
-        // Find devcontainer.json if it exists
-        let config_path = find_devcontainer_config(&workspace)?;
-
-        // Determine container name
-        let name = if !details.name.is_empty() {
-            details.name.clone()
-        } else {
-            workspace
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "adopted".to_string())
-        };
-
-        // Check if already managed
-        let state = self.state.read().await;
-        if let Some(existing) = state.find_by_name(&name) {
-            return Err(CoreError::ContainerExists(existing.name.clone()));
-        }
-        drop(state);
-
-        // Determine status from container status
-        let status = match details.status {
-            ContainerStatus::Running => DevcContainerStatus::Running,
-            ContainerStatus::Exited | ContainerStatus::Dead => DevcContainerStatus::Stopped,
-            ContainerStatus::Created | ContainerStatus::Paused => DevcContainerStatus::Created,
-            _ => DevcContainerStatus::Stopped,
-        };
-
-        // Create state entry
-        let mut container_state = ContainerState::new(
-            name,
-            provider_type,
-            config_path,
-            workspace,
-        );
-        container_state.container_id = Some(container_id.to_string());
-        container_state.image_id = Some(details.image_id.clone());
-        container_state.status = status;
-        container_state.source = source;
-
-        // Extract remote_user and workspace_folder from devcontainer.json if available
-        if container_state.config_path.exists() {
-            if let Ok(c) = Container::from_config(&container_state.config_path) {
-                if let Some(user) = c.devcontainer.effective_user() {
-                    container_state
-                        .metadata
-                        .insert("remote_user".to_string(), user.to_string());
-                }
-                if let Some(ref wf) = c.devcontainer.workspace_folder {
-                    container_state
-                        .metadata
-                        .insert("workspace_folder".to_string(), wf.clone());
-                }
-            }
-        }
-
-        // Fall back to detecting workspace_folder from bind mounts
-        if !container_state.metadata.contains_key("workspace_folder") {
-            if let Some(mount) = details.mounts.iter().find(|m| {
-                m.mount_type == "bind" && m.destination.starts_with("/workspaces/")
-            }) {
-                container_state
-                    .metadata
-                    .insert("workspace_folder".to_string(), mount.destination.clone());
-            }
-        }
-
-        // Save state
-        let state_id = container_state.id.clone();
-        {
-            let mut state = self.state.write().await;
-            state.add(container_state.clone());
-            state.save()?;
-        }
-
-        // Run lifecycle commands if the container is running and has a valid config
-        if container_state.status == DevcContainerStatus::Running
-            && container_state.config_path.exists()
-        {
-            if let Ok(container) = self.load_container(&container_state.config_path) {
-                let cid = ContainerId::new(container_id);
-
-                // initializeCommand runs on host (per spec)
-                if let Some(ref cmd) = container.devcontainer.initialize_command {
-                    if let Err(e) =
-                        crate::run_host_command(cmd, &container_state.workspace_path, None).await
-                    {
-                        tracing::warn!(
-                            "initializeCommand failed during adopt (non-fatal): {}",
-                            e
-                        );
-                    }
-                }
-
-                // Run first-create lifecycle (non-fatal — adopt succeeds even if lifecycle fails)
-                if let Err(e) = self
-                    .run_first_create_lifecycle(&state_id, &container, provider, &cid, None)
-                    .await
-                {
-                    tracing::warn!(
-                        "Lifecycle commands failed during adopt (non-fatal): {}",
-                        e
-                    );
-                }
-
-                // Start (runs postStartCommand, SSH daemon)
-                if let Err(e) = self.start(&state_id).await {
-                    tracing::warn!("Post-start phase failed during adopt (non-fatal): {}", e);
-                }
-
-                // Credentials setup
-                if let Err(e) = crate::credentials::setup_credentials(
-                    provider,
-                    &cid,
-                    &self.global_config,
-                    container.devcontainer.effective_user(),
-                    &container_state.workspace_path,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        "Credential forwarding failed during adopt (non-fatal): {}",
-                        e
-                    );
-                }
-            }
-        }
-
-        // Re-read state to capture any metadata updates from lifecycle
-        let final_state = {
-            let state = self.state.read().await;
-            state.get(&state_id).cloned().unwrap_or(container_state)
-        };
-
-        Ok(final_state)
-    }
-
-    /// Remove a container from devc tracking without stopping or deleting the runtime container
-    pub async fn forget(&self, id: &str) -> Result<()> {
-        let mut state = self.state.write().await;
-        state.remove(id);
-        state.save()?;
-        Ok(())
-    }
-}
-
-/// Find devcontainer.json config file in a workspace
-fn find_devcontainer_config(workspace: &std::path::Path) -> Result<std::path::PathBuf> {
-    // Check standard locations
-    let devcontainer_dir = workspace.join(".devcontainer/devcontainer.json");
-    if devcontainer_dir.exists() {
-        return Ok(devcontainer_dir);
-    }
-
-    let devcontainer_root = workspace.join(".devcontainer.json");
-    if devcontainer_root.exists() {
-        return Ok(devcontainer_root);
-    }
-
-    // If not found, return a default path (will be created later if needed)
-    Ok(devcontainer_dir)
 }
 
 /// Convert a slice of PathBuf compose files to owned Strings and borrowed &str refs.
 ///
 /// Returns (owned, refs) where `refs` borrows from `owned`.
 /// Caller must keep `owned` alive while using `refs`.
-fn compose_file_strs(files: &[std::path::PathBuf]) -> Vec<String> {
+pub(crate) fn compose_file_strs(files: &[std::path::PathBuf]) -> Vec<String> {
     files.iter().map(|f| f.to_string_lossy().to_string()).collect()
 }
 
-/// Helper to send progress messages
 /// Extract merged feature properties from container state metadata.
-fn get_feature_properties(state: &ContainerState) -> features::MergedFeatureProperties {
+pub(crate) fn get_feature_properties(state: &ContainerState) -> features::MergedFeatureProperties {
     state
         .metadata
         .get("feature_properties")
@@ -2528,7 +1757,7 @@ fn get_feature_properties(state: &ContainerState) -> features::MergedFeatureProp
 
 /// Merge feature remoteEnv with devcontainer.json remoteEnv.
 /// Feature env provides a base; devcontainer.json wins on conflict.
-fn merge_remote_env(
+pub(crate) fn merge_remote_env(
     devcontainer_env: Option<&HashMap<String, String>>,
     feature_env: &HashMap<String, String>,
 ) -> Option<HashMap<String, String>> {
@@ -2542,7 +1771,7 @@ fn merge_remote_env(
     Some(merged)
 }
 
-fn send_progress(progress: Option<&mpsc::UnboundedSender<String>>, msg: &str) {
+pub(crate) fn send_progress(progress: Option<&mpsc::UnboundedSender<String>>, msg: &str) {
     if let Some(tx) = progress {
         let _ = tx.send(msg.to_string());
     }
