@@ -935,8 +935,8 @@ impl ContainerProvider for CliProvider {
 
     async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>> {
         // List ALL containers with detailed format including labels
-        let format = "--format={{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Labels}}";
-        let output = self.run_cmd(&["ps", "-a", format]).await?;
+        let format = "--format={{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Labels}}|{{.CreatedAt}}";
+        let output = self.run_cmd(&["ps", "-a", "--no-trunc", format]).await?;
 
         let mut discovered = Vec::new();
         for line in output.lines() {
@@ -944,29 +944,38 @@ impl ContainerProvider for CliProvider {
                 continue;
             }
             let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() < 5 {
+            if parts.len() < 6 {
                 continue;
             }
 
             let labels = parse_cli_labels(parts[4]);
-            let (is_devcontainer, source, managed) = detect_devcontainer_source_from_labels(&labels);
+            let (is_devcontainer, source, _managed) = detect_devcontainer_source_from_labels(&labels);
 
             if !is_devcontainer {
                 continue;
             }
 
-            // Extract workspace path from labels
-            let workspace_path = labels.get("devcontainer.local_folder").cloned();
+            // Extract workspace path from labels (fall back through multiple label keys)
+            let workspace_path = labels
+                .get("devcontainer.local_folder")
+                .or_else(|| labels.get("devc.workspace"))
+                .cloned();
+
+            let created = {
+                let raw = parts[5].trim();
+                if raw.is_empty() { None } else { Some(raw.to_string()) }
+            };
 
             discovered.push(DiscoveredContainer {
                 id: ContainerId::new(parts[0]),
                 name: parts[1].to_string(),
                 image: parts[2].to_string(),
                 status: ContainerStatus::from(parts[3]),
-                managed,
                 source,
                 workspace_path,
                 labels,
+                provider: self.provider_type,
+                created,
             });
         }
 

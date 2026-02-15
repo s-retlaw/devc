@@ -538,14 +538,13 @@ async fn list_discovered(manager: &ContainerManager) -> Result<()> {
     const NAME_WIDTH: usize = 26;
     const STATUS_WIDTH: usize = 12;
     const SOURCE_WIDTH: usize = 10;
-    const MANAGED_WIDTH: usize = 7;
 
     // Header
     println!(
-        "  {:<NAME_WIDTH$} {:<STATUS_WIDTH$} {:<SOURCE_WIDTH$} {:<MANAGED_WIDTH$} WORKSPACE",
-        "NAME", "STATUS", "SOURCE", "MANAGED"
+        "  {:<NAME_WIDTH$} {:<STATUS_WIDTH$} {:<SOURCE_WIDTH$} WORKSPACE",
+        "NAME", "STATUS", "SOURCE"
     );
-    println!("{}", "-".repeat(85));
+    println!("{}", "-".repeat(78));
 
     for container in discovered {
         let status_symbol = match container.status {
@@ -557,7 +556,6 @@ async fn list_discovered(manager: &ContainerManager) -> Result<()> {
 
         let workspace = container.workspace_path.as_deref().unwrap_or("-");
 
-        let managed_str = if container.managed { "✓" } else { "-" };
         let source_str = match container.source {
             DevcontainerSource::Devc => "devc",
             DevcontainerSource::VsCode => "vscode",
@@ -571,12 +569,11 @@ async fn list_discovered(manager: &ContainerManager) -> Result<()> {
         let source_padding = SOURCE_WIDTH.saturating_sub(source_str.len());
 
         println!(
-            "{} {}{} {}{} {}{} {:<MANAGED_WIDTH$} {}",
+            "{} {}{} {}{} {}{} {}",
             status_symbol,
             container.name, " ".repeat(name_padding),
             status_str, " ".repeat(status_padding),
             source_str, " ".repeat(source_padding),
-            managed_str,
             workspace
         );
     }
@@ -1047,7 +1044,7 @@ pub async fn adopt(manager: &ContainerManager, container: Option<String>) -> Res
     // Filter to unmanaged containers only
     let unmanaged: Vec<_> = discovered
         .iter()
-        .filter(|c| !c.managed)
+        .filter(|c| c.source != DevcontainerSource::Devc)
         .collect();
 
     if unmanaged.is_empty() {
@@ -1107,7 +1104,7 @@ pub async fn adopt(manager: &ContainerManager, container: Option<String>) -> Res
     println!("Adopting '{}'...", to_adopt.name);
 
     // Adopt the container
-    let state = manager.adopt(&to_adopt.id.0, to_adopt.workspace_path.as_deref(), to_adopt.source.clone()).await?;
+    let state = manager.adopt(&to_adopt.id.0, to_adopt.workspace_path.as_deref(), to_adopt.source.clone(), to_adopt.provider).await?;
 
     println!("Adopted container: {}", state.name);
     println!("\nYou can now use devc commands with this container:");

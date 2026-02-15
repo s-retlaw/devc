@@ -532,8 +532,8 @@ fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         Cell::from(" "),
         Cell::from("Name"),
         Cell::from("Status"),
+        Cell::from("Provider"),
         Cell::from("Source"),
-        Cell::from("Managed"),
         Cell::from("Workspace"),
     ])
     .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
@@ -564,9 +564,6 @@ fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                 DevcontainerSource::Other => "other",
             };
 
-            let managed_str = if container.managed { "Yes" } else { "No" };
-            let managed_color = if container.managed { Color::Green } else { Color::Yellow };
-
             let workspace = container.workspace_path.as_deref().unwrap_or("-");
             let workspace_display = if workspace.len() > 30 {
                 format!("...{}", &workspace[workspace.len()-27..])
@@ -580,12 +577,14 @@ fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area: Rect) {
                 container.name.clone()
             };
 
+            let provider_str = format!("{}", container.provider);
+
             Row::new(vec![
                 Cell::from(status_symbol).style(Style::default().fg(status_color)),
                 Cell::from(name_display).style(Style::default().bold()),
                 Cell::from(format!("{}", container.status)).style(Style::default().fg(status_color)),
+                Cell::from(provider_str).style(Style::default().fg(Color::Blue)),
                 Cell::from(source_str).style(Style::default().fg(Color::Cyan)),
-                Cell::from(managed_str).style(Style::default().fg(managed_color)),
                 Cell::from(workspace_display).style(Style::default().fg(Color::DarkGray)),
             ])
         })
@@ -596,8 +595,8 @@ fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(3),   // Status icon
         Constraint::Length(22),  // Name
         Constraint::Length(10),  // Status
+        Constraint::Length(8),   // Provider
         Constraint::Length(8),   // Source
-        Constraint::Length(8),   // Managed
         Constraint::Min(20),     // Workspace (takes remaining)
     ];
 
@@ -1655,8 +1654,10 @@ fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Draw a simple yes/no confirmation dialog
 fn draw_simple_confirm_dialog(frame: &mut Frame, app: &App, area: Rect, message: &str) {
+    // +4 for border (2) + padding (2); minimum 50
+    let width = (message.len() as u16 + 4).max(50);
     DialogBuilder::new("Confirm")
-        .width(50)
+        .width(width)
         .empty_line()
         .message(message)
         .empty_line()

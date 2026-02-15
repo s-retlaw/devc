@@ -454,12 +454,14 @@ pub struct DiscoveredContainer {
     pub image: String,
     /// Container status
     pub status: ContainerStatus,
-    /// Whether managed by devc
-    pub managed: bool,
     /// Source/creator of this container
     pub source: DevcontainerSource,
     /// Workspace folder path (if detected)
     pub workspace_path: Option<String>,
     /// All labels on the container
     pub labels: HashMap<String, String>,
+    /// Which provider this container was found on
+    pub provider: ProviderType,
+    /// Creation timestamp (raw string, e.g. "2026-02-07 15:43:38 -0500 EST")
+    pub created: Option<String>,
 }

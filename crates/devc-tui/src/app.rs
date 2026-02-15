@@ -104,6 +104,7 @@ pub enum ConfirmAction {
         container_name: String,
         workspace_path: Option<String>,
         source: DevcontainerSource,
+        provider: ProviderType,
     },
     /// Forget (untrack) a non-devc container without deleting it
     Forget {
@@ -1445,13 +1446,14 @@ impl App {
                 KeyCode::Char('a') => {
                     if !self.discovered_containers.is_empty() {
                         let container = &self.discovered_containers[self.selected_discovered];
-                        if !container.managed {
+                        if container.source != DevcontainerSource::Devc {
                             self.dialog_focus = DialogFocus::Cancel;
                             self.confirm_action = Some(ConfirmAction::Adopt {
                                 container_id: container.id.0.clone(),
                                 container_name: container.name.clone(),
                                 workspace_path: container.workspace_path.clone(),
                                 source: container.source.clone(),
+                                provider: container.provider,
                             });
                             self.view = View::Confirm;
                         } else {
@@ -2675,8 +2677,7 @@ impl App {
 
     /// Refresh discovered containers list
     async fn refresh_discovered(&mut self) -> AppResult<()> {
-        self.discovered_containers = self.manager.read().await.discover().await
-            .unwrap_or_default();
+        self.discovered_containers = self.manager.read().await.discover_all().await;
 
         // Ensure selected index is valid
         if !self.discovered_containers.is_empty() && self.selected_discovered >= self.discovered_containers.len() {
@@ -3022,14 +3023,14 @@ impl App {
                     self.retry_connection().await?;
                 }
             }
-            ConfirmAction::Adopt { container_id, container_name, workspace_path, source } => {
+            ConfirmAction::Adopt { container_id, container_name, workspace_path, source, provider } => {
                 self.loading = true;
                 self.status_message = Some(format!("Adopting '{}'...", container_name));
 
                 // Use a block to ensure the read guard is dropped before refresh_containers
                 let adopt_result = {
                     let manager = self.manager.read().await;
-                    manager.adopt(&container_id, workspace_path.as_deref(), source).await
+                    manager.adopt(&container_id, workspace_path.as_deref(), source, provider).await
                 };
 
                 match adopt_result {

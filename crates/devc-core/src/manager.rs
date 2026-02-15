@@ -2141,6 +2141,45 @@ fi
         provider.discover_devcontainers().await.map_err(Into::into)
     }
 
+    /// Discover devcontainers across all available providers (Docker + Podman)
+    /// Returns a merged, deduplicated list of containers from every connected runtime.
+    pub async fn discover_all(&self) -> Vec<DiscoveredContainer> {
+        let available = devc_provider::detect_available_providers(&self.global_config).await;
+
+        let mut all = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        for (provider_type, is_available) in &available {
+            if !is_available {
+                continue;
+            }
+            let provider = match devc_provider::create_provider(*provider_type, &self.global_config).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("Failed to create {} provider for discovery: {}", provider_type, e);
+                    continue;
+                }
+            };
+            match provider.discover_devcontainers().await {
+                Ok(containers) => {
+                    for c in containers {
+                        if seen_ids.insert(c.id.0.clone()) {
+                            all.push(c);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Discovery failed on {}: {}", provider_type, e);
+                }
+            }
+        }
+
+        // Sort by created timestamp descending (newest first)
+        all.sort_by(|a, b| b.created.cmp(&a.created));
+
+        all
+    }
+
     /// Adopt an existing devcontainer into devc management
     /// This creates a state entry for a container that was created outside devc
     pub async fn adopt(
@@ -2148,11 +2187,9 @@ fi
         container_id: &str,
         workspace_path: Option<&str>,
         source: DevcontainerSource,
+        provider_type: ProviderType,
     ) -> Result<ContainerState> {
-        let provider = self.require_provider()?;
-        let provider_type = self
-            .provider_type()
-            .ok_or_else(|| CoreError::NotConnected("Cannot adopt: no provider available".to_string()))?;
+        let provider = devc_provider::create_provider(provider_type, &self.global_config).await?;
 
         // Inspect the container to get details
         let details = provider
