@@ -384,6 +384,8 @@ pub enum DevcontainerSource {
     Devc,
     /// Created by VS Code Dev Containers extension
     VsCode,
+    /// Created by DevPod
+    DevPod,
     /// Created by another tool or manually with devcontainer patterns
     Other,
 }
@@ -393,6 +395,7 @@ impl std::fmt::Display for DevcontainerSource {
         match self {
             Self::Devc => write!(f, "devc"),
             Self::VsCode => write!(f, "vscode"),
+            Self::DevPod => write!(f, "devpod"),
             Self::Other => write!(f, "other"),
         }
     }

@@ -1024,6 +1024,11 @@ fn detect_devcontainer_source_from_labels(
         return (true, DevcontainerSource::VsCode, false);
     }
 
+    // Check for DevPod labels (case-insensitive prefix)
+    if labels.keys().any(|k| k.to_lowercase().starts_with("devpod.")) {
+        return (true, DevcontainerSource::DevPod, false);
+    }
+
     // Check for common devcontainer patterns
     if labels.keys().any(|k| k.starts_with("devcontainer.")) {
         return (true, DevcontainerSource::Other, false);
@@ -1147,6 +1152,17 @@ mod tests {
         let (is_dc, source, managed) = detect_devcontainer_source_from_labels(&labels);
         assert!(is_dc);
         assert_eq!(source, DevcontainerSource::Other);
+        assert!(!managed);
+    }
+
+    #[test]
+    fn test_detect_devpod_source() {
+        let mut labels = HashMap::new();
+        labels.insert("devcontainer.metadata".to_string(), "{}".to_string());
+        labels.insert("Devpod.user".to_string(), "vscode".to_string());
+        let (is_dc, source, managed) = detect_devcontainer_source_from_labels(&labels);
+        assert!(is_dc);
+        assert_eq!(source, DevcontainerSource::DevPod);
         assert!(!managed);
     }
 

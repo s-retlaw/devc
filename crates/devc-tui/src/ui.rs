@@ -578,6 +578,7 @@ fn draw_discovered_containers(frame: &mut Frame, app: &mut App, area: Rect) {
             let source_str = match container.source {
                 DevcontainerSource::Devc => "devc",
                 DevcontainerSource::VsCode => "vscode",
+                DevcontainerSource::DevPod => "devpod",
                 DevcontainerSource::Other => "other",
             };
 

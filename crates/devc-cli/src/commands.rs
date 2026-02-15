@@ -538,6 +538,7 @@ async fn list_discovered(manager: &ContainerManager) -> Result<()> {
         let source_str = match container.source {
             DevcontainerSource::Devc => "devc",
             DevcontainerSource::VsCode => "vscode",
+            DevcontainerSource::DevPod => "devpod",
             DevcontainerSource::Other => "other",
         };
 
@@ -1055,6 +1056,7 @@ pub async fn adopt(manager: &ContainerManager, container: Option<String>) -> Res
             for (i, c) in unmanaged.iter().enumerate() {
                 let source = match c.source {
                     DevcontainerSource::VsCode => "vscode",
+                    DevcontainerSource::DevPod => "devpod",
                     DevcontainerSource::Other => "other",
                     DevcontainerSource::Devc => "devc",
                 };
