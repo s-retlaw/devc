@@ -4,11 +4,18 @@ A fast, Rust-based dev container manager with both TUI and CLI interfaces. Suppo
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+## Why devc?
+
+- **Works inside Fedora Toolbox** — Auto-detects toolbox containers and routes commands through `flatpak-spawn --host`, so you can manage dev containers from inside a toolbox without fighting the indirection yourself.
+- **Correct PTY handling for tmux** — Uses a host-side PTY relay that avoids the rendering glitches other tools hit when running neovim or tmux inside dev containers, or when working from a tmux pane on the host.
+- **CLI-first, terminal-native** — No Electron, no VS Code dependency. Just a single binary with a TUI dashboard and full CLI.
+- **Docker and Podman as first-class runtimes** — Both are supported equally, not one bolted onto the other.
+
 ## Features
 
 - **TUI Dashboard** - Interactive terminal UI for managing containers
 - **CLI Commands** - Full command-line interface for scripting and quick actions
-- **Docker & Podman** - Works with both container runtimes
+- **Docker & Podman** - Works with both container runtimes, including inside Fedora Toolbox
 - **Docker Compose** - Manage multi-container projects via `dockerComposeFile`
 - **Dev Container Spec** - Compatible with VS Code's devcontainer.json format
 - **Dev Container Features** - OCI-based feature installation
