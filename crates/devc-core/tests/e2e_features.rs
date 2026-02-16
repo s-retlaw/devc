@@ -16,18 +16,28 @@ use devc_provider::{
 use std::collections::HashMap;
 use tempfile::TempDir;
 
-/// Get a provider for testing (tries toolbox, podman, then docker)
+/// Get a provider for testing.
+///
+/// Respects `DEVC_TEST_PROVIDER` env var (`docker`, `podman`, `toolbox`).
+/// Falls back to first available runtime when unset.
 async fn get_test_provider() -> Option<CliProvider> {
-    if let Ok(p) = CliProvider::new_toolbox().await {
-        return Some(p);
+    match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
+        Ok("docker") => CliProvider::new_docker().await.ok(),
+        Ok("podman") => CliProvider::new_podman().await.ok(),
+        Ok("toolbox") => CliProvider::new_toolbox().await.ok(),
+        _ => {
+            if let Ok(p) = CliProvider::new_toolbox().await {
+                return Some(p);
+            }
+            if let Ok(p) = CliProvider::new_podman().await {
+                return Some(p);
+            }
+            if let Ok(p) = CliProvider::new_docker().await {
+                return Some(p);
+            }
+            None
+        }
     }
-    if let Ok(p) = CliProvider::new_podman().await {
-        return Some(p);
-    }
-    if let Ok(p) = CliProvider::new_docker().await {
-        return Some(p);
-    }
-    None
 }
 
 /// Create a temporary workspace with a devcontainer.json
@@ -146,6 +156,13 @@ async fn test_e2e_multiple_features_install() {
             return;
         }
     };
+
+    // Rootless Podman cannot setegid/setgroups inside a container (kernel namespace limitation).
+    // Feature install scripts (node, go) call setegid(65534) which fails under Podman.
+    if provider.info().provider_type == devc_provider::ProviderType::Podman {
+        eprintln!("Skipping test: rootless Podman cannot setegid/setgroups inside a container");
+        return;
+    }
 
     // Create workspace with multiple features.
     // We use mcr.microsoft.com/devcontainers/base:ubuntu which has apt-get.
@@ -330,9 +347,9 @@ async fn test_e2e_multiple_features_install() {
     );
 
     // Cleanup
+    let runtime = provider.info().provider_type.to_string();
     let _ = provider.remove(&cid, true).await;
-    // Clean up the built image
-    let _ = std::process::Command::new("docker")
+    let _ = std::process::Command::new(&runtime)
         .args(["rmi", &image_tag])
         .output();
     eprintln!("E2E features test passed!");
@@ -352,6 +369,13 @@ async fn test_e2e_feature_container_properties() {
             return;
         }
     };
+
+    // Rootless Podman cannot setegid/setgroups inside a container (kernel namespace limitation).
+    // Feature install scripts (go) call setegid(65534) which fails under Podman.
+    if provider.info().provider_type == devc_provider::ProviderType::Podman {
+        eprintln!("Skipping test: rootless Podman cannot setegid/setgroups inside a container");
+        return;
+    }
 
     // Build with the Go feature, which declares:
     //   "capAdd": ["SYS_PTRACE"], "securityOpt": ["seccomp=unconfined"]
@@ -1077,6 +1101,15 @@ services:
 #[tokio::test]
 #[ignore] // Requires container runtime + network
 async fn test_e2e_docker_in_docker_feature_install() {
+    // Skip when running inside a container — nested DinD can't create device nodes.
+    // /.dockerenv = Docker container, /run/.containerenv = Podman container
+    if std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+    {
+        eprintln!("Skipping test: nested Docker-in-Docker not supported inside a container");
+        return;
+    }
+
     let provider = match get_test_provider().await {
         Some(p) => p,
         None => {

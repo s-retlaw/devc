@@ -1669,24 +1669,28 @@ mod tests {
         assert_eq!(ContainerStatus::from(""), ContainerStatus::Unknown);
     }
 
-    /// Get a provider for testing (tries toolbox, podman, then docker)
     async fn get_test_provider() -> Option<CliProvider> {
-        // Try toolbox first (for Fedora toolbox environment)
-        if let Ok(p) = CliProvider::new_toolbox().await {
-            return Some(p);
+        match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
+            Ok("docker") => CliProvider::new_docker().await.ok(),
+            Ok("podman") => CliProvider::new_podman().await.ok(),
+            Ok("toolbox") => CliProvider::new_toolbox().await.ok(),
+            _ => {
+                if let Ok(p) = CliProvider::new_toolbox().await {
+                    return Some(p);
+                }
+                if let Ok(p) = CliProvider::new_podman().await {
+                    return Some(p);
+                }
+                if let Ok(p) = CliProvider::new_docker().await {
+                    return Some(p);
+                }
+                None
+            }
         }
-        // Try podman
-        if let Ok(p) = CliProvider::new_podman().await {
-            return Some(p);
-        }
-        // Fall back to docker
-        if let Ok(p) = CliProvider::new_docker().await {
-            return Some(p);
-        }
-        None
     }
 
     #[tokio::test]
+    #[ignore] // requires a container runtime
     async fn test_container_name_conflict_cleanup() {
         let provider = match get_test_provider().await {
             Some(p) => p,
@@ -1746,6 +1750,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires a container runtime
     async fn test_build_no_cache_flag() {
         let provider = match get_test_provider().await {
             Some(p) => p,

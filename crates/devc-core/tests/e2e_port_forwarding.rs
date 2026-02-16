@@ -8,18 +8,28 @@ use devc_core::Container;
 use devc_provider::{CliProvider, ContainerProvider, ExecConfig};
 use tempfile::TempDir;
 
-/// Get a provider for testing (tries toolbox, podman, then docker)
+/// Get a provider for testing.
+///
+/// Respects `DEVC_TEST_PROVIDER` env var (`docker`, `podman`, `toolbox`).
+/// Falls back to first available runtime when unset.
 async fn get_test_provider() -> Option<CliProvider> {
-    if let Ok(p) = CliProvider::new_toolbox().await {
-        return Some(p);
+    match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
+        Ok("docker") => CliProvider::new_docker().await.ok(),
+        Ok("podman") => CliProvider::new_podman().await.ok(),
+        Ok("toolbox") => CliProvider::new_toolbox().await.ok(),
+        _ => {
+            if let Ok(p) = CliProvider::new_toolbox().await {
+                return Some(p);
+            }
+            if let Ok(p) = CliProvider::new_podman().await {
+                return Some(p);
+            }
+            if let Ok(p) = CliProvider::new_docker().await {
+                return Some(p);
+            }
+            None
+        }
     }
-    if let Ok(p) = CliProvider::new_podman().await {
-        return Some(p);
-    }
-    if let Ok(p) = CliProvider::new_docker().await {
-        return Some(p);
-    }
-    None
 }
 
 /// Create a temporary workspace with a devcontainer.json

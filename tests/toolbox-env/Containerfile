@@ -1,0 +1,11 @@
+FROM fedora:43
+
+# Install packages needed to build/test devc and to run the flatpak-spawn shim
+RUN dnf install -y podman-remote gcc pkg-config openssl-devel && dnf clean all
+
+# flatpak-spawn shim: strips "--host" and runs remaining args via podman --remote
+COPY flatpak-spawn /usr/bin/flatpak-spawn
+RUN chmod +x /usr/bin/flatpak-spawn
+
+# Mark this container so devc detects it as a toolbox-like environment
+RUN touch /run/.containerenv

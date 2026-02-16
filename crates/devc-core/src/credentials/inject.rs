@@ -46,9 +46,9 @@ if [ -n "$ORIGINAL_HELPER" ]; then
     fi
 fi
 
-# 2. Read from tmpfs cache
+# 2. Read from tmpfs cache (exit 0 with no output if missing — allows anonymous pulls)
 CONFIG="/run/devc-creds/config.json"
-[ -f "$CONFIG" ] || exit 1
+[ -f "$CONFIG" ] || exit 0
 
 # Extract auth for this registry using jq or shell fallback
 if command -v jq >/dev/null 2>&1; then
@@ -57,10 +57,10 @@ else
     AUTH_B64=$(grep -F -A3 "\"$REGISTRY\"" "$CONFIG" | grep '"auth"' | sed 's/.*"auth"[[:space:]]*:[[:space:]]*"//;s/".*//')
 fi
 
-[ -z "$AUTH_B64" ] && exit 1
+[ -z "$AUTH_B64" ] && exit 0
 
 DECODED=$(echo "$AUTH_B64" | base64 -d 2>/dev/null)
-[ -z "$DECODED" ] && exit 1
+[ -z "$DECODED" ] && exit 0
 
 USER="${DECODED%%:*}"
 SECRET="${DECODED#*:}"
@@ -105,16 +105,16 @@ if [ -n "$ORIGINAL_HELPER" ]; then
     fi
 fi
 
-# 2. Read from tmpfs cache
+# 2. Read from tmpfs cache (exit 0 with no output if missing — allows anonymous access)
 CREDS_FILE="/run/devc-creds/git-credentials"
-[ -f "$CREDS_FILE" ] || exit 1
+[ -f "$CREDS_FILE" ] || exit 0
 
 HOST=$(printf '%s\n' "$INPUT" | grep "^host=" | cut -d= -f2)
 PROTO=$(printf '%s\n' "$INPUT" | grep "^protocol=" | cut -d= -f2)
 
 # git-credentials file format: https://user:pass@host
 MATCH=$(grep "://" "$CREDS_FILE" | grep "@${HOST}" | head -1)
-[ -z "$MATCH" ] && exit 1
+[ -z "$MATCH" ] && exit 0
 
 USER=$(echo "$MATCH" | sed 's|.*://||;s|:.*||')
 PASS=$(echo "$MATCH" | sed 's|.*://[^:]*:||;s|@.*||')

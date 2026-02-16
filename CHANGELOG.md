@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.0
+
+### Podman Improvements
+- Install `podman-compose` in devcontainer for `podman compose` support
+- Skip feature install tests that fail under rootless Podman (kernel setegid/setgroups limitation)
+- Fix hardcoded `docker` in test cleanup to use provider runtime type
+
+### E2E Testing
+- Add Toolbox provider support across all e2e test suites
+- Improve credential injection for multi-user container environments
+- Fix test summary to show passed/failed counts only (drop misleading nextest skip count)
+- Add `just test-e2e-docker`, `test-e2e-podman`, and `test-all` targets
+
+### Docker Compose
+- Fix compose lifecycle for Podman runtime
+
 ## 1.0.0
 
 Initial stable release.

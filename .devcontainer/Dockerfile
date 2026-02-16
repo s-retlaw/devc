@@ -1,30 +1,25 @@
-FROM fedora:43
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 # ── System packages ──────────────────────────────────────────────────────
-RUN dnf install -y \
+RUN apt-get update && apt-get install -y \
     # Build essentials for Rust native deps (openssl-sys, nix, etc.)
-    gcc gcc-c++ make pkg-config openssl-devel perl-FindBin \
+    gcc g++ make pkg-config libssl-dev perl \
     # Version control
     git \
     # Podman + container tools (rootless-ready)
-    podman podman-compose buildah skopeo fuse-overlayfs slirp4netns crun \
-    # Flatpak & Toolbox (for testing toolbox detection / flatpak-spawn paths)
-    flatpak toolbox \
+    podman buildah skopeo fuse-overlayfs slirp4netns crun uidmap podman-compose \
     # Test utilities used by e2e tests
-    socat nmap-ncat jq procps-ng \
+    socat ncat jq procps \
     # Node.js for Claude Code
     nodejs npm \
     # Misc
-    curl wget which findutils sudo zsh \
-    && dnf clean all
+    curl wget sudo zsh ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # ── Claude Code (needs root for global install) ─────────────────────────
 RUN npm install -g @anthropic-ai/claude-code
-
-# ── Docker Engine (dnf5-compatible — replaces docker-in-docker feature) ──
-RUN dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo && \
-    dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin && \
-    dnf clean all
 
 # ── Configure Podman for container-in-container ──────────────────────────
 RUN mkdir -p /etc/containers && \
@@ -38,15 +33,15 @@ ARG USERNAME=vscode
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 
-RUN groupadd --gid $USER_GID $USERNAME && \
+# Remove default ubuntu user (occupies UID/GID 1000 on Ubuntu 24.04)
+RUN userdel -r ubuntu 2>/dev/null || true && \
+    groupdel ubuntu 2>/dev/null || true && \
+    groupadd --gid $USER_GID $USERNAME && \
     useradd --uid $USER_UID --gid $USER_GID -m $USERNAME -s /bin/zsh && \
     echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME && \
     chmod 0440 /etc/sudoers.d/$USERNAME && \
-    # Use subuid/subgid ranges that fit inside the devcontainer's user namespace
     echo "$USERNAME:10000:55536" > /etc/subuid && \
-    echo "$USERNAME:10000:55536" > /etc/subgid && \
-    # Allow non-root user to use Docker
-    usermod -aG docker $USERNAME
+    echo "$USERNAME:10000:55536" > /etc/subgid
 
 # ── Switch to non-root user for Rust + cargo installs ───────────────────
 USER $USERNAME

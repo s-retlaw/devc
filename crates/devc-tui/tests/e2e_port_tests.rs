@@ -7,32 +7,45 @@ use devc_tui::tunnel::spawn_forwarder;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Get a provider for testing (tries toolbox, podman, then docker).
-/// Used for tests that only need the provider's exec method.
+/// Get a provider for testing.
+///
+/// Respects `DEVC_TEST_PROVIDER` env var (`docker`, `podman`, `toolbox`).
+/// Falls back to first available runtime when unset.
 async fn get_test_provider() -> Option<CliProvider> {
-    if let Ok(p) = CliProvider::new_toolbox().await {
-        return Some(p);
+    match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
+        Ok("docker") => CliProvider::new_docker().await.ok(),
+        Ok("podman") => CliProvider::new_podman().await.ok(),
+        Ok("toolbox") => CliProvider::new_toolbox().await.ok(),
+        _ => {
+            if let Ok(p) = CliProvider::new_toolbox().await {
+                return Some(p);
+            }
+            if let Ok(p) = CliProvider::new_podman().await {
+                return Some(p);
+            }
+            if let Ok(p) = CliProvider::new_docker().await {
+                return Some(p);
+            }
+            None
+        }
     }
-    if let Ok(p) = CliProvider::new_podman().await {
-        return Some(p);
-    }
-    if let Ok(p) = CliProvider::new_docker().await {
-        return Some(p);
-    }
-    None
 }
 
 /// Get a provider whose type can be used with spawn_forwarder.
 ///
 /// spawn_forwarder runs `docker exec` / `podman exec` directly (not through
 /// the provider), so it doesn't work with toolbox's `flatpak-spawn --host`
-/// indirection. This helper tries Docker first (works everywhere), then
-/// Podman (works outside toolbox), skipping toolbox.
+/// indirection. Respects `DEVC_TEST_PROVIDER` but skips `toolbox`.
 async fn get_direct_provider() -> Option<CliProvider> {
+    match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
+        Ok("docker") => return CliProvider::new_docker().await.ok(),
+        Ok("podman") => return CliProvider::new_podman().await.ok(),
+        Ok("toolbox") => return None, // can't use toolbox for direct exec
+        _ => {}
+    }
     if let Ok(p) = CliProvider::new_docker().await {
         return Some(p);
     }
-    // Only use podman if we're NOT in a toolbox
     if !std::path::Path::new("/run/.containerenv").exists() {
         if let Ok(p) = CliProvider::new_podman().await {
             return Some(p);

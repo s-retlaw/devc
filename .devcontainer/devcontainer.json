@@ -4,11 +4,16 @@
         "dockerfile": "Dockerfile"
     },
 
-    // Privileged is needed for Docker-in-Docker and Podman-in-container
+    // Privileged is needed for Podman-in-container
     "privileged": true,
 
-    // Start dockerd in background (Docker installed directly in Dockerfile)
-    "postStartCommand": "sudo dockerd &",
+    // Docker-in-Docker: installs and manages dockerd automatically
+    "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+    },
+
+    // Ensure Podman is ready on every start
+    "postStartCommand": ".devcontainer/on-start.sh",
 
     "customizations": {
         "vscode": {

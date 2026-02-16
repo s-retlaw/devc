@@ -1,0 +1,9 @@
+#!/bin/bash
+# Simulate flatpak-spawn --host by running the command via the host's Podman socket.
+# Real toolbox uses flatpak-spawn to execute commands on the host; this shim
+# achieves the same effect through podman --remote connected to the host socket.
+
+# Strip the "--host" flag that devc passes
+shift
+
+exec podman --remote --url "unix:///run/podman/podman.sock" "$@"
