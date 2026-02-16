@@ -10,6 +10,16 @@ use devc_provider::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Compute the default workspace folder when none is specified in devcontainer.json.
+/// Matches the VS Code / devcontainer CLI convention: `/workspaces/{basename}`.
+fn default_workspace_folder(workspace_path: &Path) -> String {
+    let basename = workspace_path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_else(|| "workspace".into());
+    format!("/workspaces/{}", basename)
+}
+
 /// Sanitize a name for CLI-friendly usage
 /// - Converts to lowercase
 /// - Replaces spaces and special chars with hyphens
@@ -80,7 +90,7 @@ impl Container {
         let container_workspace = devcontainer
             .workspace_folder
             .clone()
-            .unwrap_or_else(|| "/workspace".to_string());
+            .unwrap_or_else(|| default_workspace_folder(workspace_path));
         let devcontainer_id = devc_config::generate_devcontainer_id(workspace_path);
         let ctx = SubstitutionContext::new(
             workspace_path.to_string_lossy().to_string(),
@@ -128,7 +138,7 @@ impl Container {
         let container_workspace = devcontainer
             .workspace_folder
             .clone()
-            .unwrap_or_else(|| "/workspace".to_string());
+            .unwrap_or_else(|| default_workspace_folder(&workspace_path));
         let devcontainer_id = devc_config::generate_devcontainer_id(&workspace_path);
         let ctx = SubstitutionContext::new(
             workspace_path.to_string_lossy().to_string(),
@@ -261,8 +271,6 @@ impl Container {
         image: &str,
         feature_props: Option<&MergedFeatureProperties>,
     ) -> CreateContainerConfig {
-        let _workspace_mount = format!("{}:/workspace", self.workspace_path.to_string_lossy());
-
         let mut mounts = vec![MountConfig {
             mount_type: MountType::Bind,
             source: self.workspace_path.to_string_lossy().to_string(),
@@ -270,7 +278,7 @@ impl Container {
                 .devcontainer
                 .workspace_folder
                 .clone()
-                .unwrap_or_else(|| "/workspace".to_string()),
+                .unwrap_or_else(|| default_workspace_folder(&self.workspace_path)),
             read_only: false,
         }];
 
@@ -310,7 +318,7 @@ impl Container {
                 self.devcontainer
                     .workspace_folder
                     .clone()
-                    .unwrap_or_else(|| "/workspace".to_string()),
+                    .unwrap_or_else(|| default_workspace_folder(&self.workspace_path)),
             )
             .with_devcontainer_id(self.devcontainer_id.clone());
 
@@ -390,11 +398,12 @@ impl Container {
             .or_else(|| self.global_config.defaults.user.clone());
 
         // Get working directory
-        let working_dir = self
-            .devcontainer
-            .workspace_folder
-            .clone()
-            .or_else(|| Some("/workspace".to_string()));
+        let working_dir = Some(
+            self.devcontainer
+                .workspace_folder
+                .clone()
+                .unwrap_or_else(|| default_workspace_folder(&self.workspace_path)),
+        );
 
         // Determine CMD: if overrideCommand is false, use image default (None)
         let cmd = if self.devcontainer.override_command == Some(false) {

@@ -21,6 +21,11 @@ RUN dnf install -y \
 # ── Claude Code (needs root for global install) ─────────────────────────
 RUN npm install -g @anthropic-ai/claude-code
 
+# ── Docker Engine (dnf5-compatible — replaces docker-in-docker feature) ──
+RUN dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo && \
+    dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin && \
+    dnf clean all
+
 # ── Configure Podman for container-in-container ──────────────────────────
 RUN mkdir -p /etc/containers && \
     printf '[storage]\ndriver = "overlay"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
@@ -39,7 +44,9 @@ RUN groupadd --gid $USER_GID $USERNAME && \
     chmod 0440 /etc/sudoers.d/$USERNAME && \
     # Use subuid/subgid ranges that fit inside the devcontainer's user namespace
     echo "$USERNAME:10000:55536" > /etc/subuid && \
-    echo "$USERNAME:10000:55536" > /etc/subgid
+    echo "$USERNAME:10000:55536" > /etc/subgid && \
+    # Allow non-root user to use Docker
+    usermod -aG docker $USERNAME
 
 # ── Switch to non-root user for Rust + cargo installs ───────────────────
 USER $USERNAME

@@ -226,12 +226,46 @@ impl ContainerProvider for CliProvider {
             .spawn()
             .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
 
-        // Stream stderr (where build output goes for podman/docker build)
-        if let Some(stderr) = child.stderr.take() {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let _ = progress.send(line);
+        // Stream both stdout and stderr concurrently to avoid pipe deadlock.
+        // If only one stream is consumed, the child process can block when the
+        // other stream's OS pipe buffer fills up (64KB on Linux), causing a hang.
+        // Podman writes build progress to stdout; Docker/BuildKit uses stderr.
+        let mut stdout_lines = child
+            .stdout
+            .take()
+            .map(|s| BufReader::new(s).lines());
+        let mut stderr_lines = child
+            .stderr
+            .take()
+            .map(|s| BufReader::new(s).lines());
+
+        loop {
+            tokio::select! {
+                result = async {
+                    match stdout_lines.as_mut() {
+                        Some(lines) => lines.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Ok(Some(line)) => { let _ = progress.send(line); }
+                        _ => { stdout_lines = None; }
+                    }
+                }
+                result = async {
+                    match stderr_lines.as_mut() {
+                        Some(lines) => lines.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Ok(Some(line)) => { let _ = progress.send(line); }
+                        _ => { stderr_lines = None; }
+                    }
+                }
+            }
+            if stdout_lines.is_none() && stderr_lines.is_none() {
+                break;
             }
         }
 

@@ -3,15 +3,12 @@
     "build": {
         "dockerfile": "Dockerfile"
     },
-    "features": {
-        // Docker-in-Docker: installs Docker Engine + starts dockerd on boot
-        "ghcr.io/devcontainers/features/docker-in-docker:2": {
-            "dockerDashComposeVersion": "v2"
-        }
-    },
 
     // Privileged is needed for Docker-in-Docker and Podman-in-container
     "privileged": true,
+
+    // Start dockerd in background (Docker installed directly in Dockerfile)
+    "postStartCommand": "sudo dockerd &",
 
     "customizations": {
         "vscode": {
