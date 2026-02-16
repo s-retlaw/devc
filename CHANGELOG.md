@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1
+
+### Fixes
+- Include stderr detail in compose error messages instead of generic "compose up failed"
+- Use actual runtime name (docker/podman) in compose error messages
+- Start Podman API socket in devcontainer so `podman compose` works correctly
+
 ## 1.1.0
 
 ### Podman Improvements

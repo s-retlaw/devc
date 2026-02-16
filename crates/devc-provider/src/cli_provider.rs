@@ -638,13 +638,15 @@ impl ContainerProvider for CliProvider {
             .spawn()
             .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
 
+        let mut stderr_lines = Vec::new();
         if let Some(stderr) = child.stderr.take() {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Some(ref tx) = progress {
-                    let _ = tx.send(line);
+                    let _ = tx.send(line.clone());
                 }
+                stderr_lines.push(line);
             }
         }
 
@@ -654,9 +656,11 @@ impl ContainerProvider for CliProvider {
             .map_err(|e| ProviderError::RuntimeError(e.to_string()))?;
 
         if !status.success() {
-            return Err(ProviderError::RuntimeError(
-                "docker compose up failed".to_string(),
-            ));
+            let detail = stderr_lines.join("\n");
+            return Err(ProviderError::RuntimeError(format!(
+                "{} compose up failed: {}",
+                self.cmd, detail
+            )));
         }
 
         Ok(())
@@ -693,8 +697,8 @@ impl ContainerProvider for CliProvider {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ProviderError::RuntimeError(format!(
-                "docker compose down failed: {}",
-                stderr
+                "{} compose down failed: {}",
+                self.cmd, stderr
             )));
         }
 
@@ -733,7 +737,8 @@ impl ContainerProvider for CliProvider {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ProviderError::RuntimeError(format!(
-                "docker compose ps failed: {}",
+                "{} compose ps failed: {}",
+                self.cmd,
                 stderr
             )));
         }

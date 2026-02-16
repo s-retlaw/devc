@@ -55,4 +55,27 @@ else
     echo "[on-start] WARNING: Podman is not working. Check 'podman info' for details."
 fi
 
+# Start the Podman API socket so `podman compose` (which delegates to
+# docker-compose) can communicate with the Podman daemon.
+PODMAN_SOCK="/tmp/podman-run-$(id -u)/podman/podman.sock"
+if ! curl -s --unix-socket "$PODMAN_SOCK" http://d/v4.0.0/libpod/_ping &>/dev/null; then
+    echo "[on-start] Starting Podman API socket..."
+    # Clean up stale socket
+    rm -f "$PODMAN_SOCK"
+    mkdir -p "$(dirname "$PODMAN_SOCK")"
+    nohup podman system service --time=0 "unix://$PODMAN_SOCK" &>/dev/null & disown
+    for i in $(seq 1 10); do
+        if curl -s --unix-socket "$PODMAN_SOCK" http://d/v4.0.0/libpod/_ping &>/dev/null; then
+            echo "[on-start] Podman API socket is ready (took ${i}s)"
+            break
+        fi
+        if [ "$i" -eq 10 ]; then
+            echo "[on-start] WARNING: Podman API socket failed to start"
+        fi
+        sleep 1
+    done
+else
+    echo "[on-start] Podman API socket already running"
+fi
+
 echo "[on-start] Done."
