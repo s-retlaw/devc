@@ -113,6 +113,11 @@ snap-review:
 test-filter PATTERN:
     cargo nextest run --workspace -E 'test({{PATTERN}})'
 
+# Install git hooks (auto-formats on commit)
+setup-hooks:
+    git config core.hooksPath .githooks
+    @echo "Git hooks installed (.githooks/pre-commit)"
+
 # --- Internal targets ---
 
 # Strip devc's credential helper from Docker config so e2e tests can pull public images.

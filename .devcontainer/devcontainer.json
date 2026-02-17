@@ -27,7 +27,7 @@
     },
 
     // Pre-fetch crate dependencies after container creation
-    "postCreateCommand": "cargo fetch",
+    "postCreateCommand": "cargo fetch && just setup-hooks",
 
     "remoteUser": "vscode"
 }

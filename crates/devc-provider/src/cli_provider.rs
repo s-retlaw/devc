@@ -230,14 +230,8 @@ impl ContainerProvider for CliProvider {
         // If only one stream is consumed, the child process can block when the
         // other stream's OS pipe buffer fills up (64KB on Linux), causing a hang.
         // Podman writes build progress to stdout; Docker/BuildKit uses stderr.
-        let mut stdout_lines = child
-            .stdout
-            .take()
-            .map(|s| BufReader::new(s).lines());
-        let mut stderr_lines = child
-            .stderr
-            .take()
-            .map(|s| BufReader::new(s).lines());
+        let mut stdout_lines = child.stdout.take().map(|s| BufReader::new(s).lines());
+        let mut stderr_lines = child.stderr.take().map(|s| BufReader::new(s).lines());
 
         loop {
             tokio::select! {
@@ -738,8 +732,7 @@ impl ContainerProvider for CliProvider {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ProviderError::RuntimeError(format!(
                 "{} compose ps failed: {}",
-                self.cmd,
-                stderr
+                self.cmd, stderr
             )));
         }
 
