@@ -526,12 +526,7 @@ pub async fn agents_doctor(manager: &ContainerManager, container: Option<String>
     }
 
     for item in &availability {
-        let enabled = match item.agent {
-            devc_core::agents::AgentKind::Codex => config.agents.codex.enabled,
-            devc_core::agents::AgentKind::Claude => config.agents.claude.enabled,
-            devc_core::agents::AgentKind::Cursor => config.agents.cursor.enabled,
-            devc_core::agents::AgentKind::Gemini => config.agents.gemini.enabled,
-        };
+        let enabled = devc_core::agents::is_agent_enabled(config, item.agent, None);
         let state = if enabled { "enabled" } else { "disabled" };
         println!(
             "- {}: {}",

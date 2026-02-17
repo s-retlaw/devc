@@ -158,7 +158,7 @@ Supported agents:
 - `gemini`
 
 How it works:
-- Agents are disabled by default.
+- By default, agents are auto-enabled when matching host config/auth exists; set `enabled = true/false` to explicitly override.
 - If enabled, devc validates host config/auth availability for each agent.
 - If host config is missing or unreadable, that agent is skipped with warning.
 - If agent binary already exists in container, install is skipped.

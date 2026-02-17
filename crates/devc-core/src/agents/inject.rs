@@ -59,6 +59,17 @@ async fn discover_container_home(
     }
 }
 
+async fn discover_container_user(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    user: Option<&str>,
+) -> String {
+    match exec_script(provider, container_id, "id -un", user, &HashMap::new()).await {
+        Ok((0, output)) if !output.trim().is_empty() => output.trim().to_string(),
+        _ => user.unwrap_or("root").to_string(),
+    }
+}
+
 async fn copy_sync_entry(
     provider: &dyn ContainerProvider,
     container_id: &ContainerId,
@@ -82,6 +93,32 @@ async fn copy_sync_entry(
         .copy_into(container_id, source_path, target_path)
         .await
         .map_err(|e| format!("Failed to copy host config into container: {}", e))
+}
+
+async fn apply_ownership_for_entry(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    target_path: &str,
+    container_user: &str,
+) -> Result<(), String> {
+    if container_user.is_empty() {
+        return Ok(());
+    }
+    let q_target = shell_escape_single_quotes(target_path);
+    let q_user = shell_escape_single_quotes(container_user);
+    let script = format!(
+        "if [ -e '{q_target}' ]; then chown -R '{q_user}:{q_user}' '{q_target}' 2>/dev/null || chown -R '{q_user}' '{q_target}'; fi"
+    );
+    exec_script(
+        provider,
+        container_id,
+        &script,
+        Some("root"),
+        &HashMap::new(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("Failed to set ownership on synced files: {}", e))
 }
 
 fn file_mode_for_name(name: &str) -> Option<&'static str> {
@@ -279,6 +316,7 @@ pub async fn setup_agents(
     }
 
     let container_home = discover_container_home(provider, container_id, user).await;
+    let container_user = discover_container_user(provider, container_id, user).await;
     for cfg in enabled {
         let mut result = AgentSyncResult::new(cfg.kind);
         let (available, reason) = host_config_availability(&cfg);
@@ -308,6 +346,12 @@ pub async fn setup_agents(
                 result.warnings.push(e);
             } else {
                 result.copied = true;
+                if let Err(e) =
+                    apply_ownership_for_entry(provider, container_id, &target_path, &container_user)
+                        .await
+                {
+                    result.warnings.push(e);
+                }
                 if let Err(e) =
                     apply_permissions_for_entry(provider, container_id, source_path, &target_path)
                         .await
@@ -412,7 +456,10 @@ mod tests {
         std::fs::write(host_dir.join("auth.json"), "{}").unwrap();
 
         let mut cfg = GlobalConfig::default();
-        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.enabled = Some(true);
+        cfg.agents.claude.enabled = Some(false);
+        cfg.agents.cursor.enabled = Some(false);
+        cfg.agents.gemini.enabled = Some(false);
         cfg.agents.codex.host_config_path = Some(host_dir.display().to_string());
         cfg.agents.codex.container_config_path = Some("/tmp/.codex".to_string());
         cfg.agents.codex.install_command = Some("echo installed".to_string());
@@ -422,7 +469,12 @@ mod tests {
             .lock()
             .unwrap()
             .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "root".to_string())); // user probe
         mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown synced files
         mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod synced files
         mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
         mock.exec_responses.lock().unwrap().push((1, String::new())); // command -v fails
@@ -443,7 +495,10 @@ mod tests {
     #[tokio::test]
     async fn test_setup_agents_missing_host_path_is_warning() {
         let mut cfg = GlobalConfig::default();
-        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.enabled = Some(true);
+        cfg.agents.claude.enabled = Some(false);
+        cfg.agents.cursor.enabled = Some(false);
+        cfg.agents.gemini.enabled = Some(false);
         cfg.agents.codex.host_config_path = Some("/tmp/devc-no-agent-material".to_string());
 
         let mock = MockProvider::new(ProviderType::Docker);
@@ -451,6 +506,10 @@ mod tests {
             .lock()
             .unwrap()
             .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "root".to_string())); // user probe
 
         let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
         assert_eq!(results.len(), 1);
@@ -461,7 +520,10 @@ mod tests {
     #[tokio::test]
     async fn test_setup_agents_unavailable_skips_copy_install() {
         let mut cfg = GlobalConfig::default();
-        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.enabled = Some(true);
+        cfg.agents.claude.enabled = Some(false);
+        cfg.agents.cursor.enabled = Some(false);
+        cfg.agents.gemini.enabled = Some(false);
         cfg.agents.codex.host_config_path = Some("/tmp/devc-missing-codex-config".to_string());
 
         let mock = MockProvider::new(ProviderType::Docker);
@@ -469,6 +531,10 @@ mod tests {
             .lock()
             .unwrap()
             .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "root".to_string())); // user probe
 
         let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
         assert_eq!(results.len(), 1);
@@ -499,15 +565,24 @@ mod tests {
         unsafe { std::env::set_var("HOME", home.display().to_string()) };
 
         let mut cfg = GlobalConfig::default();
-        cfg.agents.claude.enabled = true;
+        cfg.agents.claude.enabled = Some(true);
+        cfg.agents.codex.enabled = Some(false);
+        cfg.agents.cursor.enabled = Some(false);
+        cfg.agents.gemini.enabled = Some(false);
 
         let mock = MockProvider::new(ProviderType::Docker);
         mock.exec_responses
             .lock()
             .unwrap()
             .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "root".to_string())); // user probe
         mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir #1
         mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir #2
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown for ~/.claude
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown for ~/.claude.json
         mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod for ~/.claude
         mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod for ~/.claude.json
         mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
@@ -543,7 +618,10 @@ mod tests {
         std::fs::write(host_dir.join("auth.json"), "{}").unwrap();
 
         let mut cfg = GlobalConfig::default();
-        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.enabled = Some(true);
+        cfg.agents.claude.enabled = Some(false);
+        cfg.agents.cursor.enabled = Some(false);
+        cfg.agents.gemini.enabled = Some(false);
         cfg.agents.codex.host_config_path = Some(host_dir.display().to_string());
         cfg.agents.codex.install_command = Some("echo primary-install && exit 7".to_string());
 
@@ -552,7 +630,12 @@ mod tests {
             .lock()
             .unwrap()
             .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "root".to_string())); // user probe
         mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown
         mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
         mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
         mock.exec_responses.lock().unwrap().push((1, String::new())); // initial probe missing
@@ -596,7 +679,10 @@ mod tests {
         std::fs::write(host_dir.join("auth.json"), "{}").unwrap();
 
         let mut cfg = GlobalConfig::default();
-        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.enabled = Some(true);
+        cfg.agents.claude.enabled = Some(false);
+        cfg.agents.cursor.enabled = Some(false);
+        cfg.agents.gemini.enabled = Some(false);
         cfg.agents.codex.host_config_path = Some(host_dir.display().to_string());
         cfg.agents.codex.install_command = Some("echo should-not-run".to_string());
 
@@ -605,7 +691,12 @@ mod tests {
             .lock()
             .unwrap()
             .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "root".to_string())); // user probe
         mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown
         mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
         mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
         mock.exec_responses.lock().unwrap().push((1, String::new())); // initial probe missing

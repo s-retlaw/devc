@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn test_host_agent_availability_config_missing() {
         let mut config = GlobalConfig::default();
-        config.agents.codex.enabled = true;
+        config.agents.codex.enabled = Some(true);
         config.agents.codex.host_config_path = Some("/tmp/devc-missing-host-config".to_string());
 
         let all = host_agent_availability(&config);

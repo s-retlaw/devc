@@ -32,8 +32,8 @@ pub struct AgentsConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
-    /// Enable this specific agent
-    pub enabled: bool,
+    /// Enable this specific agent. `None` means auto-enable when host config exists.
+    pub enabled: Option<bool>,
     /// Optional host-side config/auth path override
     pub host_config_path: Option<String>,
     /// Optional container-side config/auth path override
@@ -316,7 +316,7 @@ env_forward = ["OPENAI_API_KEY"]
             Some("https://github.com/user/dotfiles".to_string())
         );
         assert_eq!(config.defaults.shell, "/bin/zsh");
-        assert!(config.agents.codex.enabled);
+        assert_eq!(config.agents.codex.enabled, Some(true));
         assert_eq!(
             config.agents.codex.env_forward,
             vec!["OPENAI_API_KEY".to_string()]
@@ -372,7 +372,7 @@ env_forward = ["OPENAI_API_KEY"]
     #[test]
     fn test_agents_default_config() {
         let config = GlobalConfig::default();
-        assert!(!config.agents.codex.enabled);
+        assert_eq!(config.agents.codex.enabled, None);
         assert!(config.agents.codex.env_forward.is_empty());
     }
 }

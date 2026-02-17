@@ -73,8 +73,26 @@ pub fn all_agent_configs(global_config: &GlobalConfig) -> Vec<EffectiveAgentConf
 pub fn enabled_agent_configs(global_config: &GlobalConfig) -> Vec<EffectiveAgentConfig> {
     all_agent_configs(global_config)
         .into_iter()
-        .filter(|cfg| agent_config_for_kind(&global_config.agents, cfg.kind).enabled)
+        .filter(|cfg| is_agent_enabled(global_config, cfg.kind, Some(cfg)))
         .collect()
+}
+
+/// Resolve whether an agent is enabled, honoring explicit override first and host-availability defaults.
+pub fn is_agent_enabled(
+    global_config: &GlobalConfig,
+    kind: AgentKind,
+    resolved: Option<&EffectiveAgentConfig>,
+) -> bool {
+    let cfg = agent_config_for_kind(&global_config.agents, kind);
+    match cfg.enabled {
+        Some(v) => v,
+        None => {
+            let effective = resolved
+                .cloned()
+                .unwrap_or_else(|| resolve_effective_config(kind, cfg));
+            host::host_config_availability(&effective).0
+        }
+    }
 }
 
 fn agent_config_for_kind(agents: &devc_config::AgentsConfig, kind: AgentKind) -> &AgentConfig {
@@ -129,7 +147,10 @@ mod tests {
     #[test]
     fn test_enabled_agent_resolution_and_override_precedence() {
         let mut config = GlobalConfig::default();
-        config.agents.codex.enabled = true;
+        config.agents.codex.enabled = Some(true);
+        config.agents.claude.enabled = Some(false);
+        config.agents.cursor.enabled = Some(false);
+        config.agents.gemini.enabled = Some(false);
         config.agents.codex.host_config_path = Some("/tmp/custom-codex".to_string());
         config.agents.codex.container_config_path = Some("/work/.codex".to_string());
         config.agents.codex.install_command = Some("echo custom-install".to_string());
@@ -145,14 +166,21 @@ mod tests {
 
     #[test]
     fn test_disabled_agents_are_filtered() {
-        let config = GlobalConfig::default();
+        let mut config = GlobalConfig::default();
+        config.agents.codex.enabled = Some(false);
+        config.agents.claude.enabled = Some(false);
+        config.agents.cursor.enabled = Some(false);
+        config.agents.gemini.enabled = Some(false);
         assert!(enabled_agent_configs(&config).is_empty());
     }
 
     #[test]
     fn test_claude_includes_default_extra_sync_path() {
         let mut config = GlobalConfig::default();
-        config.agents.claude.enabled = true;
+        config.agents.claude.enabled = Some(true);
+        config.agents.codex.enabled = Some(false);
+        config.agents.cursor.enabled = Some(false);
+        config.agents.gemini.enabled = Some(false);
 
         let effective = enabled_agent_configs(&config);
         assert_eq!(effective.len(), 1);
@@ -160,5 +188,23 @@ mod tests {
         assert_eq!(claude.kind, AgentKind::Claude);
         assert_eq!(claude.extra_sync_paths.len(), 1);
         assert_eq!(claude.extra_sync_paths[0].1, "~/.claude.json");
+    }
+
+    #[test]
+    fn test_auto_enabled_when_host_config_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_dir = tmp.path().join("codex");
+        std::fs::create_dir_all(&host_dir).unwrap();
+
+        let mut config = GlobalConfig::default();
+        config.agents.codex.host_config_path = Some(host_dir.display().to_string());
+        config.agents.codex.enabled = None;
+        config.agents.claude.enabled = Some(false);
+        config.agents.cursor.enabled = Some(false);
+        config.agents.gemini.enabled = Some(false);
+
+        let effective = enabled_agent_configs(&config);
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].kind, AgentKind::Codex);
     }
 }

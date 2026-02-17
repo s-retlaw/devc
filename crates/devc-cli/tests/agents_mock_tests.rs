@@ -42,7 +42,10 @@ async fn test_agent_sync_enabled_triggers_copy_and_install() {
     std::fs::write(host_dir.join("auth.json"), "{}").unwrap();
 
     let mut config = GlobalConfig::default();
-    config.agents.codex.enabled = true;
+    config.agents.codex.enabled = Some(true);
+    config.agents.claude.enabled = Some(false);
+    config.agents.cursor.enabled = Some(false);
+    config.agents.gemini.enabled = Some(false);
     config.agents.codex.host_config_path = Some(host_dir.display().to_string());
     config.agents.codex.container_config_path = Some("/tmp/.codex".to_string());
     config.agents.codex.install_command = Some("echo install-codex".to_string());
@@ -53,7 +56,12 @@ async fn test_agent_sync_enabled_triggers_copy_and_install() {
         .lock()
         .unwrap()
         .push((0, "/root".to_string())); // HOME probe
+    mock.exec_responses
+        .lock()
+        .unwrap()
+        .push((0, "root".to_string())); // user probe
     mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+    mock.exec_responses.lock().unwrap().push((0, String::new())); // chown
     mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
     mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
     mock.exec_responses.lock().unwrap().push((1, String::new())); // probe missing
@@ -98,7 +106,11 @@ async fn test_agent_sync_enabled_triggers_copy_and_install() {
 #[tokio::test]
 async fn test_agent_sync_disabled_makes_no_provider_calls() {
     let tmp = tempfile::tempdir().unwrap();
-    let config = GlobalConfig::default();
+    let mut config = GlobalConfig::default();
+    config.agents.codex.enabled = Some(false);
+    config.agents.claude.enabled = Some(false);
+    config.agents.cursor.enabled = Some(false);
+    config.agents.gemini.enabled = Some(false);
     let mock = MockProvider::new(ProviderType::Docker);
     let calls = mock.calls.clone();
     let container = make_running_container(tmp.path());
@@ -114,7 +126,10 @@ async fn test_agent_sync_disabled_makes_no_provider_calls() {
 async fn test_agent_sync_missing_host_prereq_returns_warning() {
     let tmp = tempfile::tempdir().unwrap();
     let mut config = GlobalConfig::default();
-    config.agents.codex.enabled = true;
+    config.agents.codex.enabled = Some(true);
+    config.agents.claude.enabled = Some(false);
+    config.agents.cursor.enabled = Some(false);
+    config.agents.gemini.enabled = Some(false);
     config.agents.codex.host_config_path = Some("/tmp/devc-missing-agent-host-config".to_string());
 
     let mock = MockProvider::new(ProviderType::Docker);
@@ -122,6 +137,10 @@ async fn test_agent_sync_missing_host_prereq_returns_warning() {
         .lock()
         .unwrap()
         .push((0, "/root".to_string())); // HOME probe
+    mock.exec_responses
+        .lock()
+        .unwrap()
+        .push((0, "root".to_string())); // user probe
     let calls = mock.calls.clone();
     let container = make_running_container(tmp.path());
     let id = container.id.clone();

@@ -171,7 +171,7 @@ enum AgentCommands {
     },
     /// Force agent injection/sync for a running container
     Sync {
-        /// Container name or ID (optional, defaults to current directory)
+        /// Container name or ID (interactive selection if not specified)
         container: Option<String>,
     },
 }
@@ -432,9 +432,34 @@ async fn run() -> anyhow::Result<()> {
                 }
                 Commands::Agents { command } => match command {
                     AgentCommands::Doctor { container } => {
+                        let container = match container {
+                            Some(name) => Some(name),
+                            None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+                                let containers = get_containers().await?;
+                                // Esc/cancel falls back to host-only diagnostics.
+                                select_container(
+                                    &containers,
+                                    SelectionContext::Any,
+                                    "Select container for agent doctor context (or Esc for host-only):",
+                                )
+                                .ok()
+                            }
+                            None => None,
+                        };
                         commands::agents_doctor(&manager, container).await?;
                     }
                     AgentCommands::Sync { container } => {
+                        let container = match container {
+                            Some(name) => Some(name),
+                            None => {
+                                let containers = get_containers().await?;
+                                Some(select_container(
+                                    &containers,
+                                    SelectionContext::Running,
+                                    "Select running container to sync agents:",
+                                )?)
+                            }
+                        };
                         commands::agents_sync(&manager, container).await?;
                     }
                 },

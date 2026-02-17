@@ -382,14 +382,22 @@ impl SettingsState {
         config.credentials.docker = self.draft.credentials_docker;
         config.credentials.git = self.draft.credentials_git;
         // Agents
-        config.agents.codex.enabled = self.draft.agent_codex_enabled
-            && self.agent_field_available(SettingsField::AgentCodexEnabled);
-        config.agents.claude.enabled = self.draft.agent_claude_enabled
-            && self.agent_field_available(SettingsField::AgentClaudeEnabled);
-        config.agents.cursor.enabled = self.draft.agent_cursor_enabled
-            && self.agent_field_available(SettingsField::AgentCursorEnabled);
-        config.agents.gemini.enabled = self.draft.agent_gemini_enabled
-            && self.agent_field_available(SettingsField::AgentGeminiEnabled);
+        config.agents.codex.enabled = Some(
+            self.draft.agent_codex_enabled
+                && self.agent_field_available(SettingsField::AgentCodexEnabled),
+        );
+        config.agents.claude.enabled = Some(
+            self.draft.agent_claude_enabled
+                && self.agent_field_available(SettingsField::AgentClaudeEnabled),
+        );
+        config.agents.cursor.enabled = Some(
+            self.draft.agent_cursor_enabled
+                && self.agent_field_available(SettingsField::AgentCursorEnabled),
+        );
+        config.agents.gemini.enabled = Some(
+            self.draft.agent_gemini_enabled
+                && self.agent_field_available(SettingsField::AgentGeminiEnabled),
+        );
     }
 
     /// Reset draft from config
@@ -399,7 +407,11 @@ impl SettingsState {
         self.focused = 0;
     }
 
-    pub fn apply_agent_host_availability(&mut self, availability: &[HostAgentAvailability]) {
+    pub fn apply_agent_host_availability(
+        &mut self,
+        availability: &[HostAgentAvailability],
+        config: &GlobalConfig,
+    ) {
         self.agent_availability.clear();
         for item in availability {
             let Some(field) = Self::agent_field_for_kind(item.agent) else {
@@ -412,8 +424,17 @@ impl SettingsState {
                     reason: item.reason.clone(),
                 },
             );
-            if !item.available {
-                self.draft.set_agent_enabled(field, false);
+            match Self::agent_enabled_override(config, item.agent) {
+                Some(explicit) => {
+                    self.draft
+                        .set_agent_enabled(field, explicit && item.available);
+                    self.saved
+                        .set_agent_enabled(field, explicit && item.available);
+                }
+                None => {
+                    self.draft.set_agent_enabled(field, item.available);
+                    self.saved.set_agent_enabled(field, item.available);
+                }
             }
         }
     }
@@ -458,6 +479,15 @@ impl SettingsState {
             AgentKind::Gemini => Some(SettingsField::AgentGeminiEnabled),
         }
     }
+
+    fn agent_enabled_override(config: &GlobalConfig, kind: AgentKind) -> Option<bool> {
+        match kind {
+            AgentKind::Codex => config.agents.codex.enabled,
+            AgentKind::Claude => config.agents.claude.enabled,
+            AgentKind::Cursor => config.agents.cursor.enabled,
+            AgentKind::Gemini => config.agents.gemini.enabled,
+        }
+    }
 }
 
 impl SettingsDraft {
@@ -471,10 +501,10 @@ impl SettingsDraft {
             ssh_key_path: config.defaults.ssh_key_path.clone(),
             credentials_docker: config.credentials.docker,
             credentials_git: config.credentials.git,
-            agent_codex_enabled: config.agents.codex.enabled,
-            agent_claude_enabled: config.agents.claude.enabled,
-            agent_cursor_enabled: config.agents.cursor.enabled,
-            agent_gemini_enabled: config.agents.gemini.enabled,
+            agent_codex_enabled: config.agents.codex.enabled.unwrap_or(false),
+            agent_claude_enabled: config.agents.claude.enabled.unwrap_or(false),
+            agent_cursor_enabled: config.agents.cursor.enabled.unwrap_or(false),
+            agent_gemini_enabled: config.agents.gemini.enabled.unwrap_or(false),
         }
     }
 
@@ -858,19 +888,22 @@ mod tests {
 
         let mut updated = GlobalConfig::default();
         state.apply_to_config(&mut updated);
-        assert!(updated.agents.gemini.enabled);
+        assert_eq!(updated.agents.gemini.enabled, Some(true));
     }
 
     #[test]
     fn test_unavailable_agent_forced_disabled_and_blocked() {
         let mut config = GlobalConfig::default();
-        config.agents.codex.enabled = true;
+        config.agents.codex.enabled = Some(true);
         let mut state = SettingsState::new(&config);
-        state.apply_agent_host_availability(&[HostAgentAvailability {
-            agent: AgentKind::Codex,
-            available: false,
-            reason: Some("host config missing: /tmp/.codex".to_string()),
-        }]);
+        state.apply_agent_host_availability(
+            &[HostAgentAvailability {
+                agent: AgentKind::Codex,
+                available: false,
+                reason: Some("host config missing: /tmp/.codex".to_string()),
+            }],
+            &config,
+        );
 
         assert!(!state.draft.agent_codex_enabled);
         state.focused = SettingsField::all()
@@ -883,6 +916,6 @@ mod tests {
 
         let mut updated = config.clone();
         state.apply_to_config(&mut updated);
-        assert!(!updated.agents.codex.enabled);
+        assert_eq!(updated.agents.codex.enabled, Some(false));
     }
 }

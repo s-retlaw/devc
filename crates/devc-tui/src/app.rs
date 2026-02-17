@@ -480,7 +480,7 @@ impl App {
         let connection_error = manager.connection_error().map(|s| s.to_string());
         let mut settings_state = SettingsState::new(&config);
         let availability = devc_core::agents::host_agent_availability(&config);
-        settings_state.apply_agent_host_availability(&availability);
+        settings_state.apply_agent_host_availability(&availability, &config);
 
         // Test all providers at startup to show accurate connection status
         let available_providers = detect_available_providers(&config).await;
@@ -1895,7 +1895,7 @@ impl App {
                     self.settings_state.reset_from_config(&self.config);
                     let availability = devc_core::agents::host_agent_availability(&self.config);
                     self.settings_state
-                        .apply_agent_host_availability(&availability);
+                        .apply_agent_host_availability(&availability, &self.config);
                     self.status_message = Some("Settings reset to saved values".to_string());
                 }
                 _ => {}
