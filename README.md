@@ -21,6 +21,7 @@ A fast, Rust-based dev container manager with both TUI and CLI interfaces. Suppo
 - **Dev Container Features** - OCI-based feature installation
 - **Port Forwarding** - Automatic port forwarding with socat tunnels
 - **Credential Forwarding** - Docker and Git credentials forwarded into containers
+- **Agent Sync** - Sync host agent config/auth and install missing agent CLIs in running containers
 - **SSH Agent Forwarding** - Seamless SSH key access inside containers
 - **Dotfiles** - Automatic dotfiles repository cloning and installation
 - **Interactive Selection** - Arrow-key navigation when container name is omitted
@@ -69,21 +70,23 @@ devc
 |---------|-------------|
 | `devc` | Launch the TUI dashboard |
 | `devc init` | Initialize a container from current directory |
-| `devc up [name]` | Build, create, and start a container |
-| `devc down [name]` | Stop and remove a container (keeps state) |
-| `devc shell [name]` | Open an interactive shell |
-| `devc run [name] <cmd>` | Run a command in a container |
-| `devc build [name]` | Build the container image |
-| `devc start [name]` | Start a stopped container |
-| `devc stop [name]` | Stop a running container |
-| `devc rm [name]` | Remove a container |
-| `devc rebuild [name]` | Rebuild a container from scratch |
-| `devc adopt [name]` | Adopt an existing devcontainer into devc |
-| `devc resize [name]` | Resize container PTY |
+| `devc up [container_name]` | Build, create, and start a container |
+| `devc down [container_name]` | Stop and remove a container (keeps state) |
+| `devc shell [container_name]` | Open an interactive shell |
+| `devc run [container_name] <cmd>` | Run a command in a container |
+| `devc build [container_name]` | Build the container image |
+| `devc start [container_name]` | Start a stopped container |
+| `devc stop [container_name]` | Stop a running container |
+| `devc rm [container_name]` | Remove a container |
+| `devc rebuild [container_name]` | Rebuild a container from scratch |
+| `devc adopt [container_name]` | Adopt an existing devcontainer into devc |
+| `devc resize [container_name]` | Resize container PTY |
+| `devc agents doctor [container_name]` | Show host availability and planned agent sync/install actions |
+| `devc agents sync [container_name]` | Force agent sync/install for a running container |
 | `devc list` | List all containers |
 | `devc config` | Show or edit configuration |
 
-When `[name]` is omitted, an interactive selector is shown (if TTY).
+When `[container_name]` is omitted, an interactive selector is shown (if TTY).
 
 ## TUI Keybindings
 
@@ -145,6 +148,74 @@ devc config
 # Edit config
 devc config --edit
 ```
+
+## Agent Sync
+
+Supported agents:
+- `codex`
+- `claude`
+- `cursor` (`cursor-agent` CLI only)
+- `gemini`
+
+How it works:
+- Agents are disabled by default.
+- If enabled, devc validates host config/auth availability for each agent.
+- If host config is missing or unreadable, that agent is skipped with warning.
+- If agent binary already exists in container, install is skipped.
+- If missing and Node/npm are available, devc installs via npm (install-if-missing).
+- If Node/npm are missing, install is skipped with warning.
+- Agent issues never fail `up`, `start`, or `rebuild`; devc continues with warnings.
+
+Container prerequisite:
+- Agent auto-install requires Node/npm in the container image.
+
+Source of truth:
+- Host config/auth is re-copied into the container on lifecycle/sync runs (host re-copy model).
+
+Example config:
+
+```toml
+[agents.codex]
+enabled = true
+
+[agents.claude]
+enabled = true
+
+[agents.cursor]
+enabled = false
+
+[agents.gemini]
+enabled = false
+
+# Optional per-agent overrides:
+# host_config_path = "~/.codex"
+# container_config_path = "~/.codex"
+# install_command = "npm install -g @openai/codex"
+```
+
+Useful commands:
+
+```bash
+# Diagnose host prerequisites and planned actions
+devc agents doctor
+devc agents doctor <container_name>
+
+# Force sync/install now for a running container
+devc agents sync
+devc agents sync <container_name>
+```
+
+Troubleshooting:
+- Agent disabled in Settings: host config is missing/unreadable on host.
+- Install skipped: Node/npm not found in container image.
+- Claude interactive re-onboarding: ensure all three files are synced:
+  - `~/.claude/.credentials.json`
+  - `~/.claude/settings.json`
+  - `~/.claude.json`
+
+See also:
+- [`docs/agent-injection-impl.md`](docs/agent-injection-impl.md)
+- [`docs/agent-auth-sync-notes.md`](docs/agent-auth-sync-notes.md)
 
 ## Project Structure
 
