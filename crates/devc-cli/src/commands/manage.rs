@@ -1,10 +1,10 @@
-//! Management commands: init, remove, adopt, list, config, creds
+//! Management commands: init, remove, adopt, list, config, creds, agents
 
 use anyhow::{anyhow, bail, Context, Result};
 use devc_config::GlobalConfig;
 use devc_core::{ContainerManager, DevcContainerStatus};
 
-use super::{exec_check, find_container};
+use super::{exec_check, find_container, find_container_in_cwd};
 
 /// Remove a container
 pub async fn remove(manager: &ContainerManager, container: &str, force: bool) -> Result<()> {
@@ -505,6 +505,114 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
             println!("Run 'docker login' to store credentials for Docker Hub.");
             println!("Run 'docker login <registry>' for other registries.");
         }
+    }
+
+    Ok(())
+}
+
+/// Show agent injection diagnostics.
+pub async fn agents_doctor(manager: &ContainerManager, container: Option<String>) -> Result<()> {
+    let results = devc_core::agents::doctor_enabled_agents(manager.global_config());
+
+    println!("Agent Doctor");
+    println!("============\n");
+
+    if let Some(default_provider) = manager.provider_type() {
+        println!("Default provider: {}", default_provider);
+    }
+
+    if results.is_empty() {
+        println!("No agents are enabled.");
+        println!("Enable one or more of: codex, claude, cursor, gemini.");
+        return Ok(());
+    }
+
+    for result in &results {
+        println!(
+            "- {}: {}",
+            result.agent,
+            if result.validated {
+                "host prerequisites ok"
+            } else {
+                "host prerequisites missing"
+            }
+        );
+        if result.warnings.is_empty() {
+            println!("  planned actions: copy host config, probe binary, install-if-missing");
+        } else {
+            for warning in &result.warnings {
+                println!("  warning: {}", warning);
+            }
+        }
+    }
+
+    if let Some(name) = container {
+        let state = find_container(manager, &name).await?;
+        println!("\nContainer context: {}", state.name);
+        println!("provider: {}", state.provider);
+        println!("status: {}", state.status);
+        if state.status != DevcContainerStatus::Running {
+            println!("agent sync action: skipped (container not running)");
+        } else {
+            println!(
+                "agent sync action: ready (run 'devc agents sync {}')",
+                state.name
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Force agent sync for a running container.
+pub async fn agents_sync(manager: &ContainerManager, container: Option<String>) -> Result<()> {
+    let state = match container {
+        Some(name) => find_container(manager, &name).await?,
+        None => find_container_in_cwd(manager).await?,
+    };
+
+    if state.status != DevcContainerStatus::Running {
+        bail!(
+            "Container '{}' is not running (status: {}). Start it first.",
+            state.name,
+            state.status
+        );
+    }
+
+    println!("Syncing agents for '{}'...", state.name);
+    let results = manager.setup_agents_for_container(&state.id).await?;
+
+    if results.is_empty() {
+        println!("No enabled agents to sync.");
+        return Ok(());
+    }
+
+    let mut warning_count = 0usize;
+    for result in results {
+        if result.warnings.is_empty() {
+            if result.installed {
+                println!("- {}: ok (copied + installed)", result.agent);
+            } else if result.copied {
+                println!("- {}: ok (copied)", result.agent);
+            } else {
+                println!("- {}: skipped", result.agent);
+            }
+        } else {
+            warning_count += result.warnings.len();
+            println!("- {}: warning", result.agent);
+            for warning in result.warnings {
+                println!("  {}", warning);
+            }
+        }
+    }
+
+    if warning_count > 0 {
+        println!(
+            "\nAgent injection completed with {} warning(s). Run 'devc agents doctor' for details.",
+            warning_count
+        );
+    } else {
+        println!("\nAgent sync complete.");
     }
 
     Ok(())

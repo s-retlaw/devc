@@ -8,6 +8,7 @@
 //! - SSH setup for proper terminal resize support
 //! - Enhanced builds with devc requirements (dropbear) injected
 
+pub mod agents;
 mod build;
 mod container;
 pub mod credentials;

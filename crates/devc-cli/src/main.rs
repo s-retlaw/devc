@@ -154,6 +154,26 @@ enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+
+    /// Agent injection diagnostics and sync
+    Agents {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Show enabled agents, host validation status, and planned actions
+    Doctor {
+        /// Container name or ID (optional)
+        container: Option<String>,
+    },
+    /// Force agent injection/sync for a running container
+    Sync {
+        /// Container name or ID (optional, defaults to current directory)
+        container: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -410,6 +430,14 @@ async fn run() -> anyhow::Result<()> {
                     };
                     commands::rebuild(&manager, &name, no_cache, yes).await?;
                 }
+                Commands::Agents { command } => match command {
+                    AgentCommands::Doctor { container } => {
+                        commands::agents_doctor(&manager, container).await?;
+                    }
+                    AgentCommands::Sync { container } => {
+                        commands::agents_sync(&manager, container).await?;
+                    }
+                },
             }
         }
     }

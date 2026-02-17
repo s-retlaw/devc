@@ -188,29 +188,48 @@ pub fn is_in_toolbox() -> bool {
     false
 }
 
+fn should_try_toolbox_shortcut(configured_provider: Option<ProviderType>) -> bool {
+    configured_provider != Some(ProviderType::Docker)
+}
+
 /// Create the default provider based on global config
 /// Auto-detects Toolbox environment and uses host podman if needed
 /// If provider is not configured (empty), auto-detects by trying Docker first, then Podman
 pub async fn create_default_provider(
     config: &devc_config::GlobalConfig,
 ) -> Result<Box<dyn ContainerProvider>> {
+    let configured_provider = match config.defaults.provider.as_str() {
+        "podman" => Some(ProviderType::Podman),
+        "docker" => Some(ProviderType::Docker),
+        _ => None,
+    };
+
+    #[allow(unused_mut)]
+    let mut attempted_toolbox_shortcut = false;
+
     // Only check for toolbox on Linux
     #[cfg(target_os = "linux")]
     if is_in_toolbox() {
-        tracing::info!("Detected toolbox environment, using host podman");
-        match CliProvider::new_toolbox().await {
-            Ok(provider) => return Ok(Box::new(provider)),
-            Err(e) => {
-                tracing::warn!("Failed to connect to host podman: {}, trying direct", e);
+        if !should_try_toolbox_shortcut(configured_provider) {
+            tracing::info!(
+                "Container environment detected with configured provider=docker; skipping host podman shortcut"
+            );
+        } else {
+            tracing::info!("Detected toolbox environment, trying host podman shortcut");
+            attempted_toolbox_shortcut = true;
+            match CliProvider::new_toolbox().await {
+                Ok(provider) => return Ok(Box::new(provider)),
+                Err(e) => {
+                    tracing::warn!("Failed host podman shortcut: {}, trying direct", e);
+                }
             }
         }
     }
 
     // Determine provider type - auto-detect if empty
-    let provider_type = match config.defaults.provider.as_str() {
-        "podman" => ProviderType::Podman,
-        "docker" => ProviderType::Docker,
-        "" => {
+    let provider_type = match configured_provider {
+        Some(pt) => pt,
+        None => {
             // Auto-detect: try Docker first (more common on Windows/Mac), then Podman
             tracing::info!("No provider configured, auto-detecting...");
             let available = detect_available_providers(config).await;
@@ -230,15 +249,14 @@ pub async fn create_default_provider(
                 }
             }
         }
-        _ => ProviderType::Docker, // Unknown provider, default to Docker
     };
 
     match create_provider(provider_type, config).await {
         Ok(provider) => Ok(provider),
         Err(e) => {
-            // If in toolbox and direct connection failed, give a helpful error (Linux only)
+            // If toolbox shortcut was attempted and direct connection failed, add context (Linux only)
             #[cfg(target_os = "linux")]
-            if is_in_toolbox() {
+            if attempted_toolbox_shortcut && is_in_toolbox() {
                 return Err(ProviderError::ConnectionError(format!(
                     "Cannot connect to container runtime. In toolbox, ensure 'flatpak-spawn --host podman' works. Error: {}",
                     e
@@ -250,6 +268,18 @@ pub async fn create_default_provider(
                 &e,
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_try_toolbox_shortcut_respects_configured_docker() {
+        assert!(!should_try_toolbox_shortcut(Some(ProviderType::Docker)));
+        assert!(should_try_toolbox_shortcut(Some(ProviderType::Podman)));
+        assert!(should_try_toolbox_shortcut(None));
     }
 }
 

@@ -16,7 +16,7 @@ build-release:
 
 # Run all unit tests (skips e2e tests that need a container runtime)
 test:
-    cargo nextest run -p devc-config -p devc-core -p devc-tui -p devc-provider
+    cargo nextest run -p devc-config -p devc-core -p devc-cli -p devc-tui -p devc-provider
 
 # Run e2e tests (requires Docker or Podman)
 test-e2e: _fix-docker-creds
@@ -58,7 +58,7 @@ test-all: _fix-docker-creds
     #!/usr/bin/env bash
     source "{{justfile_directory()}}/.devcontainer/test-runner.sh"
     run_section "Unit Tests" \
-        cargo nextest run -p devc-config -p devc-core -p devc-tui -p devc-provider
+        cargo nextest run -p devc-config -p devc-core -p devc-cli -p devc-tui -p devc-provider
     run_section "E2E: Docker" \
         env DEVC_TEST_PROVIDER=docker cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
     run_section "E2E: Podman" \
@@ -71,7 +71,7 @@ test-quick: _fix-docker-creds
     #!/usr/bin/env bash
     source "{{justfile_directory()}}/.devcontainer/test-runner.sh"
     run_section "Unit Tests" \
-        cargo nextest run -p devc-config -p devc-core -p devc-tui -p devc-provider
+        cargo nextest run -p devc-config -p devc-core -p devc-cli -p devc-tui -p devc-provider
     run_section "E2E: Docker" \
         env DEVC_TEST_PROVIDER=docker cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
     print_summary
@@ -112,6 +112,10 @@ snap-review:
 # Run a specific test by name pattern
 test-filter PATTERN:
     cargo nextest run --workspace -E 'test({{PATTERN}})'
+
+# Fast agent-focused tests (no runtime needed)
+test-agents:
+    cargo nextest run -p devc-config -p devc-core -p devc-cli -E 'test(agent)'
 
 # Install git hooks (auto-formats on commit)
 setup-hooks:

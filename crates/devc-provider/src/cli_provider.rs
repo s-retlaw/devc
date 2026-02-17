@@ -126,6 +126,18 @@ impl CliProvider {
             ""
         }
     }
+
+    /// Build a docker/podman cp source spec.
+    ///
+    /// For directories append `/.` so contents are copied into destination.
+    /// For files use the file path directly.
+    fn cp_source_spec(src: &Path) -> String {
+        if src.is_dir() {
+            format!("{}{}.", src.to_string_lossy(), std::path::MAIN_SEPARATOR)
+        } else {
+            src.to_string_lossy().to_string()
+        }
+    }
 }
 
 #[async_trait]
@@ -594,10 +606,7 @@ impl ContainerProvider for CliProvider {
     }
 
     async fn copy_into(&self, id: &ContainerId, src: &Path, dest: &str) -> Result<()> {
-        // Append /. to copy directory contents instead of the directory itself
-        // This ensures /path/to/dotfiles/. -> container:/home/user/.dotfiles
-        // copies the contents of dotfiles INTO .dotfiles, not as a subdirectory
-        let src_str = format!("{}{}.", src.to_string_lossy(), std::path::MAIN_SEPARATOR);
+        let src_str = Self::cp_source_spec(src);
         let target = format!("{}:{}", id.0, dest);
         self.run_cmd(&["cp", &src_str, &target]).await?;
         Ok(())
@@ -1142,7 +1151,30 @@ fn parse_compose_ps_output(stdout: &str) -> Vec<crate::ComposeServiceInfo> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_cp_source_spec_handles_dir_and_file() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("mydir");
+        fs::create_dir_all(&dir).unwrap();
+        let file = tmp.path().join("myfile.txt");
+        fs::write(&file, "x").unwrap();
+
+        let dir_spec = CliProvider::cp_source_spec(&dir);
+        assert!(
+            dir_spec.ends_with(&format!("{}.", std::path::MAIN_SEPARATOR)),
+            "directory source should end with '/.': {}",
+            dir_spec
+        );
+
+        let file_spec = CliProvider::cp_source_spec(&file);
+        assert_eq!(
+            file_spec,
+            PathBuf::from(&file).to_string_lossy().to_string()
+        );
+    }
 
     // ==================== parse_cli_labels tests ====================
 

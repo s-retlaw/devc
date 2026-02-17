@@ -1,0 +1,512 @@
+use crate::agents::host::{resolve_container_path, validate_host_prerequisites};
+use crate::agents::{enabled_agent_configs, AgentSyncResult, EffectiveAgentConfig};
+use devc_config::GlobalConfig;
+use devc_provider::{ContainerId, ContainerProvider, ExecConfig};
+use std::collections::HashMap;
+
+fn shell_escape_single_quotes(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+async fn exec_script(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    script: &str,
+    user: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Result<(i64, String), devc_provider::ProviderError> {
+    let result = provider
+        .exec(
+            container_id,
+            &ExecConfig {
+                cmd: vec!["/bin/sh".to_string(), "-lc".to_string(), script.to_string()],
+                env: env.clone(),
+                working_dir: None,
+                user: user.map(|u| u.to_string()),
+                tty: false,
+                stdin: false,
+                privileged: false,
+            },
+        )
+        .await?;
+    Ok((result.exit_code, result.output))
+}
+
+async fn discover_container_home(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    user: Option<&str>,
+) -> String {
+    match exec_script(
+        provider,
+        container_id,
+        "printf '%s' \"$HOME\"",
+        user,
+        &HashMap::new(),
+    )
+    .await
+    {
+        Ok((0, output)) if !output.trim().is_empty() => output.trim().to_string(),
+        _ => {
+            if user == Some("root") {
+                "/root".to_string()
+            } else {
+                "/home/vscode".to_string()
+            }
+        }
+    }
+}
+
+async fn copy_sync_entry(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    source_path: &std::path::Path,
+    target_path: &str,
+) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(target_path).parent() {
+        let quoted_parent = shell_escape_single_quotes(&parent.display().to_string());
+        exec_script(
+            provider,
+            container_id,
+            &format!("mkdir -p '{}'", quoted_parent),
+            Some("root"),
+            &HashMap::new(),
+        )
+        .await
+        .map_err(|e| format!("Failed to create container target directory: {}", e))?;
+    }
+
+    provider
+        .copy_into(container_id, source_path, target_path)
+        .await
+        .map_err(|e| format!("Failed to copy host config into container: {}", e))
+}
+
+fn file_mode_for_name(name: &str) -> Option<&'static str> {
+    if name == ".credentials.json" || name == ".claude.json" {
+        Some("600")
+    } else if name == "settings.json" {
+        Some("644")
+    } else {
+        None
+    }
+}
+
+async fn apply_permissions_for_entry(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    source_path: &std::path::Path,
+    target_path: &str,
+) -> Result<(), String> {
+    let mut cmds: Vec<String> = Vec::new();
+    if source_path.is_file() {
+        if let Some(name) = source_path.file_name().and_then(|n| n.to_str()) {
+            if let Some(mode) = file_mode_for_name(name) {
+                let q = shell_escape_single_quotes(target_path);
+                cmds.push(format!("if [ -f '{q}' ]; then chmod {mode} '{q}'; fi"));
+            }
+        }
+    } else if source_path.is_dir() {
+        for (name, mode) in [
+            (".credentials.json", "600"),
+            ("settings.json", "644"),
+            (".claude.json", "600"),
+        ] {
+            let child = format!("{}/{}", target_path.trim_end_matches('/'), name);
+            let q = shell_escape_single_quotes(&child);
+            cmds.push(format!("if [ -f '{q}' ]; then chmod {mode} '{q}'; fi"));
+        }
+    }
+
+    if cmds.is_empty() {
+        return Ok(());
+    }
+
+    exec_script(
+        provider,
+        container_id,
+        &cmds.join(" && "),
+        Some("root"),
+        &HashMap::new(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("Failed to set permissions on synced files: {}", e))
+}
+
+fn probe_script(binary: &str) -> String {
+    format!("command -v {binary} >/dev/null 2>&1 || [ -x \"$HOME/.local/bin/{binary}\" ]")
+}
+
+fn local_prefix_install_command(npm_package: &str) -> String {
+    let pkg = shell_escape_single_quotes(npm_package);
+    format!("npm install -g --prefix \"$HOME/.local\" '{pkg}'")
+}
+
+async fn ensure_local_bin_path(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    user: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Result<(), String> {
+    let script = r#"
+mkdir -p "$HOME/.local/bin"
+for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+  [ -f "$rc" ] || touch "$rc"
+  grep -F 'export PATH="$HOME/.local/bin:$PATH"' "$rc" >/dev/null 2>&1 ||
+    printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rc"
+done
+"#;
+
+    exec_script(provider, container_id, script, user, env)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Failed to ensure ~/.local/bin is on PATH: {}", e))
+}
+
+async fn run_install_with_fallbacks(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    cfg: &EffectiveAgentConfig,
+    user: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Result<bool, String> {
+    let mut attempts: Vec<String> = vec![cfg.install_command.clone()];
+    if let Some(pkg) = &cfg.npm_package {
+        let local_prefix_cmd = local_prefix_install_command(pkg);
+        if !attempts.iter().any(|cmd| cmd == &local_prefix_cmd) {
+            attempts.push(local_prefix_cmd);
+        }
+    }
+
+    for (idx, cmd) in attempts.iter().enumerate() {
+        match exec_script(provider, container_id, cmd, user, env).await {
+            Ok((0, _)) => {
+                let probe_cmd = probe_script(&cfg.binary_probe);
+                match exec_script(provider, container_id, &probe_cmd, user, env).await {
+                    Ok((0, _)) => return Ok(true),
+                    Ok((code, _)) => {
+                        return Err(format!(
+                            "Install attempt {} succeeded but probe failed with exit {}",
+                            idx + 1,
+                            code
+                        ));
+                    }
+                    Err(e) => return Err(format!("Post-install probe failed: {}", e)),
+                }
+            }
+            Ok((code, output)) => {
+                let short = output
+                    .trim()
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+                    .chars()
+                    .take(180)
+                    .collect::<String>();
+                if idx + 1 == attempts.len() {
+                    return Err(format!(
+                        "Install attempts exhausted (last exit {}): {}. Hint: check npm, network, and writable install prefix.",
+                        code, short
+                    ));
+                }
+            }
+            Err(e) => {
+                if idx + 1 == attempts.len() {
+                    return Err(format!(
+                        "Install attempts exhausted with runtime error: {}. Hint: check npm, network, and writable install prefix.",
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn all_sync_entries<'a>(
+    cfg: &'a EffectiveAgentConfig,
+    container_home: &str,
+) -> Vec<(&'a std::path::Path, String)> {
+    let mut entries = vec![(
+        cfg.host_config_path.as_path(),
+        resolve_container_path(&cfg.container_config_path, container_home),
+    )];
+    for (host_path, container_path) in &cfg.extra_sync_paths {
+        entries.push((
+            host_path.as_path(),
+            resolve_container_path(container_path, container_home),
+        ));
+    }
+    entries
+}
+
+/// Sync enabled agents into a running container.
+///
+/// Failures are converted into warnings per-agent; this function is best-effort.
+pub async fn setup_agents(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    global_config: &GlobalConfig,
+    user: Option<&str>,
+) -> Vec<AgentSyncResult> {
+    let mut results = Vec::new();
+    let enabled = enabled_agent_configs(global_config);
+
+    if enabled.is_empty() {
+        return results;
+    }
+
+    let container_home = discover_container_home(provider, container_id, user).await;
+    for cfg in enabled {
+        let mut result = AgentSyncResult::new(cfg.kind);
+        let validation = validate_host_prerequisites(&cfg);
+        result.validated = validation.valid;
+        result.warnings.extend(validation.warnings);
+
+        if !result.validated {
+            results.push(result);
+            continue;
+        }
+
+        for (source_path, target_path) in all_sync_entries(&cfg, &container_home) {
+            if let Err(e) = copy_sync_entry(provider, container_id, source_path, &target_path).await
+            {
+                result.warnings.push(e);
+            } else {
+                result.copied = true;
+                if let Err(e) =
+                    apply_permissions_for_entry(provider, container_id, source_path, &target_path)
+                        .await
+                {
+                    result.warnings.push(e);
+                }
+            }
+        }
+
+        if !result.copied {
+            results.push(result);
+            continue;
+        }
+
+        if let Err(e) =
+            ensure_local_bin_path(provider, container_id, user, &validation.forwarded_env).await
+        {
+            result.warnings.push(e);
+        }
+
+        let probe_cmd = probe_script(&cfg.binary_probe);
+        let probe_exit = match exec_script(
+            provider,
+            container_id,
+            &probe_cmd,
+            user,
+            &validation.forwarded_env,
+        )
+        .await
+        {
+            Ok((code, _)) => code,
+            Err(e) => {
+                result.warnings.push(format!(
+                    "Failed to probe agent binary '{}': {}",
+                    cfg.binary_probe, e
+                ));
+                results.push(result);
+                continue;
+            }
+        };
+
+        if probe_exit == 0 {
+            result.installed = false;
+            results.push(result);
+            continue;
+        }
+
+        match run_install_with_fallbacks(
+            provider,
+            container_id,
+            &cfg,
+            user,
+            &validation.forwarded_env,
+        )
+        .await
+        {
+            Ok(true) => result.installed = true,
+            Ok(false) => result.warnings.push(format!(
+                "Install completed but '{}' binary is still unavailable",
+                cfg.kind
+            )),
+            Err(e) => result
+                .warnings
+                .push(format!("Install failed for '{}': {}", cfg.kind, e)),
+        }
+
+        results.push(result);
+    }
+
+    results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{MockCall, MockProvider};
+    use devc_provider::ProviderType;
+
+    #[tokio::test]
+    async fn test_setup_agents_install_if_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_dir = tmp.path().join("codex");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("auth.json"), "{}").unwrap();
+
+        let mut cfg = GlobalConfig::default();
+        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.host_config_path = Some(host_dir.display().to_string());
+        cfg.agents.codex.container_config_path = Some("/tmp/.codex".to_string());
+        cfg.agents.codex.install_command = Some("echo installed".to_string());
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod synced files
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
+        mock.exec_responses.lock().unwrap().push((1, String::new())); // command -v fails
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // install succeeds
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // post-install probe
+
+        let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].validated);
+        assert!(results[0].copied);
+        assert!(results[0].installed);
+
+        let calls = mock.get_calls();
+        assert!(calls.iter().any(|c| matches!(c, MockCall::CopyInto { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_setup_agents_missing_host_path_is_warning() {
+        let mut cfg = GlobalConfig::default();
+        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.host_config_path = Some("/tmp/devc-no-agent-material".to_string());
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "/root".to_string())); // HOME probe
+
+        let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].warnings.is_empty());
+        assert!(!results[0].copied);
+    }
+
+    #[tokio::test]
+    async fn test_setup_agents_claude_copies_primary_and_extra_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let claude_dir = home.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join(".credentials.json"), "{}").unwrap();
+        std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
+        std::fs::write(home.join(".claude.json"), "{}").unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        // SAFETY: test-local environment setup for path expansion; restored below.
+        unsafe { std::env::set_var("HOME", home.display().to_string()) };
+
+        let mut cfg = GlobalConfig::default();
+        cfg.agents.claude.enabled = true;
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir #1
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir #2
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod for ~/.claude
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod for ~/.claude.json
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // command -v ok
+
+        let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
+
+        if let Some(old) = old_home {
+            // SAFETY: restore HOME after test.
+            unsafe { std::env::set_var("HOME", old) };
+        }
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].copied);
+
+        let calls = mock.get_calls();
+        let copy_dests: Vec<String> = calls
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::CopyInto { dest, .. } => Some(dest.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(copy_dests.iter().any(|d| d.ends_with("/.claude")));
+        assert!(copy_dests.iter().any(|d| d.ends_with("/.claude.json")));
+    }
+
+    #[tokio::test]
+    async fn test_setup_agents_codex_install_fallback_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_dir = tmp.path().join("codex");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("auth.json"), "{}").unwrap();
+
+        let mut cfg = GlobalConfig::default();
+        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.host_config_path = Some(host_dir.display().to_string());
+        cfg.agents.codex.install_command = Some("echo primary-install && exit 7".to_string());
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
+        mock.exec_responses.lock().unwrap().push((1, String::new())); // initial probe missing
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((7, "primary failed".to_string())); // install attempt 1 fails
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // fallback install succeeds
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // post-install probe succeeds
+
+        let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].installed,
+            "fallback install should mark installed"
+        );
+
+        let exec_cmds: Vec<Vec<String>> = mock
+            .get_calls()
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::Exec { cmd, .. } => Some(cmd.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            exec_cmds.iter().any(|cmd| cmd
+                .iter()
+                .any(|c| c.contains("--prefix \"$HOME/.local\"") && c.contains("@openai/codex"))),
+            "expected codex fallback install command, got: {:?}",
+            exec_cmds
+        );
+    }
+}

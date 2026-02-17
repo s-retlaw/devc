@@ -381,8 +381,20 @@ impl ContainerManager {
 
         // 5. Create and start container
         let progress_ref = progress.as_ref();
-        self.up_with_progress(id, progress_ref, progress_ref)
+        self.up_with_progress_inner(id, progress_ref, progress_ref, false)
             .await?;
+
+        let results = self.setup_agents_for_container(id).await?;
+        let warning_count: usize = results.iter().map(|r| r.warnings.len()).sum();
+        if warning_count > 0 {
+            emit(
+                &progress,
+                format!(
+                    "Agent injection completed with {} warning(s). Run 'devc agents doctor' for details.",
+                    warning_count
+                ),
+            );
+        }
 
         emit(&progress, "Build complete.".to_string());
         Ok(())

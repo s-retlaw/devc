@@ -13,6 +13,7 @@ pub enum SettingsSection {
     Dotfiles,
     Ssh,
     Credentials,
+    Agents,
 }
 
 impl SettingsSection {
@@ -22,6 +23,7 @@ impl SettingsSection {
             SettingsSection::Dotfiles,
             SettingsSection::Ssh,
             SettingsSection::Credentials,
+            SettingsSection::Agents,
         ]
     }
 
@@ -31,6 +33,7 @@ impl SettingsSection {
             Self::Dotfiles => "DOTFILES",
             Self::Ssh => "SSH / CONNECTION",
             Self::Credentials => "CREDENTIALS",
+            Self::Agents => "AGENTS",
         }
     }
 
@@ -42,6 +45,12 @@ impl SettingsSection {
             Self::Credentials => &[
                 SettingsField::CredentialsDocker,
                 SettingsField::CredentialsGit,
+            ],
+            Self::Agents => &[
+                SettingsField::AgentCodexEnabled,
+                SettingsField::AgentClaudeEnabled,
+                SettingsField::AgentCursorEnabled,
+                SettingsField::AgentGeminiEnabled,
             ],
         }
     }
@@ -62,6 +71,11 @@ pub enum SettingsField {
     // Credentials
     CredentialsDocker,
     CredentialsGit,
+    // Agents
+    AgentCodexEnabled,
+    AgentClaudeEnabled,
+    AgentCursorEnabled,
+    AgentGeminiEnabled,
 }
 
 impl SettingsField {
@@ -79,6 +93,11 @@ impl SettingsField {
             // Credentials
             SettingsField::CredentialsDocker,
             SettingsField::CredentialsGit,
+            // Agents
+            SettingsField::AgentCodexEnabled,
+            SettingsField::AgentClaudeEnabled,
+            SettingsField::AgentCursorEnabled,
+            SettingsField::AgentGeminiEnabled,
         ]
     }
 
@@ -92,6 +111,10 @@ impl SettingsField {
             Self::SshKeyPath => "SSH Key Path",
             Self::CredentialsDocker => "Docker Credentials",
             Self::CredentialsGit => "Git Credentials",
+            Self::AgentCodexEnabled => "Codex",
+            Self::AgentClaudeEnabled => "Claude",
+            Self::AgentCursorEnabled => "Cursor",
+            Self::AgentGeminiEnabled => "Gemini",
         }
     }
 
@@ -101,20 +124,36 @@ impl SettingsField {
             Self::DotfilesRepo | Self::DotfilesLocal => SettingsSection::Dotfiles,
             Self::SshEnabled | Self::SshKeyPath => SettingsSection::Ssh,
             Self::CredentialsDocker | Self::CredentialsGit => SettingsSection::Credentials,
+            Self::AgentCodexEnabled
+            | Self::AgentClaudeEnabled
+            | Self::AgentCursorEnabled
+            | Self::AgentGeminiEnabled => SettingsSection::Agents,
         }
     }
 
     pub fn is_editable(&self) -> bool {
         !matches!(
             self,
-            Self::SshEnabled | Self::CredentialsDocker | Self::CredentialsGit
+            Self::SshEnabled
+                | Self::CredentialsDocker
+                | Self::CredentialsGit
+                | Self::AgentCodexEnabled
+                | Self::AgentClaudeEnabled
+                | Self::AgentCursorEnabled
+                | Self::AgentGeminiEnabled
         )
     }
 
     pub fn is_toggle(&self) -> bool {
         matches!(
             self,
-            Self::SshEnabled | Self::CredentialsDocker | Self::CredentialsGit
+            Self::SshEnabled
+                | Self::CredentialsDocker
+                | Self::CredentialsGit
+                | Self::AgentCodexEnabled
+                | Self::AgentClaudeEnabled
+                | Self::AgentCursorEnabled
+                | Self::AgentGeminiEnabled
         )
     }
 
@@ -128,6 +167,10 @@ impl SettingsField {
             Self::SshKeyPath => "Path to SSH private key",
             Self::CredentialsDocker => "Forward Docker registry credentials into containers",
             Self::CredentialsGit => "Forward Git credentials into containers",
+            Self::AgentCodexEnabled => "Enable Codex config/auth sync and install-if-missing",
+            Self::AgentClaudeEnabled => "Enable Claude config/auth sync and install-if-missing",
+            Self::AgentCursorEnabled => "Enable Cursor config/auth sync and install-if-missing",
+            Self::AgentGeminiEnabled => "Enable Gemini config/auth sync and install-if-missing",
         }
     }
 }
@@ -174,6 +217,11 @@ pub struct SettingsDraft {
     // Credentials
     pub credentials_docker: bool,
     pub credentials_git: bool,
+    // Agents
+    pub agent_codex_enabled: bool,
+    pub agent_claude_enabled: bool,
+    pub agent_cursor_enabled: bool,
+    pub agent_gemini_enabled: bool,
 }
 
 impl SettingsState {
@@ -233,6 +281,18 @@ impl SettingsState {
             SettingsField::CredentialsGit => {
                 self.draft.credentials_git = !self.draft.credentials_git;
             }
+            SettingsField::AgentCodexEnabled => {
+                self.draft.agent_codex_enabled = !self.draft.agent_codex_enabled;
+            }
+            SettingsField::AgentClaudeEnabled => {
+                self.draft.agent_claude_enabled = !self.draft.agent_claude_enabled;
+            }
+            SettingsField::AgentCursorEnabled => {
+                self.draft.agent_cursor_enabled = !self.draft.agent_cursor_enabled;
+            }
+            SettingsField::AgentGeminiEnabled => {
+                self.draft.agent_gemini_enabled = !self.draft.agent_gemini_enabled;
+            }
             _ => {}
         }
     }
@@ -285,6 +345,11 @@ impl SettingsState {
         // Credentials
         config.credentials.docker = self.draft.credentials_docker;
         config.credentials.git = self.draft.credentials_git;
+        // Agents
+        config.agents.codex.enabled = self.draft.agent_codex_enabled;
+        config.agents.claude.enabled = self.draft.agent_claude_enabled;
+        config.agents.cursor.enabled = self.draft.agent_cursor_enabled;
+        config.agents.gemini.enabled = self.draft.agent_gemini_enabled;
     }
 
     /// Reset draft from config
@@ -306,6 +371,10 @@ impl SettingsDraft {
             ssh_key_path: config.defaults.ssh_key_path.clone(),
             credentials_docker: config.credentials.docker,
             credentials_git: config.credentials.git,
+            agent_codex_enabled: config.agents.codex.enabled,
+            agent_claude_enabled: config.agents.claude.enabled,
+            agent_cursor_enabled: config.agents.cursor.enabled,
+            agent_gemini_enabled: config.agents.gemini.enabled,
         }
     }
 
@@ -326,6 +395,30 @@ impl SettingsDraft {
             }
             .to_string(),
             SettingsField::CredentialsGit => if self.credentials_git {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+            SettingsField::AgentCodexEnabled => if self.agent_codex_enabled {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+            SettingsField::AgentClaudeEnabled => if self.agent_claude_enabled {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+            SettingsField::AgentCursorEnabled => if self.agent_cursor_enabled {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+            SettingsField::AgentGeminiEnabled => if self.agent_gemini_enabled {
                 "true"
             } else {
                 "false"
@@ -355,6 +448,18 @@ impl SettingsDraft {
             }
             SettingsField::CredentialsGit => {
                 self.credentials_git = value == "true" || value == "1" || value == "yes";
+            }
+            SettingsField::AgentCodexEnabled => {
+                self.agent_codex_enabled = value == "true" || value == "1" || value == "yes";
+            }
+            SettingsField::AgentClaudeEnabled => {
+                self.agent_claude_enabled = value == "true" || value == "1" || value == "yes";
+            }
+            SettingsField::AgentCursorEnabled => {
+                self.agent_cursor_enabled = value == "true" || value == "1" || value == "yes";
+            }
+            SettingsField::AgentGeminiEnabled => {
+                self.agent_gemini_enabled = value == "true" || value == "1" || value == "yes";
             }
         }
     }
@@ -630,5 +735,19 @@ mod tests {
         state.toggle_field();
         assert_eq!(state.draft.ssh_enabled, !initial);
         assert!(state.dirty());
+    }
+
+    #[test]
+    fn test_agent_toggle_applies_to_config() {
+        let config = GlobalConfig::default();
+        let mut state = SettingsState::new(&config);
+
+        // Last field in list is AgentGeminiEnabled.
+        state.focused = SettingsField::all().len() - 1;
+        state.toggle_field();
+
+        let mut updated = GlobalConfig::default();
+        state.apply_to_config(&mut updated);
+        assert!(updated.agents.gemini.enabled);
     }
 }

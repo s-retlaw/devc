@@ -293,6 +293,40 @@ impl ContainerManager {
         .await
     }
 
+    /// Set up configured agents for a running container.
+    ///
+    /// Failures are non-fatal and returned as per-agent warnings.
+    pub async fn setup_agents_for_container(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::agents::AgentSyncResult>> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        if container_state.status != DevcContainerStatus::Running {
+            return Ok(Vec::new());
+        }
+
+        let provider = self.require_container_provider(&container_state)?;
+        let container_id = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container has no container ID".to_string()))?;
+        let cid = ContainerId::new(container_id);
+
+        let user = self
+            .load_container(&container_state.config_path)
+            .ok()
+            .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()));
+
+        Ok(crate::agents::setup_agents(provider, &cid, &self.global_config, user.as_deref()).await)
+    }
+
     /// Save state to disk without holding the write lock during I/O.
     ///
     /// Serializes under a read lock, then writes to disk after releasing it.
@@ -419,8 +453,65 @@ impl ContainerManager {
         Ok(container_id)
     }
 
+    async fn maybe_inject_agents_after_start(
+        &self,
+        id: &str,
+        progress: Option<&mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
+        let enabled = crate::agents::enabled_agent_configs(&self.global_config);
+        if enabled.is_empty() {
+            return Ok(());
+        }
+
+        let names = enabled
+            .iter()
+            .map(|a| a.kind.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        send_progress(progress, &format!("Injecting agents: {}", names));
+
+        let results = self.setup_agents_for_container(id).await?;
+        let warning_count: usize = results.iter().map(|r| r.warnings.len()).sum();
+        for result in results {
+            if !result.warnings.is_empty() {
+                tracing::warn!(
+                    "Agent '{}': warning: {}",
+                    result.agent,
+                    result.warnings.join("; ")
+                );
+            } else if result.installed {
+                tracing::info!("Agent '{}': ok (copied + installed)", result.agent);
+            } else if result.copied {
+                tracing::info!("Agent '{}': ok (copied)", result.agent);
+            } else {
+                tracing::info!("Agent '{}': skipped", result.agent);
+            }
+        }
+
+        if warning_count > 0 {
+            send_progress(
+                progress,
+                &format!(
+                    "Agent injection completed with {} warning(s). Run 'devc agents doctor' for details.",
+                    warning_count
+                ),
+            );
+        }
+
+        Ok(())
+    }
+
     /// Start a container
     pub async fn start(&self, id: &str) -> Result<()> {
+        self.start_inner(id, true, None).await
+    }
+
+    pub(crate) async fn start_inner(
+        &self,
+        id: &str,
+        run_agent_injection: bool,
+        progress: Option<&mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
         let container_state = {
             let state = self.state.read().await;
             state
@@ -529,6 +620,9 @@ impl ContainerManager {
                     .await?;
                 }
 
+                if run_agent_injection {
+                    self.maybe_inject_agents_after_start(id, progress).await?;
+                }
                 return Ok(());
             }
         }
@@ -587,6 +681,10 @@ impl ContainerManager {
                 merged_env.as_ref(),
             )
             .await?;
+        }
+
+        if run_agent_injection {
+            self.maybe_inject_agents_after_start(id, progress).await?;
         }
 
         Ok(())
@@ -820,7 +918,7 @@ fi
 
     /// Build, create, and start a container (full lifecycle)
     pub async fn up(&self, id: &str) -> Result<()> {
-        self.up_with_progress(id, None, None).await
+        self.up_with_progress_inner(id, None, None, true).await
     }
 
     /// Build, create, and start a container with progress updates
@@ -829,6 +927,17 @@ fi
         id: &str,
         progress: Option<&mpsc::UnboundedSender<String>>,
         output: Option<&mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
+        self.up_with_progress_inner(id, progress, output, true)
+            .await
+    }
+
+    pub(crate) async fn up_with_progress_inner(
+        &self,
+        id: &str,
+        progress: Option<&mpsc::UnboundedSender<String>>,
+        output: Option<&mpsc::UnboundedSender<String>>,
+        run_agent_injection: bool,
     ) -> Result<()> {
         let container_state = {
             let state = self.state.read().await;
@@ -904,7 +1013,10 @@ fi
 
         // Start container (idempotent) and run post-start phase
         send_progress(progress, "Starting container...");
-        self.start(id).await?;
+        self.start_inner(id, false, progress).await?;
+        if run_agent_injection {
+            self.maybe_inject_agents_after_start(id, progress).await?;
+        }
 
         // Set up credential forwarding so it's ready for shell access
         if let Err(e) = crate::credentials::setup_credentials(

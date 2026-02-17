@@ -15,6 +15,56 @@ pub struct GlobalConfig {
     pub defaults: DefaultsConfig,
     pub providers: ProvidersConfig,
     pub credentials: CredentialsConfig,
+    pub agents: AgentsConfig,
+}
+
+/// Agent injection configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    pub codex: AgentConfig,
+    pub claude: AgentConfig,
+    pub cursor: AgentConfig,
+    pub gemini: AgentConfig,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            codex: AgentConfig::default(),
+            claude: AgentConfig::default(),
+            cursor: AgentConfig::default(),
+            gemini: AgentConfig::default(),
+        }
+    }
+}
+
+/// Per-agent configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// Enable this specific agent
+    pub enabled: bool,
+    /// Optional host-side config/auth path override
+    pub host_config_path: Option<String>,
+    /// Optional container-side config/auth path override
+    pub container_config_path: Option<String>,
+    /// Explicit allowlist of env vars to forward
+    pub env_forward: Vec<String>,
+    /// Optional install command override
+    pub install_command: Option<String>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host_config_path: None,
+            container_config_path: None,
+            env_forward: Vec::new(),
+            install_command: None,
+        }
+    }
 }
 
 /// Credential forwarding configuration
@@ -276,6 +326,10 @@ socket = "/var/run/docker.sock"
 
 [providers.podman]
 socket = "/run/user/1000/podman/podman.sock"
+
+[agents.codex]
+enabled = true
+env_forward = ["OPENAI_API_KEY"]
 "#;
 
         let config: GlobalConfig = toml::from_str(toml).unwrap();
@@ -285,6 +339,11 @@ socket = "/run/user/1000/podman/podman.sock"
             Some("https://github.com/user/dotfiles".to_string())
         );
         assert_eq!(config.defaults.shell, "/bin/zsh");
+        assert!(config.agents.codex.enabled);
+        assert_eq!(
+            config.agents.codex.env_forward,
+            vec!["OPENAI_API_KEY".to_string()]
+        );
     }
 
     #[test]
@@ -331,5 +390,12 @@ socket = "/run/user/1000/podman/podman.sock"
         let mut config = GlobalConfig::default();
         config.defaults.provider = "docker".to_string();
         assert!(!config.is_first_run());
+    }
+
+    #[test]
+    fn test_agents_default_config() {
+        let config = GlobalConfig::default();
+        assert!(!config.agents.codex.enabled);
+        assert!(config.agents.codex.env_forward.is_empty());
     }
 }
