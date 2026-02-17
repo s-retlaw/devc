@@ -478,7 +478,9 @@ impl App {
         let config = GlobalConfig::load().unwrap_or_default();
         let active_provider = manager.provider_type();
         let connection_error = manager.connection_error().map(|s| s.to_string());
-        let settings_state = SettingsState::new(&config);
+        let mut settings_state = SettingsState::new(&config);
+        let availability = devc_core::agents::host_agent_availability(&config);
+        settings_state.apply_agent_host_availability(&availability);
 
         // Test all providers at startup to show accurate connection status
         let available_providers = detect_available_providers(&config).await;
@@ -1874,7 +1876,9 @@ impl App {
                     self.settings_state.move_up();
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.settings_state.start_edit();
+                    if let Some(msg) = self.settings_state.start_edit() {
+                        self.status_message = Some(msg);
+                    }
                 }
                 KeyCode::Char('s') => {
                     // Save settings
@@ -1889,6 +1893,9 @@ impl App {
                 KeyCode::Char('r') => {
                     // Reset to saved values
                     self.settings_state.reset_from_config(&self.config);
+                    let availability = devc_core::agents::host_agent_availability(&self.config);
+                    self.settings_state
+                        .apply_agent_host_availability(&availability);
                     self.status_message = Some("Settings reset to saved values".to_string());
                 }
                 _ => {}

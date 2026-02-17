@@ -512,36 +512,56 @@ pub async fn creds(manager: &ContainerManager, container: Option<String>) -> Res
 
 /// Show agent injection diagnostics.
 pub async fn agents_doctor(manager: &ContainerManager, container: Option<String>) -> Result<()> {
-    let results = devc_core::agents::doctor_enabled_agents(manager.global_config());
+    let config = manager.global_config();
+    let availability = devc_core::agents::host_agent_availability(config);
+    let enabled_results = devc_core::agents::doctor_enabled_agents(config);
 
     println!("Agent Doctor");
     println!("============\n");
+    println!("Note: Agent auto-install requires Node/npm in the container image.");
+    println!();
 
     if let Some(default_provider) = manager.provider_type() {
         println!("Default provider: {}", default_provider);
     }
 
-    if results.is_empty() {
-        println!("No agents are enabled.");
-        println!("Enable one or more of: codex, claude, cursor, gemini.");
-        return Ok(());
-    }
-
-    for result in &results {
+    for item in &availability {
+        let enabled = match item.agent {
+            devc_core::agents::AgentKind::Codex => config.agents.codex.enabled,
+            devc_core::agents::AgentKind::Claude => config.agents.claude.enabled,
+            devc_core::agents::AgentKind::Cursor => config.agents.cursor.enabled,
+            devc_core::agents::AgentKind::Gemini => config.agents.gemini.enabled,
+        };
+        let state = if enabled { "enabled" } else { "disabled" };
         println!(
             "- {}: {}",
-            result.agent,
-            if result.validated {
-                "host prerequisites ok"
+            item.agent,
+            if item.available {
+                format!("{state}, host config available")
             } else {
-                "host prerequisites missing"
+                format!(
+                    "{state}, host config unavailable ({})",
+                    item.reason.as_deref().unwrap_or("unknown reason")
+                )
             }
         );
-        if result.warnings.is_empty() {
-            println!("  planned actions: copy host config, probe binary, install-if-missing");
-        } else {
-            for warning in &result.warnings {
-                println!("  warning: {}", warning);
+        if enabled {
+            if !item.available {
+                println!("  sync behavior: skipped (host config missing/unreadable)");
+                continue;
+            }
+            if let Some(result) = enabled_results.iter().find(|r| r.agent == item.agent) {
+                if result.warnings.is_empty() {
+                    println!(
+                        "  planned actions: copy host config, probe binary, install-if-missing (requires Node/npm)"
+                    );
+                } else {
+                    for warning in &result.warnings {
+                        println!("  warning: {}", warning);
+                    }
+                }
+            } else {
+                println!("  warning: enabled agent not found in diagnostics");
             }
         }
     }

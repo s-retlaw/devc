@@ -7,7 +7,10 @@ mod presets;
 use devc_config::{AgentConfig, GlobalConfig};
 use std::path::PathBuf;
 
-pub use host::{doctor_enabled_agents, validate_host_prerequisites, HostValidation};
+pub use host::{
+    doctor_enabled_agents, host_agent_availability, host_config_availability,
+    validate_host_prerequisites, HostValidation,
+};
 pub use inject::setup_agents;
 pub use presets::{preset_for, AgentKind, AgentPreset};
 
@@ -35,6 +38,14 @@ pub struct AgentSyncResult {
     pub warnings: Vec<String>,
 }
 
+/// Host-side availability for an agent (based on host config material presence/readability).
+#[derive(Debug, Clone)]
+pub struct HostAgentAvailability {
+    pub agent: AgentKind,
+    pub available: bool,
+    pub reason: Option<String>,
+}
+
 impl AgentSyncResult {
     pub fn new(agent: AgentKind) -> Self {
         Self {
@@ -47,17 +58,22 @@ impl AgentSyncResult {
     }
 }
 
-/// Return effective configs for all enabled agents.
-pub fn enabled_agent_configs(global_config: &GlobalConfig) -> Vec<EffectiveAgentConfig> {
+/// Return effective configs for all supported agents (enabled and disabled).
+pub fn all_agent_configs(global_config: &GlobalConfig) -> Vec<EffectiveAgentConfig> {
     AgentKind::ALL
         .into_iter()
-        .filter_map(|kind| {
+        .map(|kind| {
             let cfg = agent_config_for_kind(&global_config.agents, kind);
-            if !cfg.enabled {
-                return None;
-            }
-            Some(resolve_effective_config(kind, cfg))
+            resolve_effective_config(kind, cfg)
         })
+        .collect()
+}
+
+/// Return effective configs for all enabled agents.
+pub fn enabled_agent_configs(global_config: &GlobalConfig) -> Vec<EffectiveAgentConfig> {
+    all_agent_configs(global_config)
+        .into_iter()
+        .filter(|cfg| agent_config_for_kind(&global_config.agents, cfg.kind).enabled)
         .collect()
 }
 

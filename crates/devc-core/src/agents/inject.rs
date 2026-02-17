@@ -1,4 +1,6 @@
-use crate::agents::host::{resolve_container_path, validate_host_prerequisites};
+use crate::agents::host::{
+    host_config_availability, resolve_container_path, validate_host_prerequisites,
+};
 use crate::agents::{enabled_agent_configs, AgentSyncResult, EffectiveAgentConfig};
 use devc_config::GlobalConfig;
 use devc_provider::{ContainerId, ContainerProvider, ExecConfig};
@@ -225,6 +227,24 @@ async fn run_install_with_fallbacks(
     Ok(false)
 }
 
+async fn node_npm_available(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    user: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Result<bool, String> {
+    exec_script(
+        provider,
+        container_id,
+        "command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1",
+        user,
+        env,
+    )
+    .await
+    .map(|(code, _)| code == 0)
+    .map_err(|e| format!("Failed to check Node/npm prerequisites: {}", e))
+}
+
 fn all_sync_entries<'a>(
     cfg: &'a EffectiveAgentConfig,
     container_home: &str,
@@ -261,6 +281,18 @@ pub async fn setup_agents(
     let container_home = discover_container_home(provider, container_id, user).await;
     for cfg in enabled {
         let mut result = AgentSyncResult::new(cfg.kind);
+        let (available, reason) = host_config_availability(&cfg);
+        if !available {
+            result.validated = false;
+            result.warnings.push(format!(
+                "Skipped '{}': host config not available ({})",
+                cfg.kind,
+                reason.unwrap_or_else(|| "unknown reason".to_string())
+            ));
+            results.push(result);
+            continue;
+        }
+
         let validation = validate_host_prerequisites(&cfg);
         result.validated = validation.valid;
         result.warnings.extend(validation.warnings);
@@ -323,6 +355,24 @@ pub async fn setup_agents(
             continue;
         }
 
+        let can_install =
+            match node_npm_available(provider, container_id, user, &validation.forwarded_env).await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    result.warnings.push(e);
+                    false
+                }
+            };
+        if !can_install {
+            result.warnings.push(format!(
+                "Install skipped for '{}': Node/npm not found in container image",
+                cfg.kind
+            ));
+            results.push(result);
+            continue;
+        }
+
         match run_install_with_fallbacks(
             provider,
             container_id,
@@ -376,6 +426,7 @@ mod tests {
         mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod synced files
         mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
         mock.exec_responses.lock().unwrap().push((1, String::new())); // command -v fails
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // node/npm present
         mock.exec_responses.lock().unwrap().push((0, String::new())); // install succeeds
         mock.exec_responses.lock().unwrap().push((0, String::new())); // post-install probe
 
@@ -405,6 +456,32 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(!results[0].warnings.is_empty());
         assert!(!results[0].copied);
+    }
+
+    #[tokio::test]
+    async fn test_setup_agents_unavailable_skips_copy_install() {
+        let mut cfg = GlobalConfig::default();
+        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.host_config_path = Some("/tmp/devc-missing-codex-config".to_string());
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "/root".to_string())); // HOME probe
+
+        let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].validated);
+        assert!(!results[0].copied);
+        assert!(!results[0].installed);
+        assert!(results[0]
+            .warnings
+            .iter()
+            .any(|w| w.contains("Skipped 'codex': host config not available")));
+
+        let calls = mock.get_calls();
+        assert!(!calls.iter().any(|c| matches!(c, MockCall::CopyInto { .. })));
     }
 
     #[tokio::test]
@@ -479,6 +556,7 @@ mod tests {
         mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
         mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
         mock.exec_responses.lock().unwrap().push((1, String::new())); // initial probe missing
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // node/npm present
         mock.exec_responses
             .lock()
             .unwrap()
@@ -507,6 +585,53 @@ mod tests {
                 .any(|c| c.contains("--prefix \"$HOME/.local\"") && c.contains("@openai/codex"))),
             "expected codex fallback install command, got: {:?}",
             exec_cmds
+        );
+    }
+
+    #[tokio::test]
+    async fn test_setup_agents_skips_install_when_node_npm_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host_dir = tmp.path().join("codex");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("auth.json"), "{}").unwrap();
+
+        let mut cfg = GlobalConfig::default();
+        cfg.agents.codex.enabled = true;
+        cfg.agents.codex.host_config_path = Some(host_dir.display().to_string());
+        cfg.agents.codex.install_command = Some("echo should-not-run".to_string());
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
+        mock.exec_responses.lock().unwrap().push((1, String::new())); // initial probe missing
+        mock.exec_responses.lock().unwrap().push((1, String::new())); // node/npm missing
+
+        let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].installed);
+        assert!(results[0]
+            .warnings
+            .iter()
+            .any(|w| w.contains("Node/npm not found in container image")));
+
+        let exec_cmds: Vec<Vec<String>> = mock
+            .get_calls()
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::Exec { cmd, .. } => Some(cmd.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !exec_cmds
+                .iter()
+                .any(|cmd| cmd.iter().any(|s| s.contains("should-not-run"))),
+            "install override should not run when Node/npm are missing"
         );
     }
 }

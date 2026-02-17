@@ -5,6 +5,8 @@
 
 use crate::widgets::TextInputState;
 use devc_config::GlobalConfig;
+use devc_core::agents::{AgentKind, HostAgentAvailability};
+use std::collections::HashMap;
 
 /// Settings section for visual grouping
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +59,7 @@ impl SettingsSection {
 }
 
 /// Field in the settings form (global settings only)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingsField {
     // Container Defaults
     DefaultShell,
@@ -167,12 +169,36 @@ impl SettingsField {
             Self::SshKeyPath => "Path to SSH private key",
             Self::CredentialsDocker => "Forward Docker registry credentials into containers",
             Self::CredentialsGit => "Forward Git credentials into containers",
-            Self::AgentCodexEnabled => "Enable Codex config/auth sync and install-if-missing",
-            Self::AgentClaudeEnabled => "Enable Claude config/auth sync and install-if-missing",
-            Self::AgentCursorEnabled => "Enable Cursor config/auth sync and install-if-missing",
-            Self::AgentGeminiEnabled => "Enable Gemini config/auth sync and install-if-missing",
+            Self::AgentCodexEnabled => {
+                "Enable Codex config/auth sync and install-if-missing (requires Node/npm)"
+            }
+            Self::AgentClaudeEnabled => {
+                "Enable Claude config/auth sync and install-if-missing (requires Node/npm)"
+            }
+            Self::AgentCursorEnabled => {
+                "Enable Cursor config/auth sync and install-if-missing (requires Node/npm)"
+            }
+            Self::AgentGeminiEnabled => {
+                "Enable Gemini config/auth sync and install-if-missing (requires Node/npm)"
+            }
         }
     }
+
+    pub fn is_agent_field(&self) -> bool {
+        matches!(
+            self,
+            Self::AgentCodexEnabled
+                | Self::AgentClaudeEnabled
+                | Self::AgentCursorEnabled
+                | Self::AgentGeminiEnabled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentAvailability {
+    pub available: bool,
+    pub reason: Option<String>,
 }
 
 /// State for the settings view
@@ -187,6 +213,8 @@ pub struct SettingsState {
     pub draft: SettingsDraft,
     /// Snapshot of last-saved state for dirty detection
     pub saved: SettingsDraft,
+    /// Host availability for agent toggles.
+    pub agent_availability: HashMap<SettingsField, AgentAvailability>,
 }
 
 // Legacy accessor methods for backwards compatibility with existing code
@@ -233,6 +261,7 @@ impl SettingsState {
             input: TextInputState::new(),
             saved: draft.clone(),
             draft,
+            agent_availability: HashMap::new(),
         }
     }
 
@@ -258,19 +287,25 @@ impl SettingsState {
         }
     }
 
-    pub fn start_edit(&mut self) {
+    pub fn start_edit(&mut self) -> Option<String> {
         let field = self.focused_field();
         if field.is_editable() {
             self.editing = true;
             self.input.set_value(&self.draft.get_value(&field));
+            None
         } else if field.is_toggle() {
             // Toggle immediately
-            self.toggle_field();
+            self.toggle_field()
+        } else {
+            None
         }
     }
 
-    pub fn toggle_field(&mut self) {
+    pub fn toggle_field(&mut self) -> Option<String> {
         let field = self.focused_field();
+        if self.field_disabled(field) {
+            return Some(self.unavailable_message(field));
+        }
         match field {
             SettingsField::SshEnabled => {
                 self.draft.ssh_enabled = !self.draft.ssh_enabled;
@@ -295,6 +330,7 @@ impl SettingsState {
             }
             _ => {}
         }
+        None
     }
 
     pub fn cancel_edit(&mut self) {
@@ -346,10 +382,14 @@ impl SettingsState {
         config.credentials.docker = self.draft.credentials_docker;
         config.credentials.git = self.draft.credentials_git;
         // Agents
-        config.agents.codex.enabled = self.draft.agent_codex_enabled;
-        config.agents.claude.enabled = self.draft.agent_claude_enabled;
-        config.agents.cursor.enabled = self.draft.agent_cursor_enabled;
-        config.agents.gemini.enabled = self.draft.agent_gemini_enabled;
+        config.agents.codex.enabled = self.draft.agent_codex_enabled
+            && self.agent_field_available(SettingsField::AgentCodexEnabled);
+        config.agents.claude.enabled = self.draft.agent_claude_enabled
+            && self.agent_field_available(SettingsField::AgentClaudeEnabled);
+        config.agents.cursor.enabled = self.draft.agent_cursor_enabled
+            && self.agent_field_available(SettingsField::AgentCursorEnabled);
+        config.agents.gemini.enabled = self.draft.agent_gemini_enabled
+            && self.agent_field_available(SettingsField::AgentGeminiEnabled);
     }
 
     /// Reset draft from config
@@ -357,6 +397,66 @@ impl SettingsState {
         self.draft = SettingsDraft::from_config(config);
         self.saved = self.draft.clone();
         self.focused = 0;
+    }
+
+    pub fn apply_agent_host_availability(&mut self, availability: &[HostAgentAvailability]) {
+        self.agent_availability.clear();
+        for item in availability {
+            let Some(field) = Self::agent_field_for_kind(item.agent) else {
+                continue;
+            };
+            self.agent_availability.insert(
+                field,
+                AgentAvailability {
+                    available: item.available,
+                    reason: item.reason.clone(),
+                },
+            );
+            if !item.available {
+                self.draft.set_agent_enabled(field, false);
+            }
+        }
+    }
+
+    pub fn field_disabled(&self, field: SettingsField) -> bool {
+        field.is_agent_field() && !self.agent_field_available(field)
+    }
+
+    pub fn field_unavailable_reason(&self, field: SettingsField) -> Option<&str> {
+        self.agent_availability.get(&field).and_then(|a| {
+            if a.available {
+                None
+            } else {
+                a.reason.as_deref()
+            }
+        })
+    }
+
+    fn agent_field_available(&self, field: SettingsField) -> bool {
+        self.agent_availability
+            .get(&field)
+            .map(|a| a.available)
+            .unwrap_or(true)
+    }
+
+    fn unavailable_message(&self, field: SettingsField) -> String {
+        let reason = self
+            .field_unavailable_reason(field)
+            .unwrap_or("host config unavailable");
+        format!(
+            "{} not installed on host to inject ({})",
+            field.label(),
+            reason
+        )
+    }
+
+    fn agent_field_for_kind(kind: AgentKind) -> Option<SettingsField> {
+        match kind {
+            AgentKind::Codex => Some(SettingsField::AgentCodexEnabled),
+            AgentKind::Claude => Some(SettingsField::AgentClaudeEnabled),
+            AgentKind::Cursor => Some(SettingsField::AgentCursorEnabled),
+            AgentKind::Gemini => Some(SettingsField::AgentGeminiEnabled),
+        }
     }
 }
 
@@ -461,6 +561,16 @@ impl SettingsDraft {
             SettingsField::AgentGeminiEnabled => {
                 self.agent_gemini_enabled = value == "true" || value == "1" || value == "yes";
             }
+        }
+    }
+
+    fn set_agent_enabled(&mut self, field: SettingsField, enabled: bool) {
+        match field {
+            SettingsField::AgentCodexEnabled => self.agent_codex_enabled = enabled,
+            SettingsField::AgentClaudeEnabled => self.agent_claude_enabled = enabled,
+            SettingsField::AgentCursorEnabled => self.agent_cursor_enabled = enabled,
+            SettingsField::AgentGeminiEnabled => self.agent_gemini_enabled = enabled,
+            _ => {}
         }
     }
 }
@@ -732,7 +842,7 @@ mod tests {
         state.focused = 4; // SshEnabled
         let initial = state.draft.ssh_enabled;
 
-        state.toggle_field();
+        assert!(state.toggle_field().is_none());
         assert_eq!(state.draft.ssh_enabled, !initial);
         assert!(state.dirty());
     }
@@ -744,10 +854,35 @@ mod tests {
 
         // Last field in list is AgentGeminiEnabled.
         state.focused = SettingsField::all().len() - 1;
-        state.toggle_field();
+        assert!(state.toggle_field().is_none());
 
         let mut updated = GlobalConfig::default();
         state.apply_to_config(&mut updated);
         assert!(updated.agents.gemini.enabled);
+    }
+
+    #[test]
+    fn test_unavailable_agent_forced_disabled_and_blocked() {
+        let mut config = GlobalConfig::default();
+        config.agents.codex.enabled = true;
+        let mut state = SettingsState::new(&config);
+        state.apply_agent_host_availability(&[HostAgentAvailability {
+            agent: AgentKind::Codex,
+            available: false,
+            reason: Some("host config missing: /tmp/.codex".to_string()),
+        }]);
+
+        assert!(!state.draft.agent_codex_enabled);
+        state.focused = SettingsField::all()
+            .iter()
+            .position(|f| *f == SettingsField::AgentCodexEnabled)
+            .unwrap();
+        let msg = state.start_edit();
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("not installed on host to inject"));
+
+        let mut updated = config.clone();
+        state.apply_to_config(&mut updated);
+        assert!(!updated.agents.codex.enabled);
     }
 }

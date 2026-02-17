@@ -57,6 +57,7 @@ async fn test_agent_sync_enabled_triggers_copy_and_install() {
     mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
     mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
     mock.exec_responses.lock().unwrap().push((1, String::new())); // probe missing
+    mock.exec_responses.lock().unwrap().push((0, String::new())); // node/npm present
     mock.exec_responses.lock().unwrap().push((0, String::new())); // install ok
     mock.exec_responses.lock().unwrap().push((0, String::new())); // post-install probe
 

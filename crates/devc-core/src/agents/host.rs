@@ -1,4 +1,7 @@
-use crate::agents::{enabled_agent_configs, AgentSyncResult, EffectiveAgentConfig};
+use crate::agents::{
+    all_agent_configs, enabled_agent_configs, AgentSyncResult, EffectiveAgentConfig,
+    HostAgentAvailability,
+};
 use devc_config::GlobalConfig;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +38,29 @@ fn is_readable(path: &Path) -> bool {
     } else {
         std::fs::File::open(path).is_ok()
     }
+}
+
+/// Determine whether the primary host config path for an agent is available.
+pub fn host_config_availability(cfg: &EffectiveAgentConfig) -> (bool, Option<String>) {
+    if !cfg.host_config_path.exists() {
+        return (
+            false,
+            Some(format!(
+                "host config missing: {}",
+                cfg.host_config_path.display()
+            )),
+        );
+    }
+    if !is_readable(&cfg.host_config_path) {
+        return (
+            false,
+            Some(format!(
+                "host config not readable: {}",
+                cfg.host_config_path.display()
+            )),
+        );
+    }
+    (true, None)
 }
 
 /// Validate host prerequisites and collect env forwarding material.
@@ -102,6 +128,21 @@ pub fn validate_host_prerequisites(cfg: &EffectiveAgentConfig) -> HostValidation
     }
 }
 
+/// Host availability inventory for all known agents.
+pub fn host_agent_availability(global_config: &GlobalConfig) -> Vec<HostAgentAvailability> {
+    all_agent_configs(global_config)
+        .into_iter()
+        .map(|cfg| {
+            let (available, reason) = host_config_availability(&cfg);
+            HostAgentAvailability {
+                agent: cfg.kind,
+                available,
+                reason,
+            }
+        })
+        .collect()
+}
+
 /// Host-only diagnostic for enabled agents.
 pub fn doctor_enabled_agents(global_config: &GlobalConfig) -> Vec<AgentSyncResult> {
     enabled_agent_configs(global_config)
@@ -156,5 +197,24 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("Required host env var is missing")));
+    }
+
+    #[test]
+    fn test_host_agent_availability_config_missing() {
+        let mut config = GlobalConfig::default();
+        config.agents.codex.enabled = true;
+        config.agents.codex.host_config_path = Some("/tmp/devc-missing-host-config".to_string());
+
+        let all = host_agent_availability(&config);
+        let codex = all
+            .iter()
+            .find(|a| a.agent == AgentKind::Codex)
+            .expect("codex availability should be present");
+        assert!(!codex.available);
+        assert!(codex
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("host config missing"));
     }
 }

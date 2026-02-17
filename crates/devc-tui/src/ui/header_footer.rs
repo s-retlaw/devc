@@ -350,10 +350,17 @@ pub(super) fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
             format!(" {}", section.label()),
             Style::default().fg(Color::Cyan).bold(),
         )])));
+        if *section == SettingsSection::Agents {
+            items.push(ListItem::new(Line::from(vec![Span::styled(
+                "   Agent auto-install requires Node/npm in the container image.",
+                Style::default().fg(Color::DarkGray).italic(),
+            )])));
+        }
 
         // Fields in this section
         for field in section.fields() {
             let is_focused = settings.focused == field_index;
+            let is_disabled = settings.field_disabled(*field);
             let value = settings.draft.get_value(field);
             let field_dirty = value != settings.saved.get_value(field);
             let label = if field_dirty {
@@ -372,7 +379,11 @@ pub(super) fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
                 if value == "true" {
                     "[●] Enabled  [ ] Disabled".to_string()
                 } else {
-                    "[ ] Enabled  [●] Disabled".to_string()
+                    let mut s = "[ ] Enabled  [●] Disabled".to_string();
+                    if is_disabled {
+                        s.push_str(" (not installed on host)");
+                    }
+                    s
                 }
             } else if value.is_empty() {
                 "(not set)".to_string()
@@ -380,8 +391,12 @@ pub(super) fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
                 value.clone()
             };
 
-            let style = if is_focused {
+            let style = if is_focused && is_disabled {
+                Style::default().bg(Color::DarkGray).fg(Color::Yellow)
+            } else if is_focused {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else if is_disabled {
+                Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
             };
