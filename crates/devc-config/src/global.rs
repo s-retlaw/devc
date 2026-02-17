@@ -19,7 +19,7 @@ pub struct GlobalConfig {
 }
 
 /// Agent injection configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentsConfig {
     pub codex: AgentConfig,
@@ -28,19 +28,8 @@ pub struct AgentsConfig {
     pub gemini: AgentConfig,
 }
 
-impl Default for AgentsConfig {
-    fn default() -> Self {
-        Self {
-            codex: AgentConfig::default(),
-            claude: AgentConfig::default(),
-            cursor: AgentConfig::default(),
-            gemini: AgentConfig::default(),
-        }
-    }
-}
-
 /// Per-agent configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
     /// Enable this specific agent
@@ -53,18 +42,6 @@ pub struct AgentConfig {
     pub env_forward: Vec<String>,
     /// Optional install command override
     pub install_command: Option<String>,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            host_config_path: None,
-            container_config_path: None,
-            env_forward: Vec::new(),
-            install_command: None,
-        }
-    }
 }
 
 /// Credential forwarding configuration

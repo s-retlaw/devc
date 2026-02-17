@@ -77,10 +77,7 @@ pub fn enabled_agent_configs(global_config: &GlobalConfig) -> Vec<EffectiveAgent
         .collect()
 }
 
-fn agent_config_for_kind<'a>(
-    agents: &'a devc_config::AgentsConfig,
-    kind: AgentKind,
-) -> &'a AgentConfig {
+fn agent_config_for_kind(agents: &devc_config::AgentsConfig, kind: AgentKind) -> &AgentConfig {
     match kind {
         AgentKind::Codex => &agents.codex,
         AgentKind::Claude => &agents.claude,
