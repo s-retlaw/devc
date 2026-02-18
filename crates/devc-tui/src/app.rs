@@ -16,7 +16,10 @@ use crate::tunnel::{
 use crate::{resume_tui, suspend_tui, ui};
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
-use devc_core::{Container, ContainerManager, ContainerState, DevcContainerStatus};
+use devc_core::{
+    agents::{AgentContainerPresence, AgentKind, AgentSyncResult, AgentSyncSelection},
+    Container, ContainerManager, ContainerState, DevcContainerStatus,
+};
 use devc_provider::{
     create_provider, detect_available_providers, ContainerProvider, DevcontainerSource,
     DiscoveredContainer, ProviderType,
@@ -95,6 +98,8 @@ pub enum View {
     Shell,
     /// Detailed view of a discovered container
     DiscoverDetail,
+    /// Agent diagnostics/sync result popup
+    AgentDiagnostics,
 }
 
 /// Confirmation action
@@ -184,6 +189,13 @@ pub enum ContainerOpResult {
     Failed(ContainerOperation, String),
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentPanelRow {
+    pub presence: AgentContainerPresence,
+    pub last_sync: Option<AgentSyncResult>,
+    pub last_sync_forced: bool,
+}
+
 /// Unified async event channel for all background task communication
 pub enum AsyncEvent {
     /// Build/rebuild progress line
@@ -198,6 +210,19 @@ pub enum AsyncEvent {
     UpOutput(String),
     /// socat install result
     InstallResult(InstallResult),
+    /// Agent inspect completed for a container
+    AgentInspectComplete {
+        container_id: String,
+        container_name: String,
+        result: Result<Vec<AgentContainerPresence>, String>,
+    },
+    /// Agent sync completed for a container
+    AgentSyncComplete {
+        container_id: String,
+        container_name: String,
+        selection: AgentSyncSelection,
+        result: Result<Vec<AgentSyncResult>, String>,
+    },
 }
 
 /// Provider status information
@@ -298,6 +323,18 @@ pub struct App {
     pub container_op: Option<ContainerOperation>,
     /// Captured output lines from initializeCommand (shown in spinner popup)
     pub up_output: Vec<String>,
+    /// Agent diagnostics popup container id
+    pub agent_diagnostics_container_id: Option<String>,
+    /// Agent diagnostics popup container name
+    pub agent_diagnostics_container_name: String,
+    /// Agent diagnostics popup title
+    pub agent_diagnostics_title: String,
+    /// Agent diagnostics rows
+    pub agent_diagnostics_rows: Vec<AgentPanelRow>,
+    /// Agent diagnostics selected row
+    pub agent_diagnostics_selected: usize,
+    /// Agent diagnostics table state
+    pub agent_diagnostics_table_state: TableState,
 
     // Compose service visibility state
     pub compose_state: ComposeViewState,
@@ -379,6 +416,12 @@ impl App {
             shell_state: ShellState::new(),
             container_op: None,
             up_output: Vec::new(),
+            agent_diagnostics_container_id: None,
+            agent_diagnostics_container_name: String::new(),
+            agent_diagnostics_title: String::new(),
+            agent_diagnostics_rows: Vec::new(),
+            agent_diagnostics_selected: 0,
+            agent_diagnostics_table_state: TableState::default().with_selected(0),
             compose_state: ComposeViewState::new(),
             async_event_tx,
             async_event_rx,
@@ -561,6 +604,12 @@ impl App {
             shell_state: ShellState::new(),
             container_op: None,
             up_output: Vec::new(),
+            agent_diagnostics_container_id: None,
+            agent_diagnostics_container_name: String::new(),
+            agent_diagnostics_title: String::new(),
+            agent_diagnostics_rows: Vec::new(),
+            agent_diagnostics_selected: 0,
+            agent_diagnostics_table_state: TableState::default().with_selected(0),
             compose_state: ComposeViewState::new(),
             async_event_tx,
             async_event_rx,
@@ -784,8 +833,115 @@ impl App {
             AsyncEvent::InstallResult(result) => {
                 self.handle_install_result(result);
             }
+            AsyncEvent::AgentInspectComplete {
+                container_id,
+                container_name,
+                result,
+            } => {
+                self.handle_agent_inspect_complete(container_id, container_name, result);
+            }
+            AsyncEvent::AgentSyncComplete {
+                container_id,
+                container_name,
+                selection,
+                result,
+            } => {
+                self.handle_agent_sync_complete(container_id, container_name, selection, result)
+                    .await;
+            }
         }
         Ok(())
+    }
+
+    fn handle_agent_inspect_complete(
+        &mut self,
+        container_id: String,
+        container_name: String,
+        result: Result<Vec<AgentContainerPresence>, String>,
+    ) {
+        self.loading = false;
+        let previous_selected = self.agent_diagnostics_selected;
+        self.agent_diagnostics_container_id = Some(container_id);
+        self.agent_diagnostics_container_name = container_name.clone();
+        self.agent_diagnostics_title = format!("Agent Diagnostics - {}", container_name);
+        self.agent_diagnostics_rows.clear();
+        self.agent_diagnostics_selected = 0;
+        self.agent_diagnostics_table_state.select(Some(0));
+        match result {
+            Ok(presence_rows) => {
+                let previous: HashMap<AgentKind, (Option<AgentSyncResult>, bool)> = self
+                    .agent_diagnostics_rows
+                    .iter()
+                    .map(|r| (r.presence.agent, (r.last_sync.clone(), r.last_sync_forced)))
+                    .collect();
+                self.agent_diagnostics_rows = presence_rows
+                    .into_iter()
+                    .map(|presence| {
+                        let (last_sync, last_sync_forced) = previous
+                            .get(&presence.agent)
+                            .cloned()
+                            .unwrap_or((None, false));
+                        AgentPanelRow {
+                            presence,
+                            last_sync,
+                            last_sync_forced,
+                        }
+                    })
+                    .collect();
+                if !self.agent_diagnostics_rows.is_empty() {
+                    self.agent_diagnostics_selected =
+                        previous_selected.min(self.agent_diagnostics_rows.len() - 1);
+                    self.agent_diagnostics_table_state
+                        .select(Some(self.agent_diagnostics_selected));
+                }
+            }
+            Err(err) => {
+                self.status_message = Some(format!("Agent inspect failed: {}", err));
+            }
+        }
+        self.view = View::AgentDiagnostics;
+    }
+
+    async fn handle_agent_sync_complete(
+        &mut self,
+        container_id: String,
+        container_name: String,
+        selection: AgentSyncSelection,
+        result: Result<Vec<AgentSyncResult>, String>,
+    ) {
+        self.loading = false;
+        match result {
+            Ok(results) => {
+                let mut total_warnings = 0usize;
+                for res in &results {
+                    total_warnings += res.warnings.len();
+                    if let Some(row) = self
+                        .agent_diagnostics_rows
+                        .iter_mut()
+                        .find(|r| r.presence.agent == res.agent)
+                    {
+                        row.last_sync = Some(res.clone());
+                        row.last_sync_forced =
+                            matches!(selection, AgentSyncSelection::ForceOnly(_));
+                    }
+                }
+                if results.is_empty() {
+                    self.status_message = Some("No agents were synced".to_string());
+                } else if total_warnings > 0 {
+                    self.status_message = Some(format!(
+                        "Agent sync completed with {} warning(s)",
+                        total_warnings
+                    ));
+                } else {
+                    self.status_message = Some("Agent sync complete".to_string());
+                }
+            }
+            Err(err) => {
+                self.status_message = Some(format!("Agent sync failed: {}", err));
+            }
+        }
+
+        self.spawn_agent_inspect(container_id, container_name).await;
     }
 
     /// Ensure auto port detection is running for all running containers that declare ports.
@@ -1419,6 +1575,57 @@ impl App {
                 }
                 _ => {}
             },
+            View::AgentDiagnostics => match code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !self.agent_diagnostics_rows.is_empty() {
+                        self.agent_diagnostics_selected = (self.agent_diagnostics_selected + 1)
+                            % self.agent_diagnostics_rows.len();
+                        self.agent_diagnostics_table_state
+                            .select(Some(self.agent_diagnostics_selected));
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !self.agent_diagnostics_rows.is_empty() {
+                        self.agent_diagnostics_selected = self
+                            .agent_diagnostics_selected
+                            .checked_sub(1)
+                            .unwrap_or(self.agent_diagnostics_rows.len() - 1);
+                        self.agent_diagnostics_table_state
+                            .select(Some(self.agent_diagnostics_selected));
+                    }
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    self.agent_diagnostics_selected = 0;
+                    self.agent_diagnostics_table_state.select(Some(0));
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    if !self.agent_diagnostics_rows.is_empty() {
+                        self.agent_diagnostics_selected = self.agent_diagnostics_rows.len() - 1;
+                        self.agent_diagnostics_table_state
+                            .select(Some(self.agent_diagnostics_selected));
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if let Some(container_id) = self.agent_diagnostics_container_id.clone() {
+                        self.status_message = Some(format!(
+                            "Refreshing agent status for '{}'...",
+                            self.agent_diagnostics_container_name
+                        ));
+                        self.spawn_agent_inspect(
+                            container_id,
+                            self.agent_diagnostics_container_name.clone(),
+                        )
+                        .await;
+                    }
+                }
+                KeyCode::Char('s') => {
+                    self.sync_selected_agent_from_popup().await;
+                }
+                KeyCode::Char('A') => {
+                    self.sync_enabled_agents_from_popup().await;
+                }
+                _ => {}
+            },
             View::Shell => {} // Shell mode is handled in run() before event loop
             View::Help | View::Confirm => {} // Handled above
         }
@@ -1631,6 +1838,9 @@ impl App {
                         let container = self.containers[self.selected].clone();
                         self.enter_ports_view(&container).await?;
                     }
+                }
+                KeyCode::Char('a') => {
+                    self.open_agent_manager_for_selected_container().await;
                 }
                 KeyCode::Char('S') => {
                     #[cfg(unix)]
@@ -2269,6 +2479,124 @@ impl App {
         }
 
         Ok(())
+    }
+
+    async fn spawn_agent_inspect(&mut self, container_id: String, container_name: String) {
+        self.loading = true;
+        let manager = Arc::clone(&self.manager);
+        let tx = self.async_event_tx.clone();
+        tokio::spawn(async move {
+            let result = manager
+                .read()
+                .await
+                .inspect_agents_for_container(&container_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AsyncEvent::AgentInspectComplete {
+                container_id,
+                container_name,
+                result,
+            });
+        });
+    }
+
+    async fn open_agent_manager_for_selected_container(&mut self) {
+        if self.loading || self.container_op.is_some() {
+            self.status_message = Some("Another operation is already in progress".to_string());
+            return;
+        }
+
+        let Some(container) = self.selected_container().cloned() else {
+            self.status_message = Some("No container selected".to_string());
+            return;
+        };
+
+        if container.status != DevcContainerStatus::Running {
+            self.status_message = Some("Container must be running to manage agents".to_string());
+            return;
+        }
+
+        self.status_message = Some(format!("Inspecting agents for '{}'...", container.name));
+        self.spawn_agent_inspect(container.id.clone(), container.name.clone())
+            .await;
+    }
+
+    async fn sync_agents_for_selection(
+        &mut self,
+        container_id: String,
+        container_name: String,
+        selection: AgentSyncSelection,
+    ) {
+        if self.loading || self.container_op.is_some() {
+            self.status_message = Some("Another operation is already in progress".to_string());
+            return;
+        }
+        self.loading = true;
+        self.status_message = Some(format!("Syncing agents for '{}'...", container_name));
+        let manager = Arc::clone(&self.manager);
+        let tx = self.async_event_tx.clone();
+        let container_id_for_event = container_id.clone();
+        let container_name_for_event = container_name.clone();
+        let selection_for_event = selection.clone();
+        tokio::spawn(async move {
+            let result = manager
+                .read()
+                .await
+                .setup_agents_for_container_filtered(&container_id, selection)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AsyncEvent::AgentSyncComplete {
+                container_id: container_id_for_event,
+                container_name: container_name_for_event,
+                selection: selection_for_event,
+                result,
+            });
+        });
+    }
+
+    async fn sync_selected_agent_from_popup(&mut self) {
+        let Some(container_id) = self.agent_diagnostics_container_id.clone() else {
+            self.status_message = Some("No active container for agent sync".to_string());
+            return;
+        };
+        if self.agent_diagnostics_rows.is_empty() {
+            self.status_message = Some("No agents available to sync".to_string());
+            return;
+        }
+        let idx = self
+            .agent_diagnostics_selected
+            .min(self.agent_diagnostics_rows.len().saturating_sub(1));
+        let row = self.agent_diagnostics_rows[idx].presence.clone();
+        let selection = if row.enabled_explicit == Some(false) {
+            AgentSyncSelection::ForceOnly(vec![row.agent])
+        } else if row.enabled_effective {
+            AgentSyncSelection::Only(vec![row.agent])
+        } else {
+            self.status_message = Some(format!(
+                "{} is currently disabled (not explicitly enabled).",
+                row.agent
+            ));
+            return;
+        };
+        self.sync_agents_for_selection(
+            container_id,
+            self.agent_diagnostics_container_name.clone(),
+            selection,
+        )
+        .await;
+    }
+
+    async fn sync_enabled_agents_from_popup(&mut self) {
+        let Some(container_id) = self.agent_diagnostics_container_id.clone() else {
+            self.status_message = Some("No active container for agent sync".to_string());
+            return;
+        };
+        self.sync_agents_for_selection(
+            container_id,
+            self.agent_diagnostics_container_name.clone(),
+            AgentSyncSelection::EnabledOnly,
+        )
+        .await;
     }
 
     /// Exit port forwarding view
@@ -3423,6 +3751,7 @@ impl App {
                 | View::Ports
                 | View::Logs
                 | View::DiscoverDetail
+                | View::AgentDiagnostics
         )
     }
 
@@ -3440,6 +3769,14 @@ impl App {
             View::DiscoverDetail => {
                 self.discover_detail = None;
                 self.discover_detail_scroll = 0;
+            }
+            View::AgentDiagnostics => {
+                self.agent_diagnostics_container_id = None;
+                self.agent_diagnostics_container_name.clear();
+                self.agent_diagnostics_title.clear();
+                self.agent_diagnostics_rows.clear();
+                self.agent_diagnostics_selected = 0;
+                self.agent_diagnostics_table_state.select(Some(0));
             }
             _ => {}
         }

@@ -73,6 +73,7 @@ pub(super) fn container_list_footer(app: &App) -> String {
         }
         if st == DevcContainerStatus::Running {
             keys.push("p: Ports");
+            keys.push("a: Agents");
             keys.push("S: Shell");
             keys.push("l: Logs");
         }
@@ -227,6 +228,9 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 "j/k: Scroll  Esc: Back".to_string()
             }
+        }
+        View::AgentDiagnostics => {
+            "j/k: Select  s: Sync selected  A: Sync enabled  r: Refresh  1-3: Switch tab  q/Esc: Back".to_string()
         }
         View::Shell => "Ctrl+\\ to detach and return to TUI (session preserved)".to_string(),
     };
@@ -466,6 +470,7 @@ pub(super) fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             Line::from("  S           Shell (persistent session, Ctrl+\\ to detach)"),
             Line::from("  R           Rebuild - destroy and rebuild container"),
             Line::from("  p           Port forwarding"),
+            Line::from("  a           Open Agent Manager (running container)"),
             Line::from("  d/Delete    Delete container"),
             Line::from("  r/F5        Refresh list"),
         ],
@@ -511,4 +516,145 @@ pub(super) fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: true });
 
     frame.render_widget(help, area);
+}
+
+pub(super) fn draw_agent_diagnostics(frame: &mut Frame, app: &mut App, area: Rect) {
+    let title = if app.agent_diagnostics_title.is_empty() {
+        " Agent Diagnostics ".to_string()
+    } else {
+        format!(" {} ", app.agent_diagnostics_title)
+    };
+
+    let outer = Block::default().title(title).borders(Borders::ALL);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(6)])
+        .split(inner);
+
+    let header = Row::new(vec![
+        Cell::from("Agent"),
+        Cell::from("Enabled"),
+        Cell::from("Host"),
+        Cell::from("Cfg"),
+        Cell::from("Bin"),
+        Cell::from("State"),
+        Cell::from("Last Sync"),
+    ])
+    .style(Style::default().fg(Color::Cyan).bold());
+
+    let rows: Vec<Row> = app
+        .agent_diagnostics_rows
+        .iter()
+        .map(|row| {
+            let enabled = match row.presence.enabled_explicit {
+                Some(true) => "enabled",
+                Some(false) => "disabled",
+                None if row.presence.enabled_effective => "auto",
+                None => "off",
+            };
+            let host = if row.presence.host_available {
+                "ok"
+            } else {
+                "missing"
+            };
+            let cfg = if row.presence.container_config_present {
+                "yes"
+            } else {
+                "no"
+            };
+            let bin = if row.presence.container_binary_present {
+                "yes"
+            } else {
+                "no"
+            };
+            let state = if row.presence.container_config_present
+                && row.presence.container_binary_present
+            {
+                "on-container"
+            } else if row.presence.container_config_present || row.presence.container_binary_present
+            {
+                "partial"
+            } else {
+                "missing"
+            };
+            let last_sync = if let Some(sync) = &row.last_sync {
+                let base = if sync.warnings.is_empty() {
+                    if sync.installed {
+                        "ok+install".to_string()
+                    } else if sync.copied {
+                        "ok".to_string()
+                    } else {
+                        "skipped".to_string()
+                    }
+                } else {
+                    format!("warn({})", sync.warnings.len())
+                };
+                if row.last_sync_forced {
+                    format!("{}*", base)
+                } else {
+                    base
+                }
+            } else {
+                "-".to_string()
+            };
+            Row::new(vec![
+                Cell::from(row.presence.agent.to_string()),
+                Cell::from(enabled),
+                Cell::from(host),
+                Cell::from(cfg),
+                Cell::from(bin),
+                Cell::from(state),
+                Cell::from(last_sync),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(8),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(13),
+            Constraint::Min(10),
+        ],
+    )
+    .header(header)
+    .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+    .highlight_symbol("▶ ");
+    frame.render_stateful_widget(table, chunks[0], &mut app.agent_diagnostics_table_state);
+
+    let detail = if app.agent_diagnostics_rows.is_empty() {
+        vec![Line::from("No agent diagnostics available.")]
+    } else {
+        let idx = app
+            .agent_diagnostics_selected
+            .min(app.agent_diagnostics_rows.len() - 1);
+        let row = &app.agent_diagnostics_rows[idx];
+        let mut lines = vec![Line::from(format!("{} details:", row.presence.agent))];
+        if let Some(reason) = &row.presence.host_reason {
+            lines.push(Line::from(format!("host: {}", reason)));
+        }
+        if let Some(sync) = &row.last_sync {
+            for warning in &sync.warnings {
+                lines.push(Line::from(format!("sync: {}", warning)));
+            }
+        }
+        for warning in &row.presence.warnings {
+            lines.push(Line::from(format!("inspect: {}", warning)));
+        }
+        if lines.len() == 1 {
+            lines.push(Line::from("no warnings"));
+        }
+        lines
+    };
+
+    let detail_widget =
+        Paragraph::new(detail).block(Block::default().title(" Details ").borders(Borders::ALL));
+    frame.render_widget(detail_widget, chunks[1]);
 }

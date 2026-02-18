@@ -1,0 +1,28 @@
+---
+source: crates/devc-tui/tests/snapshot_tests.rs
+expression: output
+---
+┌ devc -┌ Agent Diagnostics - my-rust-project ─────────────────────────┐───────┐
+│ 1:Cont│  Agent    Enabled  Host     Cfg   Bin   State      Last Sync │       │
+└───────│  codex    enabled  ok       yes   yes   on-contain ok+install│───────┘
+┌ Contai│▶ cursor   disabled ok       no    no    missing    warn(1)*  │───────┐
+│No cont│                                                              │       │
+│       │                                                              │       │
+│Use 'de│                                                              │r.     │
+│       │                                                              │       │
+│Press '│                                                              │       │
+│       │                                                              │       │
+│       │                                                              │       │
+│       │┌ Details ───────────────────────────────────────────────────┐│       │
+│       ││cursor details:                                             ││       │
+│       ││sync: Node/npm not found in container image                 ││       │
+│       ││inspect: token unavailable                                  ││       │
+│       ││                                                            ││       │
+│       │└────────────────────────────────────────────────────────────┘│       │
+│       └──────────────────────────────────────────────────────────────┘       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│j/k: Select  s: Sync selected  A: Sync enabled  r: Refresh  1-3: Switch tab  q│
+└──────────────────────────────────────────────────────────────────────────────┘

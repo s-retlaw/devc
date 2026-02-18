@@ -180,6 +180,63 @@ fn test_logs_view() {
     insta::assert_snapshot!(output);
 }
 
+/// Test agent diagnostics popup overlay
+#[test]
+fn test_agent_diagnostics_popup() {
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+    app.view = View::AgentDiagnostics;
+    app.agent_diagnostics_container_name = "my-rust-project".to_string();
+    app.agent_diagnostics_title = "Agent Diagnostics - my-rust-project".to_string();
+    app.agent_diagnostics_rows = vec![
+        devc_tui::AgentPanelRow {
+            presence: devc_core::agents::AgentContainerPresence {
+                agent: devc_core::agents::AgentKind::Codex,
+                enabled_effective: true,
+                enabled_explicit: Some(true),
+                host_available: true,
+                host_reason: None,
+                container_config_present: true,
+                container_binary_present: true,
+                warnings: vec![],
+            },
+            last_sync: Some(devc_core::agents::AgentSyncResult {
+                agent: devc_core::agents::AgentKind::Codex,
+                validated: true,
+                copied: true,
+                installed: true,
+                warnings: vec![],
+            }),
+            last_sync_forced: false,
+        },
+        devc_tui::AgentPanelRow {
+            presence: devc_core::agents::AgentContainerPresence {
+                agent: devc_core::agents::AgentKind::Cursor,
+                enabled_effective: false,
+                enabled_explicit: Some(false),
+                host_available: true,
+                host_reason: None,
+                container_config_present: false,
+                container_binary_present: false,
+                warnings: vec!["token unavailable".to_string()],
+            },
+            last_sync: Some(devc_core::agents::AgentSyncResult {
+                agent: devc_core::agents::AgentKind::Cursor,
+                validated: true,
+                copied: false,
+                installed: false,
+                warnings: vec!["Node/npm not found in container image".to_string()],
+            }),
+            last_sync_forced: true,
+        },
+    ];
+    app.agent_diagnostics_selected = 1;
+    app.agent_diagnostics_table_state.select(Some(1));
+
+    let output = render_app(&mut app, 80, 24);
+    insta::assert_snapshot!(output);
+}
+
 /// Test provider detail popup overlay
 #[test]
 fn test_provider_detail_popup() {

@@ -12,7 +12,7 @@ pub use host::{
     doctor_enabled_agents, host_agent_availability, host_config_availability,
     validate_host_prerequisites, HostValidation,
 };
-pub use inject::setup_agents;
+pub use inject::{inspect_agents, setup_agents, setup_agents_with_selection};
 pub use presets::{preset_for, AgentKind, AgentPreset};
 
 /// Effective config for an enabled agent after applying preset defaults + user overrides.
@@ -47,6 +47,27 @@ pub struct HostAgentAvailability {
     pub reason: Option<String>,
 }
 
+/// Container-side presence details per agent for richer diagnostics UX.
+#[derive(Debug, Clone)]
+pub struct AgentContainerPresence {
+    pub agent: AgentKind,
+    pub enabled_effective: bool,
+    pub enabled_explicit: Option<bool>,
+    pub host_available: bool,
+    pub host_reason: Option<String>,
+    pub container_config_present: bool,
+    pub container_binary_present: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Agent selection mode for sync operations.
+#[derive(Debug, Clone)]
+pub enum AgentSyncSelection {
+    EnabledOnly,
+    Only(Vec<AgentKind>),
+    ForceOnly(Vec<AgentKind>),
+}
+
 impl AgentSyncResult {
     pub fn new(agent: AgentKind) -> Self {
         Self {
@@ -76,6 +97,29 @@ pub fn enabled_agent_configs(global_config: &GlobalConfig) -> Vec<EffectiveAgent
         .into_iter()
         .filter(|cfg| is_agent_enabled(global_config, cfg.kind, Some(cfg)))
         .collect()
+}
+
+/// Return effective configs selected for sync based on the requested scope.
+pub fn selected_agent_configs(
+    global_config: &GlobalConfig,
+    selection: &AgentSyncSelection,
+) -> Vec<EffectiveAgentConfig> {
+    let all = all_agent_configs(global_config);
+    match selection {
+        AgentSyncSelection::EnabledOnly => all
+            .into_iter()
+            .filter(|cfg| is_agent_enabled(global_config, cfg.kind, Some(cfg)))
+            .collect(),
+        AgentSyncSelection::Only(kinds) => all
+            .into_iter()
+            .filter(|cfg| kinds.contains(&cfg.kind))
+            .filter(|cfg| is_agent_enabled(global_config, cfg.kind, Some(cfg)))
+            .collect(),
+        AgentSyncSelection::ForceOnly(kinds) => all
+            .into_iter()
+            .filter(|cfg| kinds.contains(&cfg.kind))
+            .collect(),
+    }
 }
 
 /// Resolve whether an agent is enabled, honoring explicit override first and host-availability defaults.
@@ -207,5 +251,37 @@ mod tests {
         let effective = enabled_agent_configs(&config);
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].kind, AgentKind::Codex);
+    }
+
+    #[test]
+    fn test_selected_agent_configs_only_respects_enabled_state() {
+        let mut config = GlobalConfig::default();
+        config.agents.codex.enabled = Some(false);
+        config.agents.cursor.enabled = Some(true);
+        config.agents.claude.enabled = Some(false);
+        config.agents.gemini.enabled = Some(false);
+
+        let selected = selected_agent_configs(
+            &config,
+            &AgentSyncSelection::Only(vec![AgentKind::Codex, AgentKind::Cursor]),
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].kind, AgentKind::Cursor);
+    }
+
+    #[test]
+    fn test_selected_agent_configs_force_only_ignores_enabled_flag() {
+        let mut config = GlobalConfig::default();
+        config.agents.codex.enabled = Some(false);
+        config.agents.claude.enabled = Some(false);
+        config.agents.cursor.enabled = Some(false);
+        config.agents.gemini.enabled = Some(false);
+
+        let selected = selected_agent_configs(
+            &config,
+            &AgentSyncSelection::ForceOnly(vec![AgentKind::Codex]),
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].kind, AgentKind::Codex);
     }
 }

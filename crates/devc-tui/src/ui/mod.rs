@@ -127,6 +127,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame.render_widget(Clear, popup);
             draw_discover_detail(frame, app, popup);
         }
+        View::AgentDiagnostics => {
+            draw_main_content(frame, app, content_area);
+            let popup = popup_rect(80, 70, 60, 18, content_area);
+            frame.render_widget(Clear, popup);
+            draw_agent_diagnostics(frame, app, popup);
+        }
         View::Shell => {
             // Shell mode is handled before drawing - this shouldn't be reached
             // but we need to handle it for exhaustive matching

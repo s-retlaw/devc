@@ -335,6 +335,83 @@ impl ContainerManager {
         Ok(crate::agents::setup_agents(provider, &cid, &self.global_config, user.as_deref()).await)
     }
 
+    /// Set up configured agents for a running container using an explicit selection scope.
+    ///
+    /// Failures are non-fatal and returned as per-agent warnings.
+    pub async fn setup_agents_for_container_filtered(
+        &self,
+        id: &str,
+        selection: crate::agents::AgentSyncSelection,
+    ) -> Result<Vec<crate::agents::AgentSyncResult>> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        if container_state.status != DevcContainerStatus::Running {
+            return Ok(Vec::new());
+        }
+
+        let provider = self.require_container_provider(&container_state)?;
+        let container_id = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container has no container ID".to_string()))?;
+        let cid = ContainerId::new(container_id);
+
+        let user = self
+            .load_container(&container_state.config_path)
+            .ok()
+            .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()));
+
+        Ok(crate::agents::setup_agents_with_selection(
+            provider,
+            &cid,
+            &self.global_config,
+            user.as_deref(),
+            selection,
+        )
+        .await)
+    }
+
+    /// Inspect host/container agent status for all known agents on a running container.
+    pub async fn inspect_agents_for_container(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::agents::AgentContainerPresence>> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        if container_state.status != DevcContainerStatus::Running {
+            return Ok(Vec::new());
+        }
+
+        let provider = self.require_container_provider(&container_state)?;
+        let container_id = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container has no container ID".to_string()))?;
+        let cid = ContainerId::new(container_id);
+
+        let user = self
+            .load_container(&container_state.config_path)
+            .ok()
+            .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()));
+
+        Ok(
+            crate::agents::inspect_agents(provider, &cid, &self.global_config, user.as_deref())
+                .await,
+        )
+    }
+
     /// Save state to disk without holding the write lock during I/O.
     ///
     /// Serializes under a read lock, then writes to disk after releasing it.

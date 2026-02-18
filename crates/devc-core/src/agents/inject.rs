@@ -2,8 +2,8 @@ use crate::agents::host::{
     host_config_availability, resolve_container_path, validate_host_prerequisites,
 };
 use crate::agents::{
-    cursor_auth::CursorAuthResolution, enabled_agent_configs, AgentKind, AgentSyncResult,
-    EffectiveAgentConfig,
+    all_agent_configs, cursor_auth::CursorAuthResolution, is_agent_enabled, selected_agent_configs,
+    AgentContainerPresence, AgentKind, AgentSyncResult, AgentSyncSelection, EffectiveAgentConfig,
 };
 use devc_config::GlobalConfig;
 use devc_provider::{ContainerId, ContainerProvider, ExecConfig};
@@ -327,6 +327,280 @@ async fn inject_cursor_auth_file(
     Ok(())
 }
 
+fn explicit_enabled_override(global_config: &GlobalConfig, kind: AgentKind) -> Option<bool> {
+    match kind {
+        AgentKind::Codex => global_config.agents.codex.enabled,
+        AgentKind::Claude => global_config.agents.claude.enabled,
+        AgentKind::Cursor => global_config.agents.cursor.enabled,
+        AgentKind::Gemini => global_config.agents.gemini.enabled,
+    }
+}
+
+async fn probe_container_path_exists(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    target_path: &str,
+    user: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Result<bool, String> {
+    let q = shell_escape_single_quotes(target_path);
+    let script = format!("[ -e '{q}' ]");
+    exec_script(provider, container_id, &script, user, env)
+        .await
+        .map(|(code, _)| code == 0)
+        .map_err(|e| format!("Failed to inspect path '{}': {}", target_path, e))
+}
+
+/// Inspect all known agents for host availability and container-side presence.
+pub async fn inspect_agents(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    global_config: &GlobalConfig,
+    user: Option<&str>,
+) -> Vec<AgentContainerPresence> {
+    let container_home = discover_container_home(provider, container_id, user).await;
+    let mut out = Vec::new();
+
+    for cfg in all_agent_configs(global_config) {
+        let enabled_explicit = explicit_enabled_override(global_config, cfg.kind);
+        let enabled_effective = is_agent_enabled(global_config, cfg.kind, Some(&cfg));
+        let (host_available, host_reason) = host_config_availability(&cfg);
+        let validation = validate_host_prerequisites(&cfg);
+        let mut warnings = validation.warnings;
+
+        let target = resolve_container_path(&cfg.container_config_path, &container_home);
+        let container_config_present = match probe_container_path_exists(
+            provider,
+            container_id,
+            &target,
+            user,
+            &validation.forwarded_env,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warnings.push(e);
+                false
+            }
+        };
+
+        let probe_cmd = probe_script(&cfg.binary_probe);
+        let container_binary_present = match exec_script(
+            provider,
+            container_id,
+            &probe_cmd,
+            user,
+            &validation.forwarded_env,
+        )
+        .await
+        {
+            Ok((code, _)) => code == 0,
+            Err(e) => {
+                warnings.push(format!(
+                    "Failed to probe agent binary '{}': {}",
+                    cfg.binary_probe, e
+                ));
+                false
+            }
+        };
+
+        out.push(AgentContainerPresence {
+            agent: cfg.kind,
+            enabled_effective,
+            enabled_explicit,
+            host_available,
+            host_reason,
+            container_config_present,
+            container_binary_present,
+            warnings,
+        });
+    }
+
+    out
+}
+
+async fn sync_single_agent(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    user: Option<&str>,
+    container_home: &str,
+    container_user: &str,
+    cfg: &EffectiveAgentConfig,
+) -> AgentSyncResult {
+    let mut result = AgentSyncResult::new(cfg.kind);
+    let (available, reason) = host_config_availability(cfg);
+    if !available {
+        result.validated = false;
+        result.warnings.push(format!(
+            "Skipped '{}': host config not available ({})",
+            cfg.kind,
+            reason.unwrap_or_else(|| "unknown reason".to_string())
+        ));
+        return result;
+    }
+
+    let validation = validate_host_prerequisites(cfg);
+    result.validated = validation.valid;
+    result.warnings.extend(validation.warnings);
+
+    if !result.validated {
+        return result;
+    }
+
+    for (source_path, target_path) in all_sync_entries(cfg, container_home) {
+        if let Err(e) = copy_sync_entry(provider, container_id, source_path, &target_path).await {
+            result.warnings.push(e);
+        } else {
+            result.copied = true;
+            if let Err(e) =
+                apply_ownership_for_entry(provider, container_id, &target_path, container_user)
+                    .await
+            {
+                result.warnings.push(e);
+            }
+            if let Err(e) =
+                apply_permissions_for_entry(provider, container_id, source_path, &target_path).await
+            {
+                result.warnings.push(e);
+            }
+        }
+    }
+
+    if cfg.kind == AgentKind::Cursor {
+        if let Some(cursor_auth) = validation.cursor_auth.as_ref() {
+            match inject_cursor_auth_file(
+                provider,
+                container_id,
+                container_home,
+                container_user,
+                cursor_auth,
+            )
+            .await
+            {
+                Ok(()) => {
+                    result.copied = true;
+                    tracing::debug!(
+                        "Cursor auth materialized from {}",
+                        cursor_auth.source.as_str()
+                    );
+                }
+                Err(e) => result.warnings.push(format!(
+                    "Failed to inject Cursor auth.json from {}: {}",
+                    cursor_auth.source.as_str(),
+                    e
+                )),
+            }
+        } else {
+            result
+                .warnings
+                .push("Cursor token resolution unavailable; skipped ~/.config/cursor/auth.json materialization".to_string());
+        }
+    }
+
+    if !result.copied {
+        return result;
+    }
+
+    if let Err(e) =
+        ensure_local_bin_path(provider, container_id, user, &validation.forwarded_env).await
+    {
+        result.warnings.push(e);
+    }
+
+    let probe_cmd = probe_script(&cfg.binary_probe);
+    let probe_exit = match exec_script(
+        provider,
+        container_id,
+        &probe_cmd,
+        user,
+        &validation.forwarded_env,
+    )
+    .await
+    {
+        Ok((code, _)) => code,
+        Err(e) => {
+            result.warnings.push(format!(
+                "Failed to probe agent binary '{}': {}",
+                cfg.binary_probe, e
+            ));
+            return result;
+        }
+    };
+
+    if probe_exit == 0 {
+        result.installed = false;
+        return result;
+    }
+
+    let can_install =
+        match node_npm_available(provider, container_id, user, &validation.forwarded_env).await {
+            Ok(v) => v,
+            Err(e) => {
+                result.warnings.push(e);
+                false
+            }
+        };
+    if !can_install {
+        result.warnings.push(format!(
+            "Install skipped for '{}': Node/npm not found in container image",
+            cfg.kind
+        ));
+        return result;
+    }
+
+    match run_install_with_fallbacks(provider, container_id, cfg, user, &validation.forwarded_env)
+        .await
+    {
+        Ok(true) => result.installed = true,
+        Ok(false) => result.warnings.push(format!(
+            "Install completed but '{}' binary is still unavailable",
+            cfg.kind
+        )),
+        Err(e) => result
+            .warnings
+            .push(format!("Install failed for '{}': {}", cfg.kind, e)),
+    }
+
+    result
+}
+
+/// Sync agents into a running container using explicit selection semantics.
+///
+/// Failures are converted into warnings per-agent; this function is best-effort.
+pub async fn setup_agents_with_selection(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    global_config: &GlobalConfig,
+    user: Option<&str>,
+    selection: AgentSyncSelection,
+) -> Vec<AgentSyncResult> {
+    let mut results = Vec::new();
+    let selected = selected_agent_configs(global_config, &selection);
+    if selected.is_empty() {
+        return results;
+    }
+
+    let container_home = discover_container_home(provider, container_id, user).await;
+    let container_user = discover_container_user(provider, container_id, user).await;
+
+    for cfg in &selected {
+        results.push(
+            sync_single_agent(
+                provider,
+                container_id,
+                user,
+                &container_home,
+                &container_user,
+                cfg,
+            )
+            .await,
+        );
+    }
+
+    results
+}
+
 /// Sync enabled agents into a running container.
 ///
 /// Failures are converted into warnings per-agent; this function is best-effort.
@@ -336,169 +610,14 @@ pub async fn setup_agents(
     global_config: &GlobalConfig,
     user: Option<&str>,
 ) -> Vec<AgentSyncResult> {
-    let mut results = Vec::new();
-    let enabled = enabled_agent_configs(global_config);
-
-    if enabled.is_empty() {
-        return results;
-    }
-
-    let container_home = discover_container_home(provider, container_id, user).await;
-    let container_user = discover_container_user(provider, container_id, user).await;
-    for cfg in enabled {
-        let mut result = AgentSyncResult::new(cfg.kind);
-        let (available, reason) = host_config_availability(&cfg);
-        if !available {
-            result.validated = false;
-            result.warnings.push(format!(
-                "Skipped '{}': host config not available ({})",
-                cfg.kind,
-                reason.unwrap_or_else(|| "unknown reason".to_string())
-            ));
-            results.push(result);
-            continue;
-        }
-
-        let validation = validate_host_prerequisites(&cfg);
-        result.validated = validation.valid;
-        result.warnings.extend(validation.warnings);
-
-        if !result.validated {
-            results.push(result);
-            continue;
-        }
-
-        for (source_path, target_path) in all_sync_entries(&cfg, &container_home) {
-            if let Err(e) = copy_sync_entry(provider, container_id, source_path, &target_path).await
-            {
-                result.warnings.push(e);
-            } else {
-                result.copied = true;
-                if let Err(e) =
-                    apply_ownership_for_entry(provider, container_id, &target_path, &container_user)
-                        .await
-                {
-                    result.warnings.push(e);
-                }
-                if let Err(e) =
-                    apply_permissions_for_entry(provider, container_id, source_path, &target_path)
-                        .await
-                {
-                    result.warnings.push(e);
-                }
-            }
-        }
-
-        if cfg.kind == AgentKind::Cursor {
-            if let Some(cursor_auth) = validation.cursor_auth.as_ref() {
-                match inject_cursor_auth_file(
-                    provider,
-                    container_id,
-                    &container_home,
-                    &container_user,
-                    cursor_auth,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        result.copied = true;
-                        tracing::debug!(
-                            "Cursor auth materialized from {}",
-                            cursor_auth.source.as_str()
-                        );
-                    }
-                    Err(e) => result.warnings.push(format!(
-                        "Failed to inject Cursor auth.json from {}: {}",
-                        cursor_auth.source.as_str(),
-                        e
-                    )),
-                }
-            } else {
-                result
-                    .warnings
-                    .push("Cursor token resolution unavailable; skipped ~/.config/cursor/auth.json materialization".to_string());
-            }
-        }
-
-        if !result.copied {
-            results.push(result);
-            continue;
-        }
-
-        if let Err(e) =
-            ensure_local_bin_path(provider, container_id, user, &validation.forwarded_env).await
-        {
-            result.warnings.push(e);
-        }
-
-        let probe_cmd = probe_script(&cfg.binary_probe);
-        let probe_exit = match exec_script(
-            provider,
-            container_id,
-            &probe_cmd,
-            user,
-            &validation.forwarded_env,
-        )
-        .await
-        {
-            Ok((code, _)) => code,
-            Err(e) => {
-                result.warnings.push(format!(
-                    "Failed to probe agent binary '{}': {}",
-                    cfg.binary_probe, e
-                ));
-                results.push(result);
-                continue;
-            }
-        };
-
-        if probe_exit == 0 {
-            result.installed = false;
-            results.push(result);
-            continue;
-        }
-
-        let can_install =
-            match node_npm_available(provider, container_id, user, &validation.forwarded_env).await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    result.warnings.push(e);
-                    false
-                }
-            };
-        if !can_install {
-            result.warnings.push(format!(
-                "Install skipped for '{}': Node/npm not found in container image",
-                cfg.kind
-            ));
-            results.push(result);
-            continue;
-        }
-
-        match run_install_with_fallbacks(
-            provider,
-            container_id,
-            &cfg,
-            user,
-            &validation.forwarded_env,
-        )
-        .await
-        {
-            Ok(true) => result.installed = true,
-            Ok(false) => result.warnings.push(format!(
-                "Install completed but '{}' binary is still unavailable",
-                cfg.kind
-            )),
-            Err(e) => result
-                .warnings
-                .push(format!("Install failed for '{}': {}", cfg.kind, e)),
-        }
-
-        results.push(result);
-    }
-
-    results
+    setup_agents_with_selection(
+        provider,
+        container_id,
+        global_config,
+        user,
+        AgentSyncSelection::EnabledOnly,
+    )
+    .await
 }
 
 #[cfg(test)]

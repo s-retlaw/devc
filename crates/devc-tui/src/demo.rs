@@ -170,6 +170,7 @@ impl DemoApp {
             crate::app::View::Ports => self.draw_dashboard(frame, chunks[1]), // Not implemented in demo
             crate::app::View::Shell => self.draw_dashboard(frame, chunks[1]), // Shell mode handled differently
             crate::app::View::DiscoverDetail => self.draw_dashboard(frame, chunks[1]), // Not implemented in demo
+            crate::app::View::AgentDiagnostics => self.draw_dashboard(frame, chunks[1]), // Not implemented in demo
             crate::app::View::Confirm => {
                 self.draw_dashboard(frame, chunks[1]);
                 self.draw_confirm(frame, area);

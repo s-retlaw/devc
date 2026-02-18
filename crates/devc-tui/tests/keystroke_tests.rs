@@ -425,3 +425,81 @@ async fn test_compose_detail_service_navigation() {
         "j should wrap around to first service"
     );
 }
+
+#[tokio::test]
+async fn test_agent_sync_requires_running_container() {
+    let mut app = App::new_for_testing();
+    app.containers = vec![App::create_test_container(
+        "python-api",
+        DevcContainerStatus::Stopped,
+    )];
+    app.selected = 0;
+    app.containers_table_state.select(Some(0));
+
+    app.send_key(KeyCode::Char('a'), KeyModifiers::NONE)
+        .await
+        .unwrap();
+
+    assert_eq!(app.view, View::Main);
+    assert!(!app.loading);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Container must be running to manage agents")
+    );
+}
+
+#[tokio::test]
+async fn test_agent_diagnostics_view_scroll_keys() {
+    let mut app = App::new_for_testing();
+    app.view = View::AgentDiagnostics;
+    app.agent_diagnostics_rows = vec![
+        devc_tui::AgentPanelRow {
+            presence: devc_core::agents::AgentContainerPresence {
+                agent: devc_core::agents::AgentKind::Codex,
+                enabled_effective: true,
+                enabled_explicit: Some(true),
+                host_available: true,
+                host_reason: None,
+                container_config_present: true,
+                container_binary_present: true,
+                warnings: vec![],
+            },
+            last_sync: None,
+            last_sync_forced: false,
+        },
+        devc_tui::AgentPanelRow {
+            presence: devc_core::agents::AgentContainerPresence {
+                agent: devc_core::agents::AgentKind::Cursor,
+                enabled_effective: true,
+                enabled_explicit: Some(true),
+                host_available: true,
+                host_reason: None,
+                container_config_present: false,
+                container_binary_present: false,
+                warnings: vec!["Node/npm not found".to_string()],
+            },
+            last_sync: None,
+            last_sync_forced: false,
+        },
+    ];
+    app.agent_diagnostics_selected = 0;
+    app.agent_diagnostics_table_state.select(Some(0));
+
+    app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.agent_diagnostics_selected, 1);
+
+    app.send_key(KeyCode::Char('G'), KeyModifiers::SHIFT)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.agent_diagnostics_selected,
+        app.agent_diagnostics_rows.len() - 1
+    );
+
+    app.send_key(KeyCode::Char('g'), KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.agent_diagnostics_selected, 0);
+}
