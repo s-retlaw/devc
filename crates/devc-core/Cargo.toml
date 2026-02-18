@@ -24,6 +24,7 @@ tempfile = { workspace = true }
 reqwest = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [features]
 test-support = []

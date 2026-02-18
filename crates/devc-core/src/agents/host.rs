@@ -1,6 +1,7 @@
 use crate::agents::{
-    all_agent_configs, enabled_agent_configs, AgentSyncResult, EffectiveAgentConfig,
-    HostAgentAvailability,
+    all_agent_configs,
+    cursor_auth::{resolve_cursor_tokens, CursorAuthResolution},
+    enabled_agent_configs, AgentKind, AgentSyncResult, EffectiveAgentConfig, HostAgentAvailability,
 };
 use devc_config::GlobalConfig;
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ pub struct HostValidation {
     pub valid: bool,
     pub warnings: Vec<String>,
     pub forwarded_env: HashMap<String, String>,
+    pub cursor_auth: Option<CursorAuthResolution>,
 }
 
 /// Expand `~/...` against current HOME for host paths.
@@ -43,6 +45,9 @@ fn is_readable(path: &Path) -> bool {
 /// Determine whether the primary host config path for an agent is available.
 pub fn host_config_availability(cfg: &EffectiveAgentConfig) -> (bool, Option<String>) {
     if !cfg.host_config_path.exists() {
+        if cfg.kind == AgentKind::Cursor && resolve_cursor_tokens().is_ok() {
+            return (true, None);
+        }
         return (
             false,
             Some(format!(
@@ -52,6 +57,9 @@ pub fn host_config_availability(cfg: &EffectiveAgentConfig) -> (bool, Option<Str
         );
     }
     if !is_readable(&cfg.host_config_path) {
+        if cfg.kind == AgentKind::Cursor && resolve_cursor_tokens().is_ok() {
+            return (true, None);
+        }
         return (
             false,
             Some(format!(
@@ -68,19 +76,34 @@ pub fn validate_host_prerequisites(cfg: &EffectiveAgentConfig) -> HostValidation
     let mut warnings = Vec::new();
     let mut forwarded_env = HashMap::new();
     let mut has_blocking_issue = false;
+    let mut cursor_auth = None;
 
     if !cfg.host_config_path.exists() {
-        warnings.push(format!(
-            "Host config path is missing: {}",
-            cfg.host_config_path.display()
-        ));
-        has_blocking_issue = true;
+        if cfg.kind == AgentKind::Cursor {
+            warnings.push(format!(
+                "Host config path is missing (continuing with Cursor token resolution): {}",
+                cfg.host_config_path.display()
+            ));
+        } else {
+            warnings.push(format!(
+                "Host config path is missing: {}",
+                cfg.host_config_path.display()
+            ));
+            has_blocking_issue = true;
+        }
     } else if !is_readable(&cfg.host_config_path) {
-        warnings.push(format!(
-            "Host config path is not readable: {}",
-            cfg.host_config_path.display()
-        ));
-        has_blocking_issue = true;
+        if cfg.kind == AgentKind::Cursor {
+            warnings.push(format!(
+                "Host config path is not readable (continuing with Cursor token resolution): {}",
+                cfg.host_config_path.display()
+            ));
+        } else {
+            warnings.push(format!(
+                "Host config path is not readable: {}",
+                cfg.host_config_path.display()
+            ));
+            has_blocking_issue = true;
+        }
     }
 
     for (extra_host_path, _) in &cfg.extra_sync_paths {
@@ -121,10 +144,20 @@ pub fn validate_host_prerequisites(cfg: &EffectiveAgentConfig) -> HostValidation
         }
     }
 
+    if cfg.kind == AgentKind::Cursor {
+        match resolve_cursor_tokens() {
+            Ok(resolution) => {
+                cursor_auth = Some(resolution);
+            }
+            Err(e) => warnings.push(format!("Cursor token resolution failed: {}", e)),
+        }
+    }
+
     HostValidation {
         valid: !has_blocking_issue,
         warnings,
         forwarded_env,
+        cursor_auth,
     }
 }
 
@@ -161,6 +194,9 @@ pub fn doctor_enabled_agents(global_config: &GlobalConfig) -> Vec<AgentSyncResul
 mod tests {
     use super::*;
     use crate::agents::AgentKind;
+    use std::sync::Mutex;
+
+    static HOME_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_resolve_container_path_with_home_marker() {
@@ -216,5 +252,46 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("host config missing"));
+    }
+
+    #[test]
+    fn test_cursor_host_availability_uses_resolved_tokens() {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cursor_cfg_dir = home.join(".config/cursor");
+        std::fs::create_dir_all(&cursor_cfg_dir).unwrap();
+        std::fs::write(
+            cursor_cfg_dir.join("auth.json"),
+            r#"{"authToken":"a-token","refreshToken":"r-token"}"#,
+        )
+        .unwrap();
+        let old_home = std::env::var("HOME").ok();
+        // SAFETY: test-local HOME override; restored before test exits.
+        unsafe { std::env::set_var("HOME", home.display().to_string()) };
+
+        let cfg = EffectiveAgentConfig {
+            kind: AgentKind::Cursor,
+            host_config_path: PathBuf::from("/tmp/devc-cursor-missing-dir"),
+            container_config_path: "~/.cursor".to_string(),
+            extra_sync_paths: Vec::new(),
+            npm_package: Some("@cursor/agent".to_string()),
+            env_forward: Vec::new(),
+            required_env_keys: Vec::new(),
+            binary_probe: "cursor-agent".to_string(),
+            install_command: "echo install".to_string(),
+        };
+
+        let (available, reason) = host_config_availability(&cfg);
+        if let Some(old) = old_home {
+            // SAFETY: restore HOME after test.
+            unsafe { std::env::set_var("HOME", old) };
+        } else {
+            // SAFETY: restore HOME to unset state after test.
+            unsafe { std::env::remove_var("HOME") };
+        }
+
+        assert!(available);
+        assert!(reason.is_none());
     }
 }

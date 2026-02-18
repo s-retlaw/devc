@@ -250,6 +250,14 @@ impl ContainerManager {
         &self.global_config
     }
 
+    /// Replace the manager's in-memory global config snapshot.
+    ///
+    /// This allows long-lived clients (like the TUI) to apply freshly saved
+    /// settings without recreating the manager.
+    pub fn update_global_config(&mut self, global_config: GlobalConfig) {
+        self.global_config = global_config;
+    }
+
     /// Set up credential forwarding for a container and return status.
     ///
     /// This is idempotent — safe to call before every shell/exec.
@@ -1326,6 +1334,21 @@ mod tests {
             "err".to_string(),
         );
         assert_eq!(mgr.provider_type(), None);
+    }
+
+    #[tokio::test]
+    async fn test_update_global_config_replaces_manager_snapshot() {
+        let mock = MockProvider::new(ProviderType::Docker);
+        let mut mgr = test_manager(mock);
+        assert_ne!(mgr.global_config().agents.cursor.enabled, Some(false));
+
+        let mut updated = mgr.global_config().clone();
+        updated.agents.cursor.enabled = Some(false);
+        updated.credentials.git = false;
+        mgr.update_global_config(updated);
+
+        assert_eq!(mgr.global_config().agents.cursor.enabled, Some(false));
+        assert!(!mgr.global_config().credentials.git);
     }
 
     // ==================== Init ====================
@@ -2569,11 +2592,16 @@ mod tests {
             .collect()
     }
 
-    /// Extract the shell command string from an Exec call like ["/bin/sh", "-c", "echo foo"]
+    /// Extract the shell command string from an Exec call like
+    /// ["/bin/sh", "-c", "echo foo"] or ["/bin/sh", "-lc", "echo foo"].
     fn shell_cmd(cmd: &[String]) -> &str {
         assert_eq!(cmd.len(), 3);
         assert_eq!(cmd[0], "/bin/sh");
-        assert_eq!(cmd[1], "-c");
+        assert!(
+            cmd[1] == "-c" || cmd[1] == "-lc",
+            "expected /bin/sh with -c or -lc, got: {:?}",
+            cmd
+        );
         &cmd[2]
     }
 
@@ -3486,9 +3514,17 @@ mod tests {
         mgr.up(&id).await.unwrap();
 
         let recorded = calls.lock().unwrap();
-        // All lifecycle Exec calls should have working_dir set to /workspace/project
+        // Only lifecycle Exec calls should have working_dir set to workspaceFolder.
+        // Other Exec calls (e.g. agent setup) may run as root with no working_dir.
         for call in recorded.iter() {
-            if let MockCall::Exec { working_dir, .. } = call {
+            if let MockCall::Exec {
+                cmd, working_dir, ..
+            } = call
+            {
+                let shell = shell_cmd(cmd);
+                if !(shell.starts_with("echo feat-") || shell.starts_with("echo dc-")) {
+                    continue;
+                }
                 assert_eq!(
                     working_dir.as_deref(),
                     Some("/workspace/project"),
@@ -3519,9 +3555,14 @@ mod tests {
         mgr.up(&id).await.unwrap();
 
         let recorded = calls.lock().unwrap();
-        // All lifecycle Exec calls should have user set to "devuser"
+        // Only lifecycle Exec calls should use remoteUser.
+        // Other Exec calls (e.g. agent setup) can run as root.
         for call in recorded.iter() {
-            if let MockCall::Exec { user, .. } = call {
+            if let MockCall::Exec { cmd, user, .. } = call {
+                let shell = shell_cmd(cmd);
+                if !(shell.starts_with("echo feat-") || shell.starts_with("echo dc-")) {
+                    continue;
+                }
                 assert_eq!(
                     user.as_deref(),
                     Some("devuser"),

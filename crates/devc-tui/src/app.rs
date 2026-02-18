@@ -1707,6 +1707,7 @@ impl App {
                 if let Err(e) = self.config.save() {
                     self.status_message = Some(format!("Failed to save: {}", e));
                 } else {
+                    self.sync_manager_config_from_app().await;
                     self.status_message = Some("Provider settings saved".to_string());
                 }
             }
@@ -1826,6 +1827,7 @@ impl App {
                     if let Err(e) = self.config.save() {
                         self.status_message = Some(format!("Failed to save: {}", e));
                     } else {
+                        self.sync_manager_config_from_app().await;
                         self.provider_detail_state.dirty = false;
                         self.status_message = Some("Provider settings saved".to_string());
                     }
@@ -1886,6 +1888,7 @@ impl App {
                     if let Err(e) = self.config.save() {
                         self.status_message = Some(format!("Failed to save: {}", e));
                     } else {
+                        self.sync_manager_config_from_app().await;
                         self.status_message = Some("Settings saved".to_string());
                         self.settings_state.saved = self.settings_state.draft.clone();
                     }
@@ -3322,6 +3325,7 @@ impl App {
                 if let Err(e) = self.config.save() {
                     self.status_message = Some(format!("Failed to save: {}", e));
                 } else {
+                    self.sync_manager_config_from_app().await;
                     self.status_message =
                         Some(format!("{} set as default provider", provider_name));
 
@@ -3397,6 +3401,12 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Push the current app config into the live manager snapshot.
+    async fn sync_manager_config_from_app(&self) {
+        let mut manager = self.manager.write().await;
+        manager.update_global_config(self.config.clone());
     }
 
     /// Get the currently selected container
@@ -3634,5 +3644,18 @@ mod tests {
         assert_eq!(app.compose_state.selected_service, 0);
         app.move_compose_service_selection(-1);
         assert_eq!(app.compose_state.selected_service, 0);
+    }
+
+    #[tokio::test]
+    async fn test_sync_manager_config_from_app_updates_live_manager_config() {
+        let mut app = App::new_for_testing();
+        app.config.agents.cursor.enabled = Some(false);
+        app.config.credentials.git = false;
+
+        app.sync_manager_config_from_app().await;
+
+        let manager = app.manager.read().await;
+        assert_eq!(manager.global_config().agents.cursor.enabled, Some(false));
+        assert!(!manager.global_config().credentials.git);
     }
 }

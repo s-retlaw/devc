@@ -1,7 +1,10 @@
 use crate::agents::host::{
     host_config_availability, resolve_container_path, validate_host_prerequisites,
 };
-use crate::agents::{enabled_agent_configs, AgentSyncResult, EffectiveAgentConfig};
+use crate::agents::{
+    cursor_auth::CursorAuthResolution, enabled_agent_configs, AgentKind, AgentSyncResult,
+    EffectiveAgentConfig,
+};
 use devc_config::GlobalConfig;
 use devc_provider::{ContainerId, ContainerProvider, ExecConfig};
 use std::collections::HashMap;
@@ -122,7 +125,7 @@ async fn apply_ownership_for_entry(
 }
 
 fn file_mode_for_name(name: &str) -> Option<&'static str> {
-    if name == ".credentials.json" || name == ".claude.json" {
+    if name == ".credentials.json" || name == ".claude.json" || name == "auth.json" {
         Some("600")
     } else if name == "settings.json" {
         Some("644")
@@ -299,6 +302,31 @@ fn all_sync_entries<'a>(
     entries
 }
 
+async fn inject_cursor_auth_file(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    container_home: &str,
+    container_user: &str,
+    cursor_auth: &CursorAuthResolution,
+) -> Result<(), String> {
+    let tmp = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let auth_file = tmp.path().join("auth.json");
+    let payload = serde_json::json!({
+        "authToken": cursor_auth.tokens.auth_token,
+        "refreshToken": cursor_auth.tokens.refresh_token,
+    });
+    let bytes = serde_json::to_vec(&payload)
+        .map_err(|e| format!("Failed to build Cursor auth json: {}", e))?;
+    std::fs::write(&auth_file, bytes)
+        .map_err(|e| format!("Failed to write temp Cursor auth file: {}", e))?;
+
+    let target = resolve_container_path("~/.config/cursor/auth.json", container_home);
+    copy_sync_entry(provider, container_id, &auth_file, &target).await?;
+    apply_ownership_for_entry(provider, container_id, &target, container_user).await?;
+    apply_permissions_for_entry(provider, container_id, &auth_file, &target).await?;
+    Ok(())
+}
+
 /// Sync enabled agents into a running container.
 ///
 /// Failures are converted into warnings per-agent; this function is best-effort.
@@ -358,6 +386,37 @@ pub async fn setup_agents(
                 {
                     result.warnings.push(e);
                 }
+            }
+        }
+
+        if cfg.kind == AgentKind::Cursor {
+            if let Some(cursor_auth) = validation.cursor_auth.as_ref() {
+                match inject_cursor_auth_file(
+                    provider,
+                    container_id,
+                    &container_home,
+                    &container_user,
+                    cursor_auth,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        result.copied = true;
+                        tracing::debug!(
+                            "Cursor auth materialized from {}",
+                            cursor_auth.source.as_str()
+                        );
+                    }
+                    Err(e) => result.warnings.push(format!(
+                        "Failed to inject Cursor auth.json from {}: {}",
+                        cursor_auth.source.as_str(),
+                        e
+                    )),
+                }
+            } else {
+                result
+                    .warnings
+                    .push("Cursor token resolution unavailable; skipped ~/.config/cursor/auth.json materialization".to_string());
             }
         }
 
@@ -447,6 +506,9 @@ mod tests {
     use super::*;
     use crate::test_support::{MockCall, MockProvider};
     use devc_provider::ProviderType;
+    use std::sync::Mutex;
+
+    static HOME_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn test_setup_agents_install_if_missing() {
@@ -552,6 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_setup_agents_claude_copies_primary_and_extra_paths() {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let claude_dir = home.join(".claude");
@@ -593,6 +656,9 @@ mod tests {
         if let Some(old) = old_home {
             // SAFETY: restore HOME after test.
             unsafe { std::env::set_var("HOME", old) };
+        } else {
+            // SAFETY: restore HOME to unset state after test.
+            unsafe { std::env::remove_var("HOME") };
         }
 
         assert_eq!(results.len(), 1);
@@ -723,6 +789,88 @@ mod tests {
                 .iter()
                 .any(|cmd| cmd.iter().any(|s| s.contains("should-not-run"))),
             "install override should not run when Node/npm are missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_setup_agents_cursor_materializes_config_auth_json() {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cursor_host = home.join(".cursor");
+        std::fs::create_dir_all(&cursor_host).unwrap();
+        std::fs::write(cursor_host.join("settings.json"), "{}").unwrap();
+        let cursor_cfg = home.join(".config/cursor");
+        std::fs::create_dir_all(&cursor_cfg).unwrap();
+        std::fs::write(
+            cursor_cfg.join("auth.json"),
+            r#"{"authToken":"a-token","refreshToken":"r-token"}"#,
+        )
+        .unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        // SAFETY: test-local HOME override for token resolution, restored below.
+        unsafe { std::env::set_var("HOME", home.display().to_string()) };
+
+        let mut cfg = GlobalConfig::default();
+        cfg.agents.cursor.enabled = Some(true);
+        cfg.agents.codex.enabled = Some(false);
+        cfg.agents.claude.enabled = Some(false);
+        cfg.agents.gemini.enabled = Some(false);
+        cfg.agents.cursor.host_config_path = Some(cursor_host.display().to_string());
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "/root".to_string())); // HOME probe
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "root".to_string())); // user probe
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir for ~/.cursor
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown for ~/.cursor
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod for ~/.cursor
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir for ~/.config/cursor
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown for auth.json
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod for auth.json
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // PATH bootstrap
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // binary probe succeeds
+
+        let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("root")).await;
+        if let Some(old) = old_home {
+            // SAFETY: restore HOME after test.
+            unsafe { std::env::set_var("HOME", old) };
+        } else {
+            // SAFETY: restore HOME to unset state after test.
+            unsafe { std::env::remove_var("HOME") };
+        }
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].copied);
+        assert!(
+            !results[0]
+                .warnings
+                .iter()
+                .any(|w| w.contains("Cursor token resolution failed")),
+            "unexpected token resolution warning: {:?}",
+            results[0].warnings
+        );
+
+        let calls = mock.get_calls();
+        let copy_dests: Vec<String> = calls
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::CopyInto { dest, .. } => Some(dest.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            copy_dests
+                .iter()
+                .any(|d| d.ends_with("/.config/cursor/auth.json")),
+            "expected cursor auth.json to be copied; got {:?}",
+            copy_dests
         );
     }
 }

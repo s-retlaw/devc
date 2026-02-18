@@ -1,5 +1,6 @@
 //! Agent injection orchestration and host/container sync helpers.
 
+mod cursor_auth;
 mod host;
 mod inject;
 mod presets;
