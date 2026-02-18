@@ -312,10 +312,10 @@ async fn inject_cursor_auth_file(
     let tmp = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let auth_file = tmp.path().join("auth.json");
     let payload = serde_json::json!({
-        "authToken": cursor_auth.tokens.auth_token,
+        "accessToken": cursor_auth.tokens.auth_token,
         "refreshToken": cursor_auth.tokens.refresh_token,
     });
-    let bytes = serde_json::to_vec(&payload)
+    let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|e| format!("Failed to build Cursor auth json: {}", e))?;
     std::fs::write(&auth_file, bytes)
         .map_err(|e| format!("Failed to write temp Cursor auth file: {}", e))?;
@@ -804,7 +804,7 @@ mod tests {
         std::fs::create_dir_all(&cursor_cfg).unwrap();
         std::fs::write(
             cursor_cfg.join("auth.json"),
-            r#"{"authToken":"a-token","refreshToken":"r-token"}"#,
+            r#"{"accessToken":"a-token","refreshToken":"r-token"}"#,
         )
         .unwrap();
 

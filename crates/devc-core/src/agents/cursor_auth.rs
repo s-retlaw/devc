@@ -278,7 +278,7 @@ fn wsl_windows_profile_paths(_suffix: &str) -> Vec<PathBuf> {
 
 #[derive(Debug, Deserialize)]
 struct AuthJson {
-    #[serde(rename = "authToken")]
+    #[serde(rename = "accessToken")]
     auth_token: Option<String>,
     #[serde(rename = "refreshToken")]
     refresh_token: Option<String>,
@@ -444,7 +444,7 @@ mod tests {
         let path = tmp.path().join("auth.json");
         std::fs::write(
             &path,
-            r#"{"authToken":"auth-token-123","refreshToken":"refresh-token-456"}"#,
+            r#"{"accessToken":"auth-token-123","refreshToken":"refresh-token-456"}"#,
         )
         .unwrap();
 

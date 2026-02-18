@@ -263,7 +263,7 @@ mod tests {
         std::fs::create_dir_all(&cursor_cfg_dir).unwrap();
         std::fs::write(
             cursor_cfg_dir.join("auth.json"),
-            r#"{"authToken":"a-token","refreshToken":"r-token"}"#,
+            r#"{"accessToken":"a-token","refreshToken":"r-token"}"#,
         )
         .unwrap();
         let old_home = std::env::var("HOME").ok();
