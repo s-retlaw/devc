@@ -545,7 +545,9 @@ impl ContainerProvider for CliProvider {
     }
 
     async fn inspect(&self, id: &ContainerId) -> Result<ContainerDetails> {
-        let output = self.run_cmd(&["inspect", "--format=json", &id.0]).await?;
+        // Use native runtime JSON output. Docker/Podman both return JSON here
+        // (typically an array for one ID), and this is more portable than template mode.
+        let output = self.run_cmd(&["inspect", &id.0]).await?;
         parse_inspect_output(&output, id)
     }
 
@@ -779,14 +781,36 @@ fn parse_list_output(output: &str) -> Vec<ContainerInfo> {
     containers
 }
 
-/// Parse JSON output of `docker/podman inspect --format=json` into ContainerDetails
+/// Parse JSON output of `docker/podman inspect` into ContainerDetails.
+/// Accepts either the common array form (`[ {...} ]`) or a single object.
 fn parse_inspect_output(output: &str, id: &ContainerId) -> Result<ContainerDetails> {
-    let inspect: Vec<serde_json::Value> = serde_json::from_str(output)
-        .map_err(|e: serde_json::Error| ProviderError::RuntimeError(e.to_string()))?;
+    let trimmed = output.trim();
+    let parsed: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e: serde_json::Error| {
+            let preview = trimmed
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect::<String>();
+            ProviderError::RuntimeError(format!(
+                "inspect output was not valid JSON: {} (output preview: {:?})",
+                e, preview
+            ))
+        })?;
 
-    let info = inspect
-        .first()
-        .ok_or_else(|| ProviderError::ContainerNotFound(id.0.clone()))?;
+    let info = match &parsed {
+        serde_json::Value::Array(items) => items
+            .first()
+            .ok_or_else(|| ProviderError::ContainerNotFound(id.0.clone()))?,
+        serde_json::Value::Object(_) => &parsed,
+        _ => {
+            return Err(ProviderError::RuntimeError(
+                "inspect JSON must be an object or array".to_string(),
+            ));
+        }
+    };
 
     let state = info.get("State").and_then(serde_json::Value::as_object);
     let config = info.get("Config").and_then(serde_json::Value::as_object);
@@ -1544,6 +1568,23 @@ mod tests {
         assert!(details.mounts.is_empty());
         assert!(details.ports.is_empty());
         assert_eq!(details.exit_code, None);
+    }
+
+    #[test]
+    fn test_parse_inspect_single_object_form() {
+        // Some runtimes/tools may return a single object instead of an array.
+        let output = r#"{
+            "Id": "obj123",
+            "Name": "/obj-container",
+            "State": { "Status": "running" },
+            "Config": { "Image": "alpine:3.20" }
+        }"#;
+
+        let id = ContainerId::new("obj123");
+        let details = parse_inspect_output(output, &id).unwrap();
+        assert_eq!(details.name, "obj-container");
+        assert_eq!(details.status, ContainerStatus::Running);
+        assert_eq!(details.image, "alpine:3.20");
     }
 
     #[test]
