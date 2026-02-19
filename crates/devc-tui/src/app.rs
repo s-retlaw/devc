@@ -1914,11 +1914,20 @@ impl App {
 
             // Save changes (for socket path edits)
             KeyCode::Char('s') => {
-                if let Err(e) = self.config.save() {
-                    self.status_message = Some(format!("Failed to save: {}", e));
-                } else {
-                    self.sync_manager_config_from_app().await;
-                    self.status_message = Some("Provider settings saved".to_string());
+                let docker_socket = self.config.providers.docker.socket.clone();
+                let podman_socket = self.config.providers.podman.socket.clone();
+                match GlobalConfig::update_atomically(|cfg| {
+                    cfg.providers.docker.socket = docker_socket;
+                    cfg.providers.podman.socket = podman_socket;
+                }) {
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to save: {}", e));
+                    }
+                    Ok(updated) => {
+                        self.config = updated;
+                        self.sync_manager_config_from_app().await;
+                        self.status_message = Some("Provider settings saved".to_string());
+                    }
                 }
             }
 
@@ -2034,12 +2043,21 @@ impl App {
 
                 // Save changes
                 KeyCode::Char('s') => {
-                    if let Err(e) = self.config.save() {
-                        self.status_message = Some(format!("Failed to save: {}", e));
-                    } else {
-                        self.sync_manager_config_from_app().await;
-                        self.provider_detail_state.dirty = false;
-                        self.status_message = Some("Provider settings saved".to_string());
+                    let docker_socket = self.config.providers.docker.socket.clone();
+                    let podman_socket = self.config.providers.podman.socket.clone();
+                    match GlobalConfig::update_atomically(|cfg| {
+                        cfg.providers.docker.socket = docker_socket;
+                        cfg.providers.podman.socket = podman_socket;
+                    }) {
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to save: {}", e));
+                        }
+                        Ok(updated) => {
+                            self.config = updated;
+                            self.sync_manager_config_from_app().await;
+                            self.provider_detail_state.dirty = false;
+                            self.status_message = Some("Provider settings saved".to_string());
+                        }
                     }
                 }
 
@@ -2094,13 +2112,23 @@ impl App {
                 }
                 KeyCode::Char('s') => {
                     // Save settings
-                    self.settings_state.apply_to_config(&mut self.config);
-                    if let Err(e) = self.config.save() {
-                        self.status_message = Some(format!("Failed to save: {}", e));
-                    } else {
-                        self.sync_manager_config_from_app().await;
-                        self.status_message = Some("Settings saved".to_string());
-                        self.settings_state.saved = self.settings_state.draft.clone();
+                    let draft = self.settings_state.draft.clone();
+                    let availability = self.settings_state.agent_availability.clone();
+                    match GlobalConfig::update_atomically(|cfg| {
+                        let mut state = SettingsState::new(cfg);
+                        state.draft = draft.clone();
+                        state.agent_availability = availability.clone();
+                        state.apply_to_config(cfg);
+                    }) {
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to save: {}", e));
+                        }
+                        Ok(updated) => {
+                            self.config = updated;
+                            self.sync_manager_config_from_app().await;
+                            self.status_message = Some("Settings saved".to_string());
+                            self.settings_state.saved = self.settings_state.draft.clone();
+                        }
                     }
                 }
                 KeyCode::Char('r') => {
@@ -3650,15 +3678,22 @@ impl App {
                 };
 
                 // Save immediately
-                if let Err(e) = self.config.save() {
-                    self.status_message = Some(format!("Failed to save: {}", e));
-                } else {
-                    self.sync_manager_config_from_app().await;
-                    self.status_message =
-                        Some(format!("{} set as default provider", provider_name));
+                let provider = self.config.defaults.provider.clone();
+                match GlobalConfig::update_atomically(|cfg| {
+                    cfg.defaults.provider = provider;
+                }) {
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to save: {}", e));
+                    }
+                    Ok(updated) => {
+                        self.config = updated;
+                        self.sync_manager_config_from_app().await;
+                        self.status_message =
+                            Some(format!("{} set as default provider", provider_name));
 
-                    // Try to reconnect with the new provider
-                    self.retry_connection().await?;
+                        // Try to reconnect with the new provider
+                        self.retry_connection().await?;
+                    }
                 }
             }
             ConfirmAction::Adopt {

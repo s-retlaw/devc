@@ -339,8 +339,19 @@ mod tests {
         .is_ok()
     }
 
+    fn can_bind_localhost() -> bool {
+        match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => false,
+            Err(_) => false,
+        }
+    }
+
     #[tokio::test]
     async fn test_forwarder_binds_port() {
+        if !can_bind_localhost() {
+            return;
+        }
         // Use a high port to avoid conflicts
         let port = 19876;
 
@@ -388,6 +399,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_forwarder_drop_releases_port() {
+        if !can_bind_localhost() {
+            return;
+        }
         // Use a different high port
         let port = 19877;
 
@@ -426,6 +440,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_port_in_use_error() {
+        if !can_bind_localhost() {
+            return;
+        }
         let port = 19878;
 
         // Bind the port first
@@ -451,6 +468,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_forwarders_different_ports() {
+        if !can_bind_localhost() {
+            return;
+        }
         let port1 = 19879;
         let port2 = 19880;
 
@@ -495,6 +515,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_forwarder_accepts_connections() {
+        if !can_bind_localhost() {
+            return;
+        }
         let port = 19881;
 
         let forwarder = spawn_forwarder(

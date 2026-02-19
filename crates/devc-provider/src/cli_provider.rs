@@ -748,14 +748,14 @@ impl ContainerProvider for CliProvider {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_compose_ps_output(&stdout))
+        parse_compose_ps_output(&stdout)
     }
 
     async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>> {
-        // List ALL containers with detailed format including labels
-        let format = "--format={{.ID}}|{{.Names}}|{{.Image}}|{{.State}}|{{.Labels}}|{{.CreatedAt}}";
+        // Structured JSON format avoids delimiter-parsing issues in labels.
+        let format = "--format={{json .}}";
         let output = self.run_cmd(&["ps", "-a", "--no-trunc", format]).await?;
-        Ok(parse_discover_output(&output, self.provider_type))
+        parse_discover_output_json(&output, self.provider_type)
     }
 }
 
@@ -1079,6 +1079,131 @@ fn parse_discover_output(output: &str, provider_type: ProviderType) -> Vec<Disco
     discovered
 }
 
+fn labels_from_json_value(value: &serde_json::Value) -> HashMap<String, String> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| {
+                let value = v
+                    .as_str()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| v.to_string());
+                (k.clone(), value)
+            })
+            .collect(),
+        serde_json::Value::String(s) => parse_cli_labels(s),
+        _ => HashMap::new(),
+    }
+}
+
+/// Parse JSON-lines output from `docker/podman ps --format='{{json .}}'`.
+fn parse_discover_output_json(
+    output: &str,
+    provider_type: ProviderType,
+) -> Result<Vec<DiscoveredContainer>> {
+    let mut discovered = Vec::new();
+    let mut parse_errors = 0usize;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => {
+                parse_errors += 1;
+                continue;
+            }
+        };
+        let obj = match parsed.as_object() {
+            Some(obj) => obj,
+            None => {
+                parse_errors += 1;
+                continue;
+            }
+        };
+
+        let id = obj
+            .get("ID")
+            .or_else(|| obj.get("Id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let name = obj
+            .get("Names")
+            .or_else(|| obj.get("Name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim_start_matches('/');
+        let image = obj
+            .get("Image")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let state = obj
+            .get("State")
+            .or_else(|| obj.get("Status"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .trim();
+        let labels = obj
+            .get("Labels")
+            .map(labels_from_json_value)
+            .unwrap_or_default();
+        let (is_devcontainer, source, _managed) = detect_devcontainer_source_from_labels(&labels);
+        if !is_devcontainer {
+            continue;
+        }
+
+        let workspace_path = labels
+            .get("devcontainer.local_folder")
+            .or_else(|| labels.get("devc.workspace"))
+            .cloned();
+        let created = obj
+            .get("CreatedAt")
+            .or_else(|| obj.get("Created"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+
+        discovered.push(DiscoveredContainer {
+            id: ContainerId::new(id),
+            name: name.to_string(),
+            image: image.to_string(),
+            status: ContainerStatus::from(state),
+            source,
+            workspace_path,
+            labels,
+            provider: provider_type,
+            created,
+        });
+    }
+
+    if discovered.is_empty() && parse_errors > 0 {
+        let preview = output
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect::<String>();
+        return Err(ProviderError::RuntimeError(format!(
+            "discover output was not valid JSON (output preview: {:?})",
+            preview
+        )));
+    }
+
+    if discovered.is_empty() && !output.trim().is_empty() && parse_errors == 0 {
+        // If input is non-empty but yielded nothing in JSON mode, attempt
+        // legacy parsing for compatibility with older runtimes.
+        return Ok(parse_discover_output(output, provider_type));
+    }
+
+    Ok(discovered)
+}
+
 /// Parse CLI labels format "key=value,key2=value2" into HashMap
 fn parse_cli_labels(label_str: &str) -> HashMap<String, String> {
     let mut labels = HashMap::new();
@@ -1131,19 +1256,37 @@ fn detect_devcontainer_source_from_labels(
 /// Handles both podman-compose (JSON array with `Id`, `State`, and service in
 /// `Labels["com.docker.compose.service"]`) and docker compose (one JSON object
 /// per line with `ID`, `Service`, `State`).
-fn parse_compose_ps_output(stdout: &str) -> Vec<crate::ComposeServiceInfo> {
+fn parse_compose_ps_output(stdout: &str) -> Result<Vec<crate::ComposeServiceInfo>> {
     let mut services = Vec::new();
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Ok(services);
+    }
 
     // Try parsing as a JSON array first (podman-compose format),
     // then fall back to one-JSON-object-per-line (docker compose format).
-    let entries: Vec<serde_json::Value> =
-        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(stdout.trim()) {
-            arr
+    let (entries, parse_errors): (Vec<serde_json::Value>, usize) =
+        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+            (arr, 0)
         } else {
-            stdout
+            let mut parse_errors = 0usize;
+            let entries = stdout
                 .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
-                .collect()
+                .filter_map(|line| {
+                    let t = line.trim();
+                    if t.is_empty() {
+                        return None;
+                    }
+                    match serde_json::from_str::<serde_json::Value>(t) {
+                        Ok(v) => Some(v),
+                        Err(_) => {
+                            parse_errors += 1;
+                            None
+                        }
+                    }
+                })
+                .collect();
+            (entries, parse_errors)
         };
 
     for parsed in entries {
@@ -1168,7 +1311,21 @@ fn parse_compose_ps_output(stdout: &str) -> Vec<crate::ComposeServiceInfo> {
         });
     }
 
-    services
+    if services.is_empty() && parse_errors > 0 {
+        let preview = trimmed
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect::<String>();
+        return Err(ProviderError::RuntimeError(format!(
+            "compose ps output was not valid JSON (output preview: {:?})",
+            preview
+        )));
+    }
+
+    Ok(services)
 }
 
 #[cfg(test)]
@@ -1307,7 +1464,7 @@ mod tests {
             }
         ]"#;
 
-        let services = parse_compose_ps_output(stdout);
+        let services = parse_compose_ps_output(stdout).unwrap();
         assert_eq!(services.len(), 2);
 
         assert_eq!(services[0].service_name, "web");
@@ -1326,7 +1483,7 @@ mod tests {
         let stdout = r#"{"ID":"aaa111","Service":"app","State":"running"}
 {"ID":"bbb222","Service":"redis","State":"exited"}"#;
 
-        let services = parse_compose_ps_output(stdout);
+        let services = parse_compose_ps_output(stdout).unwrap();
         assert_eq!(services.len(), 2);
 
         assert_eq!(services[0].service_name, "app");
@@ -1340,9 +1497,27 @@ mod tests {
 
     #[test]
     fn test_parse_compose_ps_empty_output() {
-        assert!(parse_compose_ps_output("").is_empty());
-        assert!(parse_compose_ps_output("  ").is_empty());
-        assert!(parse_compose_ps_output("\n\n").is_empty());
+        assert!(parse_compose_ps_output("").unwrap().is_empty());
+        assert!(parse_compose_ps_output("  ").unwrap().is_empty());
+        assert!(parse_compose_ps_output("\n\n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_compose_ps_invalid_output_errors() {
+        let err = parse_compose_ps_output("not json at all").unwrap_err();
+        assert!(
+            err.to_string().contains("not valid JSON"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_compose_ps_mixed_noise_and_json() {
+        let stdout = "warning line\n{\"ID\":\"aaa111\",\"Service\":\"app\",\"State\":\"running\"}";
+        let services = parse_compose_ps_output(stdout).unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].service_name, "app");
     }
 
     // ==================== parse_list_output tests ====================
@@ -1715,6 +1890,27 @@ mod tests {
         let output = "abc|name|image|running|labels\n";
         let discovered = parse_discover_output(output, ProviderType::Docker);
         assert!(discovered.is_empty());
+    }
+
+    #[test]
+    fn test_parse_discover_json_handles_labels_with_commas() {
+        let output = r#"{"ID":"abc123","Names":"my-devc","Image":"ubuntu:22.04","State":"running","Labels":{"devc.managed":"true","devcontainer.local_folder":"/home/user/proj","complex":"a,b=c"},"CreatedAt":"2024-01-15"}"#;
+        let discovered = parse_discover_output_json(output, ProviderType::Docker).unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].source, DevcontainerSource::Devc);
+        assert_eq!(
+            discovered[0]
+                .labels
+                .get("complex")
+                .expect("complex label should be preserved"),
+            "a,b=c"
+        );
+    }
+
+    #[test]
+    fn test_parse_discover_json_invalid_errors() {
+        let err = parse_discover_output_json("not-json", ProviderType::Docker).unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"));
     }
 
     // ==================== ContainerStatus::from tests ====================

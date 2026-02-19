@@ -8,7 +8,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
     ExecutableCommand,
 };
-use devc_core::{ContainerState, DevcContainerStatus};
+use devc_core::{display_name_map, ContainerState, DevcContainerStatus};
 use std::io::{stdout, Write};
 
 /// Context for filtering containers in the selector
@@ -190,6 +190,8 @@ fn render_selector(
     selected: usize,
     prompt: &str,
 ) -> Result<()> {
+    let display_names = display_name_map(containers);
+
     // Hide cursor during selection
     stdout.execute(cursor::Hide)?;
 
@@ -198,7 +200,7 @@ fn render_selector(
 
     // Print each container option
     for (i, container) in containers.iter().enumerate() {
-        render_line(stdout, container, i == selected)?;
+        render_line(stdout, container, &display_names, i == selected)?;
     }
 
     // Print help line
@@ -218,6 +220,7 @@ fn render_selector(
 fn render_line(
     stdout: &mut std::io::Stdout,
     container: &ContainerState,
+    display_names: &std::collections::HashMap<String, String>,
     is_selected: bool,
 ) -> Result<()> {
     if is_selected {
@@ -236,7 +239,11 @@ fn render_line(
     if is_selected {
         stdout.execute(SetForegroundColor(Color::White))?;
     }
-    write!(stdout, " {:<24}", container.name)?;
+    let display_name = display_names
+        .get(&container.id)
+        .map(String::as_str)
+        .unwrap_or(&container.name);
+    write!(stdout, " {:<24}", display_name)?;
 
     // Status text
     stdout.execute(SetForegroundColor(Color::DarkGrey))?;
@@ -255,6 +262,8 @@ fn rerender_selector(
     selected: usize,
     total: usize,
 ) -> Result<()> {
+    let display_names = display_name_map(containers);
+
     // Move up from help line to first container line:
     // help -> empty (1) -> containers (total) = total + 1 lines
     let lines_to_move = total + 1;
@@ -264,7 +273,7 @@ fn rerender_selector(
     // Redraw each container line
     for (i, container) in containers.iter().enumerate() {
         stdout.execute(Clear(ClearType::CurrentLine))?;
-        render_line(stdout, container, i == selected)?;
+        render_line(stdout, container, &display_names, i == selected)?;
     }
 
     // Redraw empty line and help text

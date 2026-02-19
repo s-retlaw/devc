@@ -12,7 +12,7 @@ use crate::app::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View}
 use crate::settings::SettingsSection;
 use crate::widgets::{centered_rect, DialogBuilder};
 use ansi_to_tui::IntoText;
-use devc_core::DevcContainerStatus;
+use devc_core::{display_name_map, DevcContainerStatus};
 use devc_provider::{ContainerStatus, DevcontainerSource};
 use ratatui::{
     prelude::*,

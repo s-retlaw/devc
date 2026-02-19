@@ -106,7 +106,7 @@ async fn test_remove_force_running() {
 
     // force remove on a running container should succeed
     let result = commands::remove(&manager, &name, true).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "remove failed: {:?}", result.err());
 
     // Verify that Remove was called on the provider
     let recorded = calls.lock().unwrap();
@@ -189,7 +189,7 @@ async fn test_down_calls_provider() {
     let manager = test_manager(mock, store);
 
     let result = commands::down(&manager, &name).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "down failed: {:?}", result.err());
 
     // down should have called Stop on the provider
     let recorded = calls.lock().unwrap();
@@ -231,7 +231,7 @@ async fn test_find_container_by_name_through_start() {
 
     // Start by name should find the container and call start
     let result = commands::start(&manager, "my-unique-name").await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "start failed: {:?}", result.err());
 
     let recorded = calls.lock().unwrap();
     assert!(

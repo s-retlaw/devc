@@ -867,7 +867,14 @@ mod tests {
         };
 
         // Start a local HTTP server
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Some sandboxes disallow binding local sockets for tests.
+                return;
+            }
+            Err(e) => panic!("failed to bind local test server: {}", e),
+        };
         let addr = listener.local_addr().unwrap();
         let url = format!("http://127.0.0.1:{}/feature.tar.gz", addr.port());
 

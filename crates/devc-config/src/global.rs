@@ -6,7 +6,10 @@ use crate::{ConfigError, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Global devc configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -237,12 +240,50 @@ impl GlobalConfig {
             })?;
         }
 
-        let content =
-            toml::to_string_pretty(self).map_err(|e| ConfigError::Invalid(e.to_string()))?;
+        with_path_lock(path, || {
+            let content =
+                toml::to_string_pretty(self).map_err(|e| ConfigError::Invalid(e.to_string()))?;
+            atomic_write(path, content.as_bytes()).map_err(|e| ConfigError::WriteError {
+                path: path.clone(),
+                source: e,
+            })
+        })
+    }
 
-        std::fs::write(path, content).map_err(|e| ConfigError::WriteError {
-            path: path.clone(),
-            source: e,
+    /// Load latest config from disk, apply a mutation, and persist atomically.
+    ///
+    /// This is the safest API for live settings updates when multiple devc
+    /// processes may write concurrently.
+    pub fn update_atomically<F>(mutator: F) -> Result<Self>
+    where
+        F: FnOnce(&mut Self),
+    {
+        let path = Self::config_path()?;
+        Self::update_atomically_at(&path, mutator)
+    }
+
+    /// Like `update_atomically`, but for tests/custom paths.
+    pub fn update_atomically_at<F>(path: &PathBuf, mutator: F) -> Result<Self>
+    where
+        F: FnOnce(&mut Self),
+    {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ConfigError::WriteError {
+                path: path.clone(),
+                source: e,
+            })?;
+        }
+
+        with_path_lock(path, || {
+            let mut latest = Self::load_from(path)?;
+            mutator(&mut latest);
+            let content =
+                toml::to_string_pretty(&latest).map_err(|e| ConfigError::Invalid(e.to_string()))?;
+            atomic_write(path, content.as_bytes()).map_err(|e| ConfigError::WriteError {
+                path: path.clone(),
+                source: e,
+            })?;
+            Ok(latest)
         })
     }
 
@@ -273,6 +314,66 @@ impl GlobalConfig {
     pub fn config_exists() -> bool {
         Self::config_path().map(|p| p.exists()).unwrap_or(false)
     }
+}
+
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut lock = path.as_os_str().to_owned();
+    lock.push(".lock");
+    PathBuf::from(lock)
+}
+
+fn with_path_lock<T, F>(path: &Path, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let _lock = acquire_lock(path).map_err(|e| ConfigError::WriteError {
+        path: lock_path_for(path),
+        source: e,
+    })?;
+    let result = f();
+    result
+}
+
+fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(content)?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+struct PathLockGuard {
+    lock_path: PathBuf,
+}
+
+impl Drop for PathLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+fn acquire_lock(path: &Path) -> std::io::Result<PathLockGuard> {
+    let lock_path = lock_path_for(path);
+    for _ in 0..200 {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(_) => {
+                return Ok(PathLockGuard { lock_path });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("timed out waiting for lock {}", lock_path.display()),
+    ))
 }
 
 #[cfg(test)]
@@ -374,5 +475,42 @@ env_forward = ["OPENAI_API_KEY"]
         let config = GlobalConfig::default();
         assert_eq!(config.agents.codex.enabled, None);
         assert!(config.agents.codex.env_forward.is_empty());
+    }
+
+    #[test]
+    fn test_update_atomically_merges_disjoint_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let mut base = GlobalConfig::default();
+        base.defaults.provider = "docker".to_string();
+        base.save_to(&path).unwrap();
+
+        let updated = GlobalConfig::update_atomically_at(&path, |cfg| {
+            cfg.defaults.provider = "podman".to_string();
+        })
+        .unwrap();
+        assert_eq!(updated.defaults.provider, "podman");
+
+        let updated = GlobalConfig::update_atomically_at(&path, |cfg| {
+            cfg.defaults.shell = "/bin/zsh".to_string();
+        })
+        .unwrap();
+        assert_eq!(updated.defaults.provider, "podman");
+        assert_eq!(updated.defaults.shell, "/bin/zsh");
+    }
+
+    #[test]
+    fn test_save_to_atomic_replaces_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "invalid = [").unwrap();
+
+        let mut config = GlobalConfig::default();
+        config.defaults.provider = "docker".to_string();
+        config.save_to(&path).unwrap();
+
+        let loaded = GlobalConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.defaults.provider, "docker");
     }
 }

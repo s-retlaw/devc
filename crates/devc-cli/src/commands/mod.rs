@@ -4,7 +4,7 @@ mod lifecycle;
 mod manage;
 
 use anyhow::{anyhow, Result};
-use devc_core::{ContainerManager, ContainerState};
+use devc_core::{display_name_map, ContainerManager, ContainerState};
 
 pub use lifecycle::*;
 pub use manage::*;
@@ -34,11 +34,20 @@ async fn find_container(manager: &ContainerManager, name_or_id: &str) -> Result<
         _ => Err(anyhow!(
             "Ambiguous container reference '{}', matches: {}",
             name_or_id,
-            matches
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            {
+                let all = manager.list().await?;
+                let display = display_name_map(&all);
+                matches
+                    .iter()
+                    .map(|c| {
+                        display
+                            .get(&c.id)
+                            .cloned()
+                            .unwrap_or_else(|| c.name.clone())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
         )),
     }
 }

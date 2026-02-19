@@ -1,4 +1,144 @@
 use super::*;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitInfo {
+    repo_display: String,
+    branch: String,
+}
+
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|p| p.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
+    let dot_git = repo_root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+
+    if !dot_git.is_file() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(dot_git).ok()?;
+    let gitdir_raw = content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(str::trim)?;
+    if gitdir_raw.is_empty() {
+        return None;
+    }
+
+    let gitdir_path = Path::new(gitdir_raw);
+    let resolved = if gitdir_path.is_absolute() {
+        gitdir_path.to_path_buf()
+    } else {
+        repo_root.join(gitdir_path)
+    };
+
+    resolved.exists().then_some(resolved)
+}
+
+fn read_head_branch(git_dir: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head_line = head.lines().next()?.trim();
+    let branch = head_line.strip_prefix("ref: refs/heads/")?.trim();
+    (!branch.is_empty()).then(|| branch.to_string())
+}
+
+fn read_origin_remote(git_dir: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(git_dir.join("config")).ok()?;
+    let mut in_origin = false;
+
+    for raw_line in config.lines() {
+        let line = raw_line.trim();
+
+        if line.starts_with('[') && line.ends_with(']') {
+            in_origin = line == "[remote \"origin\"]";
+            continue;
+        }
+
+        if !in_origin {
+            continue;
+        }
+
+        let (key, value) = line.split_once('=')?;
+        if key.trim() == "url" {
+            let url = value.trim();
+            if !url.is_empty() {
+                return Some(url.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_remote_display(host: &str, path: &str) -> Option<String> {
+    let host = host.trim();
+    let mut path = path.trim().trim_matches('/').to_string();
+    if let Some(stripped) = path.strip_suffix(".git") {
+        path = stripped.to_string();
+    }
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", host, path))
+}
+
+fn remote_display_from_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        return normalize_remote_display(host, path);
+    }
+
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if !scheme.is_empty() {
+            let (authority, path) = rest.split_once('/')?;
+            let host = authority
+                .rsplit_once('@')
+                .map(|(_, h)| h)
+                .unwrap_or(authority);
+            return normalize_remote_display(host, path);
+        }
+    }
+
+    if let Some((host, path)) = url.split_once(':') {
+        if !host.contains('/') && !host.contains('\\') && path.contains('/') {
+            return normalize_remote_display(host, path);
+        }
+    }
+
+    None
+}
+
+fn git_info_for_workspace(workspace: &Path) -> Option<GitInfo> {
+    let repo_root = find_git_root(workspace)?;
+    let git_dir = resolve_git_dir(&repo_root)?;
+    let branch = read_head_branch(&git_dir)?;
+    let repo_name = repo_root.file_name()?.to_string_lossy().to_string();
+    if repo_name.is_empty() {
+        return None;
+    }
+
+    let repo_display = read_origin_remote(&git_dir)
+        .and_then(|url| remote_display_from_url(&url))
+        .unwrap_or(repo_name);
+
+    Some(GitInfo {
+        repo_display,
+        branch,
+    })
+}
 
 pub(super) fn draw_provider_detail(frame: &mut Frame, app: &App, area: Rect) {
     let provider = &app.providers[app.selected_provider];
@@ -169,7 +309,51 @@ pub(super) fn build_detail_text(
         DevcContainerStatus::Configured => Color::DarkGray,
     };
 
+    let mut runtime_lines = vec![
+        Line::from(Span::styled(
+            "─── Runtime ───",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(vec![
+            Span::raw("Image ID:    "),
+            Span::raw(
+                container
+                    .image_id
+                    .as_deref()
+                    .unwrap_or("Not built")
+                    .to_string(),
+            ),
+        ]),
+    ];
+    if let Some(d) = details {
+        runtime_lines.push(Line::from(vec![
+            Span::raw("Runtime Name: "),
+            Span::raw(d.name.clone()),
+        ]));
+    }
+    runtime_lines.push(Line::from(vec![
+        Span::raw("Container ID: "),
+        Span::raw(
+            container
+                .container_id
+                .as_deref()
+                .unwrap_or("Not created")
+                .to_string(),
+        ),
+    ]));
+    if let Some(code) = details.and_then(|d| d.exit_code) {
+        let color = if code == 0 { Color::Green } else { Color::Red };
+        runtime_lines.push(Line::from(vec![
+            Span::raw("Exit Code:   "),
+            Span::styled(code.to_string(), Style::default().fg(color)),
+        ]));
+    }
+
     let mut lines = vec![
+        Line::from(Span::styled(
+            "─── Identity ───",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(vec![
             Span::raw("Name:        "),
             Span::styled(container.name.clone(), Style::default().bold()),
@@ -197,6 +381,10 @@ pub(super) fn build_detail_text(
             Span::styled(container.id.clone(), Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(""),
+        Line::from(Span::styled(
+            "─── Workspace ───",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(vec![
             Span::raw("Workspace:   "),
             Span::raw(container.workspace_path.to_string_lossy().into_owned()),
@@ -206,47 +394,40 @@ pub(super) fn build_detail_text(
             Span::raw(container.config_path.to_string_lossy().into_owned()),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::raw("Image ID:    "),
-            Span::raw(
-                container
-                    .image_id
-                    .as_deref()
-                    .unwrap_or("Not built")
-                    .to_string(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("Container:   "),
-            Span::raw(
-                container
-                    .container_id
-                    .as_deref()
-                    .unwrap_or("Not created")
-                    .to_string(),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("Created:     "),
-            Span::raw(container.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
-        ]),
-        Line::from(vec![
-            Span::raw("Last used:   "),
-            Span::raw(container.last_used.format("%Y-%m-%d %H:%M:%S").to_string()),
-        ]),
     ];
+    lines.extend(runtime_lines);
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "─── Timestamps ───",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(vec![
+        Span::raw("Created:     "),
+        Span::raw(container.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("Last used:   "),
+        Span::raw(container.last_used.format("%Y-%m-%d %H:%M:%S").to_string()),
+    ]));
+
+    if let Some(git) = git_info_for_workspace(&container.workspace_path) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "─── Git ───",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(vec![
+            Span::raw("Repo:        "),
+            Span::raw(git.repo_display),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("Branch:      "),
+            Span::raw(git.branch),
+        ]));
+    }
 
     // Add inspect-based sections when available
     if let Some(details) = details {
-        if let Some(code) = details.exit_code {
-            let color = if code == 0 { Color::Green } else { Color::Red };
-            lines.push(Line::from(vec![
-                Span::raw("Exit Code:   "),
-                Span::styled(code.to_string(), Style::default().fg(color)),
-            ]));
-        }
-
         // Ports
         if !details.ports.is_empty() {
             lines.push(Line::from(""));
@@ -426,13 +607,31 @@ pub(super) fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             ])
             .split(inner_area);
 
-        let info = Paragraph::new(text).wrap(Wrap { trim: true });
+        let info = Paragraph::new(text.clone())
+            .wrap(Wrap { trim: true })
+            .scroll((app.container_detail_scroll as u16, 0));
         frame.render_widget(info, chunks[0]);
+        let info_inner_height = chunks[0].height.saturating_sub(2) as usize;
+        if text.len() > info_inner_height {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"));
+            let mut scrollbar_state =
+                ScrollbarState::new(text.len().saturating_sub(info_inner_height))
+                    .position(app.container_detail_scroll);
+            let scrollbar_area = Rect {
+                x: chunks[0].x + chunks[0].width.saturating_sub(1),
+                y: chunks[0].y + 1,
+                width: 1,
+                height: chunks[0].height.saturating_sub(2),
+            };
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+        }
 
         draw_compose_services(frame, app, &container, chunks[1]);
     } else {
         // Non-compose: scrollable Paragraph
-        let detail = Paragraph::new(text)
+        let detail = Paragraph::new(text.clone())
             .block(
                 Block::default()
                     .title(format!(" {} ", container.name))
@@ -443,6 +642,21 @@ pub(super) fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             .scroll((app.container_detail_scroll as u16, 0));
 
         frame.render_widget(detail, area);
+        let inner_height = area.height.saturating_sub(2) as usize;
+        if text.len() > inner_height {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"));
+            let mut scrollbar_state = ScrollbarState::new(text.len().saturating_sub(inner_height))
+                .position(app.container_detail_scroll);
+            let scrollbar_area = Rect {
+                x: area.x + area.width.saturating_sub(1),
+                y: area.y + 1,
+                width: 1,
+                height: area.height.saturating_sub(2),
+            };
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+        }
     }
 }
 
@@ -709,7 +923,7 @@ pub(super) fn draw_discover_detail(frame: &mut Frame, app: &App, area: Rect) {
         (Some(details), Some(disc)) => build_discover_detail_text(details, disc),
         _ => vec![Line::from("Loading...")],
     };
-    let detail = Paragraph::new(lines)
+    let detail = Paragraph::new(lines.clone())
         .block(
             Block::default()
                 .title(format!(" {} ", name))
@@ -719,6 +933,26 @@ pub(super) fn draw_discover_detail(frame: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: true })
         .scroll((app.discover_detail_scroll as u16, 0));
     frame.render_widget(detail, area);
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    if app
+        .discover_detail
+        .as_ref()
+        .is_some_and(|_| lines.len() > inner_height)
+    {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+        let mut scrollbar_state = ScrollbarState::new(lines.len().saturating_sub(inner_height))
+            .position(app.discover_detail_scroll);
+        let scrollbar_area = Rect {
+            x: area.x + area.width.saturating_sub(1),
+            y: area.y + 1,
+            width: 1,
+            height: area.height.saturating_sub(2),
+        };
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
 /// Draw the compose services table within the detail popup
@@ -820,4 +1054,98 @@ pub(super) fn draw_compose_services(
         .highlight_symbol("▶ ");
 
     frame.render_stateful_widget(table, area, &mut app.compose_state.services_table_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_git_info_for_workspace_with_git_dir_head_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("myrepo");
+        let workspace = repo.join("subdir");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/a\n").unwrap();
+
+        let info = git_info_for_workspace(&workspace).unwrap();
+        assert_eq!(info.repo_display, "myrepo");
+        assert_eq!(info.branch, "feature/a");
+    }
+
+    #[test]
+    fn test_git_info_for_workspace_with_git_file_gitdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let actual_git = tmp.path().join("repo.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&actual_git).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: ../repo.git\n").unwrap();
+        std::fs::write(actual_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let info = git_info_for_workspace(&repo).unwrap();
+        assert_eq!(info.repo_display, "repo");
+        assert_eq!(info.branch, "main");
+    }
+
+    #[test]
+    fn test_remote_display_from_url_https() {
+        let display = remote_display_from_url("https://github.com/s-retlaw/devc.git").unwrap();
+        assert_eq!(display, "github.com/s-retlaw/devc");
+    }
+
+    #[test]
+    fn test_remote_display_from_url_ssh_scp_style() {
+        let display = remote_display_from_url("git@github.com:s-retlaw/devc.git").unwrap();
+        assert_eq!(display, "github.com/s-retlaw/devc");
+    }
+
+    #[test]
+    fn test_remote_display_from_url_ssh_url_style() {
+        let display = remote_display_from_url("ssh://git@gitlab.com/group/sub/repo.git").unwrap();
+        assert_eq!(display, "gitlab.com/group/sub/repo");
+    }
+
+    #[test]
+    fn test_git_info_prefers_origin_remote_display() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"]\n\turl = https://github.com/acme/myrepo.git\n",
+        )
+        .unwrap();
+
+        let info = git_info_for_workspace(&repo).unwrap();
+        assert_eq!(info.repo_display, "github.com/acme/myrepo");
+        assert_eq!(info.branch, "main");
+    }
+
+    #[test]
+    fn test_git_info_for_workspace_returns_none_without_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("nogit");
+        std::fs::create_dir_all(&workspace).unwrap();
+        assert!(git_info_for_workspace(&workspace).is_none());
+    }
+
+    #[test]
+    fn test_git_info_for_workspace_returns_none_for_detached_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(
+            git_dir.join("HEAD"),
+            "2a0f1496293197f8f4f8cbf5f18284d888fff123\n",
+        )
+        .unwrap();
+
+        assert!(git_info_for_workspace(&repo).is_none());
+    }
 }

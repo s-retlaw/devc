@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use devc_config::GlobalConfig;
-use devc_core::{ContainerManager, DevcContainerStatus};
+use devc_core::{display_name_map, ContainerManager, DevcContainerStatus};
 
 use super::{exec_check, find_container, find_container_in_cwd};
 
@@ -40,6 +40,7 @@ pub async fn list(manager: &ContainerManager, discover: bool, sync: bool) -> Res
     }
 
     let containers = manager.list().await?;
+    let display_names = display_name_map(&containers);
 
     if containers.is_empty() {
         println!("No containers found.");
@@ -78,7 +79,11 @@ pub async fn list(manager: &ContainerManager, discover: bool, sync: bool) -> Res
             .unwrap_or_else(|| container.workspace_path.to_string_lossy().to_string());
 
         // Pad name manually to handle Unicode symbol display width
-        let name_padding = NAME_WIDTH.saturating_sub(container.name.len());
+        let display_name = display_names
+            .get(&container.id)
+            .map(String::as_str)
+            .unwrap_or(&container.name);
+        let name_padding = NAME_WIDTH.saturating_sub(display_name.len());
         let status_str = format!("{}", container.status);
         let status_padding = STATUS_WIDTH.saturating_sub(status_str.len());
         let provider_str = format!("{}", container.provider);
@@ -87,7 +92,7 @@ pub async fn list(manager: &ContainerManager, discover: bool, sync: bool) -> Res
         println!(
             "{} {}{} {}{} {}{} {}",
             status_symbol,
-            container.name,
+            display_name,
             " ".repeat(name_padding),
             status_str,
             " ".repeat(status_padding),

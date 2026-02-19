@@ -10,6 +10,25 @@ use devc_provider::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Deterministic 64-bit FNV-1a hash for stable short IDs in runtime names.
+fn fnv1a64(input: &str) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET_BASIS;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+fn short_hash(input: &str, hex_len: usize) -> String {
+    format!("{:016x}", fnv1a64(input))
+        .chars()
+        .take(hex_len)
+        .collect()
+}
+
 /// Compute the default workspace folder when none is specified in devcontainer.json.
 /// Matches the VS Code / devcontainer CLI convention: `/workspaces/{basename}`.
 fn default_workspace_folder(workspace_path: &Path) -> String {
@@ -200,7 +219,11 @@ impl Container {
                 }
             })
             .collect();
-        format!("devc_{}", sanitized)
+
+        // Keep a human-readable base while guaranteeing uniqueness across
+        // same-name workspaces/configs.
+        let suffix = self.runtime_suffix();
+        format!("devc_{}__{}", sanitized, suffix)
     }
 
     /// Generate the image tag
@@ -535,7 +558,7 @@ impl Container {
 
     /// Get compose project name for Docker Compose
     pub fn compose_project_name(&self) -> String {
-        format!("devc-{}", self.name)
+        format!("devc-{}-{}", self.name, self.runtime_suffix())
     }
 
     /// Resolve compose file paths relative to the config directory
@@ -549,6 +572,12 @@ impl Container {
         };
 
         Some(files.iter().map(|f| config_dir.join(f)).collect())
+    }
+
+    fn runtime_suffix(&self) -> String {
+        let dc = self.devcontainer_id.chars().take(8).collect::<String>();
+        let cfg = short_hash(&self.config_path.to_string_lossy(), 8);
+        format!("{}-{}", dc, cfg)
     }
 }
 
@@ -891,7 +920,65 @@ mod tests {
         assert!(name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
-        assert_eq!(name, "devc_my_project_____");
+        assert!(name.starts_with("devc_my_project_____"));
+        assert!(name.contains("__"));
+    }
+
+    #[test]
+    fn test_runtime_name_uniqueness_for_same_name_different_workspaces() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            ..Default::default()
+        };
+
+        let a = Container {
+            name: "same".to_string(),
+            workspace_path: PathBuf::from("/tmp/branch-a/project"),
+            devcontainer: config.clone(),
+            config_path: PathBuf::from("/tmp/branch-a/project/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+            devcontainer_id: "aaaabbbbccccdddd".to_string(),
+        };
+        let b = Container {
+            name: "same".to_string(),
+            workspace_path: PathBuf::from("/tmp/branch-b/project"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/branch-b/project/.devcontainer/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+            devcontainer_id: "1111222233334444".to_string(),
+        };
+
+        assert_ne!(a.container_name(), b.container_name());
+        assert_ne!(a.image_tag(), b.image_tag());
+        assert_ne!(a.compose_project_name(), b.compose_project_name());
+    }
+
+    #[test]
+    fn test_runtime_name_uniqueness_for_same_workspace_different_config_paths() {
+        let config = DevContainerConfig {
+            image: Some("ubuntu:22.04".to_string()),
+            ..Default::default()
+        };
+
+        let a = Container {
+            name: "same".to_string(),
+            workspace_path: PathBuf::from("/tmp/project"),
+            devcontainer: config.clone(),
+            config_path: PathBuf::from("/tmp/project/.devcontainer/python/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+            devcontainer_id: "deadbeefcafebabe".to_string(),
+        };
+        let b = Container {
+            name: "same".to_string(),
+            workspace_path: PathBuf::from("/tmp/project"),
+            devcontainer: config,
+            config_path: PathBuf::from("/tmp/project/.devcontainer/rust/devcontainer.json"),
+            global_config: GlobalConfig::default(),
+            devcontainer_id: "deadbeefcafebabe".to_string(),
+        };
+
+        assert_ne!(a.container_name(), b.container_name());
+        assert_ne!(a.compose_project_name(), b.compose_project_name());
     }
 
     #[test]
@@ -1081,7 +1168,7 @@ mod tests {
 
         assert!(container.is_compose());
         assert_eq!(container.compose_service(), Some("app"));
-        assert_eq!(container.compose_project_name(), "devc-test");
+        assert!(container.compose_project_name().starts_with("devc-test-"));
     }
 
     #[test]

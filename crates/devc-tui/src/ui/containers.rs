@@ -32,6 +32,7 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     .bottom_margin(1);
 
     // Build data rows
+    let display_names = display_name_map(&app.containers);
     let rows: Vec<Row> = app
         .containers
         .iter()
@@ -68,16 +69,21 @@ pub(super) fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
 
             // Show [S] indicator if there's an active shell session for this container
             let has_shell = app.shell_state.shell_sessions.contains_key(&container.id);
+            let base_display = display_names
+                .get(&container.id)
+                .cloned()
+                .unwrap_or_else(|| container.name.clone());
+
             let name_display = if has_shell {
-                format!("{} [S]", container.name)
+                format!("{} [S]", base_display)
             } else if container.compose_project.is_some() {
                 let suffix = match app.compose_state.services.get(&container.id) {
                     Some(s) => format!(":{}", s.len()),
                     None => "...".to_string(),
                 };
-                format!("{} [compose{}]", container.name, suffix)
+                format!("{} [compose{}]", base_display, suffix)
             } else {
-                container.name.to_string()
+                base_display
             };
 
             Row::new(vec![

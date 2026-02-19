@@ -3,18 +3,18 @@ source: crates/devc-tui/tests/snapshot_tests.rs
 expression: output
 ---
 ┌ devc - ┌ compose-app ─────────────────────────────────────────────────────────┐────────┐
-│ 1:Conta│Name:        compose-app                                              │        │
-└────────│Status:      running                                                  │────────┘
-┌ Contain│Provider:    docker                                                   │────────┐
-│      Na│Source:      Devc                                                     │        │
-│        │ID:          test-compose-app                                         │        │
-│▶ ●   co│                                                                      │        │
-│        │Workspace:   /tmp/test                                                │        │
-│        │Config:      /tmp/test/.devcontainer/devcontainer.json                │        │
-│        │                                                                      │        │
-│        │Image ID:    sha256:abc123                                            │        │
-│        │Container:   container-compose-app                                    │        │
-│        │                                                                      │        │
+│ 1:Conta│─── Identity ───                                                      │        │
+└────────│Name:        compose-app                                             ▲│────────┘
+┌ Contain│Status:      running                                                 █│────────┐
+│      Na│Provider:    docker                                                  █│        │
+│        │Source:      Devc                                                    █│        │
+│▶ ●   co│ID:          test-compose-app                                        █│        │
+│        │                                                                     █│        │
+│        │─── Workspace ───                                                    ║│        │
+│        │Workspace:   /tmp/test                                               ║│        │
+│        │Config:      /tmp/test/.devcontainer/devcontainer.json               ║│        │
+│        │                                                                     ▼│        │
+│        │─── Runtime ───                                                       │        │
 │        │┌ Compose Services ──────────────────────────────────────────────────┐│        │
 │        ││      Service            Status                                     ││        │
 │        ││▶ ●   app (dev)          running                                    ││        │

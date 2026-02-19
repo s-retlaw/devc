@@ -3,21 +3,21 @@ source: crates/devc-tui/tests/snapshot_tests.rs
 expression: output
 ---
 ┌ devc - D┌ my-rust-project ─────────────────────────────────────────┐─────────┐
-│ 1:Contai│Name:        my-rust-project                              │         │
-└─────────│Status:      running                                      │─────────┘
-┌ Containe│Provider:    docker                                       │─────────┐
-│      Nam│Source:      Devc                                         │ce       │
-│         │ID:          test-my-rust-project                         │         │
-│▶ ●   my-│                                                          │st       │
-│         │Workspace:   /tmp/test                                    │         │
-│         │Config:      /tmp/test/.devcontainer/devcontainer.json    │         │
-│         │                                                          │         │
-│         │Image ID:    sha256:abc123                                │         │
-│         │Container:   container-my-rust-project                    │         │
-│         │                                                          │         │
-│         │Created:     2024-01-15 12:00:00                          │         │
-│         │Last used:   2024-01-15 12:00:00                          │         │
-│         │                                                          │         │
+│ 1:Contai│─── Identity ───                                          ▲         │
+└─────────│Name:        my-rust-project                              █─────────┘
+┌ Containe│Status:      running                                      █─────────┐
+│      Nam│Provider:    docker                                       █ce       │
+│         │Source:      Devc                                         █         │
+│▶ ●   my-│ID:          test-my-rust-project                         █st       │
+│         │                                                          █         │
+│         │─── Workspace ───                                         █         │
+│         │Workspace:   /tmp/test                                    █         │
+│         │Config:      /tmp/test/.devcontainer/devcontainer.json    █         │
+│         │                                                          █         │
+│         │─── Runtime ───                                           █         │
+│         │Image ID:    sha256:abc123                                ║         │
+│         │Container ID: container-my-rust-project                   ║         │
+│         │                                                          ▼         │
 │         └──────────────────────────────────────────────────────────┘         │
 │                                                                              │
 │                                                                              │

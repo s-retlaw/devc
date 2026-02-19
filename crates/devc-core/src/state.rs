@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Write content to a file atomically using a temp-file-then-rename pattern.
 ///
@@ -22,6 +23,211 @@ pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     tmp.write_all(content)?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// Acquire an exclusive process-wide lock for a state file path.
+///
+/// The lock lives in a sibling `*.lock` file and is released when the closure
+/// returns (or if the process exits).
+pub(crate) fn with_path_lock<T, F>(path: &Path, f: F) -> std::io::Result<T>
+where
+    F: FnOnce() -> std::io::Result<T>,
+{
+    let _lock = acquire_lock(path)?;
+    let result = f();
+    result
+}
+
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut lock = path.as_os_str().to_owned();
+    lock.push(".lock");
+    PathBuf::from(lock)
+}
+
+struct PathLockGuard {
+    lock_path: PathBuf,
+}
+
+impl Drop for PathLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+fn acquire_lock(path: &Path) -> std::io::Result<PathLockGuard> {
+    let lock_path = lock_path_for(path);
+    for _ in 0..200 {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(_) => {
+                return Ok(PathLockGuard { lock_path });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("timed out waiting for lock {}", lock_path.display()),
+    ))
+}
+
+/// Merge an in-memory snapshot into latest on-disk state under a lock and save.
+///
+/// `removed_ids` are treated as tombstones and are removed from the merged result.
+pub(crate) fn merge_and_save_snapshot(
+    path: &Path,
+    snapshot: &StateStore,
+    removed_ids: &std::collections::HashSet<String>,
+) -> Result<StateStore> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let merged = with_path_lock(path, || {
+        let mut disk = StateStore::load_from(path).unwrap_or_else(|_| StateStore::new());
+        for id in removed_ids {
+            disk.containers.remove(id);
+        }
+        for (id, cs) in &snapshot.containers {
+            if !removed_ids.contains(id) {
+                disk.containers.insert(id.clone(), cs.clone());
+            }
+        }
+
+        let content = serde_json::to_string_pretty(&disk).map_err(std::io::Error::other)?;
+        atomic_write(path, content.as_bytes())?;
+        Ok(disk)
+    })?;
+    Ok(merged)
+}
+
+fn fnv1a64(input: &str) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET_BASIS;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+fn short_hash(input: &str, hex_len: usize) -> String {
+    format!("{:016x}", fnv1a64(input))
+        .chars()
+        .take(hex_len)
+        .collect()
+}
+
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|p| p.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
+    let dot_git = repo_root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+
+    if !dot_git.is_file() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(dot_git).ok()?;
+    let gitdir_raw = content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(str::trim)?;
+    if gitdir_raw.is_empty() {
+        return None;
+    }
+
+    let gitdir_path = Path::new(gitdir_raw);
+    let resolved = if gitdir_path.is_absolute() {
+        gitdir_path.to_path_buf()
+    } else {
+        repo_root.join(gitdir_path)
+    };
+
+    resolved.exists().then_some(resolved)
+}
+
+fn read_head_branch(git_dir: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head_line = head.lines().next()?.trim();
+    let branch = head_line.strip_prefix("ref: refs/heads/")?.trim();
+    (!branch.is_empty()).then(|| branch.to_string())
+}
+
+fn read_git_branch(workspace: &Path) -> Option<String> {
+    let repo_root = find_git_root(workspace)?;
+    let git_dir = resolve_git_dir(&repo_root)?;
+    read_head_branch(&git_dir)
+}
+
+/// Compute disambiguated human-readable names keyed by container id.
+///
+/// Rules:
+/// - Unique base names keep the original name.
+/// - Duplicate names prefer `name (branch)` when branch is known and unique.
+/// - Remaining duplicates use `name [hash]` where hash is from config/workspace.
+pub fn display_name_map(containers: &[ContainerState]) -> HashMap<String, String> {
+    let mut by_name: HashMap<&str, Vec<&ContainerState>> = HashMap::new();
+    for c in containers {
+        by_name.entry(c.name.as_str()).or_default().push(c);
+    }
+
+    let mut out = HashMap::new();
+
+    for (name, group) in by_name {
+        if group.len() == 1 {
+            let c = group[0];
+            out.insert(c.id.clone(), c.name.clone());
+            continue;
+        }
+
+        let mut branch_counts: HashMap<String, usize> = HashMap::new();
+        let mut branch_by_id: HashMap<String, String> = HashMap::new();
+        for c in &group {
+            if let Some(branch) = c
+                .metadata
+                .get("git_branch")
+                .cloned()
+                .or_else(|| c.metadata.get("branch").cloned())
+                .or_else(|| read_git_branch(&c.workspace_path))
+            {
+                *branch_counts.entry(branch.clone()).or_insert(0) += 1;
+                branch_by_id.insert(c.id.clone(), branch);
+            }
+        }
+
+        for c in group {
+            if let Some(branch) = branch_by_id.get(&c.id) {
+                if branch_counts.get(branch).copied().unwrap_or(0) == 1 {
+                    out.insert(c.id.clone(), format!("{} ({})", name, branch));
+                    continue;
+                }
+            }
+
+            let seed = format!(
+                "{}::{}",
+                c.config_path.to_string_lossy(),
+                c.workspace_path.to_string_lossy()
+            );
+            let hash = short_hash(&seed, 8);
+            out.insert(c.id.clone(), format!("{} [{}]", name, hash));
+        }
+    }
+
+    out
 }
 
 /// Container state stored on disk
@@ -570,5 +776,152 @@ mod tests {
 
         let not_found = store.find_by_config_path(Path::new("/other/devcontainer.json"));
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_display_name_map_unique_name_unchanged() {
+        let cs = make_state("proj", DevcContainerStatus::Running);
+        let map = display_name_map(std::slice::from_ref(&cs));
+        assert_eq!(map.get(&cs.id).cloned(), Some("proj".to_string()));
+    }
+
+    #[test]
+    fn test_display_name_map_duplicate_names_use_hash() {
+        let mut a = make_state("proj", DevcContainerStatus::Running);
+        a.workspace_path = PathBuf::from("/tmp/branch-a/proj");
+        a.config_path = PathBuf::from("/tmp/branch-a/proj/.devcontainer/devcontainer.json");
+
+        let mut b = make_state("proj", DevcContainerStatus::Running);
+        b.workspace_path = PathBuf::from("/tmp/branch-b/proj");
+        b.config_path = PathBuf::from("/tmp/branch-b/proj/.devcontainer/devcontainer.json");
+
+        let map = display_name_map(&[a.clone(), b.clone()]);
+        let an = map.get(&a.id).unwrap();
+        let bn = map.get(&b.id).unwrap();
+        assert_ne!(an, bn);
+        assert!(an.starts_with("proj ["));
+        assert!(bn.starts_with("proj ["));
+    }
+
+    #[test]
+    fn test_display_name_map_duplicate_names_use_unique_branch() {
+        let mut a = make_state("proj", DevcContainerStatus::Running);
+        a.metadata
+            .insert("git_branch".to_string(), "feature-a".to_string());
+
+        let mut b = make_state("proj", DevcContainerStatus::Running);
+        b.metadata
+            .insert("git_branch".to_string(), "feature-b".to_string());
+
+        let map = display_name_map(&[a.clone(), b.clone()]);
+        assert_eq!(
+            map.get(&a.id).cloned(),
+            Some("proj (feature-a)".to_string())
+        );
+        assert_eq!(
+            map.get(&b.id).cloned(),
+            Some("proj (feature-b)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_read_git_branch_from_dot_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let ws = repo.join("subdir");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        assert_eq!(read_git_branch(&ws), Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_read_git_branch_from_gitdir_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let ws = repo.join("subdir");
+        let actual_git = tmp.path().join("repo.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&actual_git).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: ../repo.git\n").unwrap();
+        std::fs::write(
+            actual_git.join("HEAD"),
+            "ref: refs/heads/feature/worktree\n",
+        )
+        .unwrap();
+
+        assert_eq!(read_git_branch(&ws), Some("feature/worktree".to_string()));
+    }
+
+    #[test]
+    fn test_display_name_map_uses_workspace_gitdir_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = tmp.path().join("repo-a");
+        let repo_b = tmp.path().join("repo-b");
+        let git_a = tmp.path().join("repo-a.git");
+        let git_b = tmp.path().join("repo-b.git");
+        std::fs::create_dir_all(&repo_a).unwrap();
+        std::fs::create_dir_all(&repo_b).unwrap();
+        std::fs::create_dir_all(&git_a).unwrap();
+        std::fs::create_dir_all(&git_b).unwrap();
+        std::fs::write(repo_a.join(".git"), "gitdir: ../repo-a.git\n").unwrap();
+        std::fs::write(repo_b.join(".git"), "gitdir: ../repo-b.git\n").unwrap();
+        std::fs::write(git_a.join("HEAD"), "ref: refs/heads/alpha\n").unwrap();
+        std::fs::write(git_b.join("HEAD"), "ref: refs/heads/beta\n").unwrap();
+
+        let mut a = make_state("proj", DevcContainerStatus::Running);
+        a.workspace_path = repo_a.clone();
+        a.config_path = repo_a.join(".devcontainer/devcontainer.json");
+
+        let mut b = make_state("proj", DevcContainerStatus::Running);
+        b.workspace_path = repo_b.clone();
+        b.config_path = repo_b.join(".devcontainer/devcontainer.json");
+
+        let map = display_name_map(&[a.clone(), b.clone()]);
+        assert_eq!(map.get(&a.id).cloned(), Some("proj (alpha)".to_string()));
+        assert_eq!(map.get(&b.id).cloned(), Some("proj (beta)".to_string()));
+    }
+
+    #[test]
+    fn test_merge_and_save_snapshot_preserves_disjoint_updates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("containers.json");
+
+        let mut disk = StateStore::new();
+        let mut a = make_state("a", DevcContainerStatus::Configured);
+        a.metadata.insert("k".to_string(), "v1".to_string());
+        disk.add(a.clone());
+        disk.save_to(&path).unwrap();
+
+        let mut snapshot = StateStore::new();
+        let mut b = make_state("b", DevcContainerStatus::Running);
+        b.metadata.insert("x".to_string(), "y".to_string());
+        snapshot.add(b.clone());
+
+        let merged =
+            merge_and_save_snapshot(&path, &snapshot, &std::collections::HashSet::new()).unwrap();
+        assert!(merged.find_by_name("a").is_some());
+        assert!(merged.find_by_name("b").is_some());
+    }
+
+    #[test]
+    fn test_merge_and_save_snapshot_applies_tombstones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("containers.json");
+
+        let mut disk = StateStore::new();
+        let a = make_state("a", DevcContainerStatus::Configured);
+        let a_id = a.id.clone();
+        disk.add(a);
+        disk.save_to(&path).unwrap();
+
+        let snapshot = StateStore::new();
+        let mut removed = std::collections::HashSet::new();
+        removed.insert(a_id);
+
+        let merged = merge_and_save_snapshot(&path, &snapshot, &removed).unwrap();
+        assert!(merged.containers.is_empty());
     }
 }

@@ -15,8 +15,8 @@ use devc_config::GlobalConfig;
 use devc_provider::{
     ContainerId, ContainerProvider, ContainerStatus, DevcontainerSource, LogConfig, ProviderType,
 };
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -33,6 +33,8 @@ pub struct ContainerManager {
     global_config: GlobalConfig,
     /// Error message when disconnected
     connection_error: Option<String>,
+    /// Optional state file path override (used by tests).
+    state_path_override: Option<PathBuf>,
 }
 
 /// Context prepared by `prepare_exec()` for exec/shell operations.
@@ -68,6 +70,7 @@ impl ContainerManager {
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: None,
+            state_path_override: None,
         })
     }
 
@@ -97,6 +100,7 @@ impl ContainerManager {
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: None,
+            state_path_override: None,
         })
     }
 
@@ -116,6 +120,7 @@ impl ContainerManager {
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: None,
+            state_path_override: Some(Self::test_state_path()),
         }
     }
 
@@ -137,6 +142,7 @@ impl ContainerManager {
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: None,
+            state_path_override: Some(Self::test_state_path()),
         }
     }
 
@@ -153,6 +159,7 @@ impl ContainerManager {
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: Some(error),
+            state_path_override: Some(Self::test_state_path()),
         }
     }
 
@@ -166,7 +173,13 @@ impl ContainerManager {
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: Some(error),
+            state_path_override: None,
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn test_state_path() -> PathBuf {
+        std::env::temp_dir().join(format!("devc-test-state-{}.json", uuid::Uuid::new_v4()))
     }
 
     /// Check if connected to a provider
@@ -418,16 +431,36 @@ impl ContainerManager {
     /// Use this after modifying state in a write-lock scope to avoid
     /// holding the lock during disk I/O.
     pub(crate) async fn save_state(&self) -> Result<()> {
-        let (content, path) = {
+        self.save_state_with_tombstones(&[]).await
+    }
+
+    /// Save state to disk with specific IDs removed as tombstones.
+    ///
+    /// This merges the manager's in-memory snapshot with latest on-disk state
+    /// under a process lock to avoid dropping concurrent updates.
+    pub(crate) async fn save_state_with_tombstones(&self, removed_ids: &[String]) -> Result<()> {
+        let (snapshot, path) = {
             let state = self.state.read().await;
-            let content = state.serialize()?;
-            let path = StateStore::state_path()?;
-            (content, path)
+            let path = if let Some(path) = &self.state_path_override {
+                path.clone()
+            } else {
+                StateStore::state_path()?
+            };
+            (state.clone(), path)
         };
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        crate::state::atomic_write(&path, content.as_bytes())?;
+
+        let tombstones: HashSet<String> = removed_ids.iter().cloned().collect();
+        let merged = crate::state::merge_and_save_snapshot(&path, &snapshot, &tombstones)?;
+
+        {
+            let mut state = self.state.write().await;
+            *state = merged;
+        }
+
         Ok(())
     }
 
@@ -914,7 +947,7 @@ fi
             let mut state = self.state.write().await;
             state.remove(id);
         }
-        self.save_state().await?;
+        self.save_state_with_tombstones(&[id.to_string()]).await?;
 
         Ok(())
     }

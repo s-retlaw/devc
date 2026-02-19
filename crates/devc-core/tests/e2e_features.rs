@@ -1361,11 +1361,13 @@ fn create_test_feature_tarball(feature_id: &str, install_script: &str) -> Vec<u8
 
 /// Start a minimal HTTP server that serves the given bytes on any request.
 /// Returns the server URL and a join handle.
-async fn start_tarball_server(tarball_bytes: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+async fn start_tarball_server(
+    tarball_bytes: Vec<u8>,
+) -> std::io::Result<(String, tokio::task::JoinHandle<()>)> {
     use tokio::io::AsyncWriteExt;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
     let url = format!("http://127.0.0.1:{}/feature.tar.gz", addr.port());
 
     let handle = tokio::spawn(async move {
@@ -1385,7 +1387,7 @@ async fn start_tarball_server(tarball_bytes: Vec<u8>) -> (String, tokio::task::J
         }
     });
 
-    (url, handle)
+    Ok((url, handle))
 }
 
 // ==========================================================================
@@ -1398,7 +1400,11 @@ async fn test_integration_tarball_url_download() {
         "url-test-feature",
         "#!/bin/bash\necho 'tarball feature installed'\n",
     );
-    let (url, server) = start_tarball_server(tarball).await;
+    let (url, server) = match start_tarball_server(tarball).await {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(e) => panic!("failed to start local test server: {}", e),
+    };
 
     let cache_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
@@ -1462,7 +1468,11 @@ async fn test_e2e_tarball_url_feature_install() {
         "tarball-url-feature",
         "#!/bin/bash\necho 'tarball-feature-installed' > /tmp/tarball-feature-marker\n",
     );
-    let (feature_url, server) = start_tarball_server(tarball).await;
+    let (feature_url, server) = match start_tarball_server(tarball).await {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(e) => panic!("failed to start local test server: {}", e),
+    };
 
     // Create workspace with devcontainer.json referencing the tarball URL feature
     let workspace = TempDir::new().expect("temp dir");

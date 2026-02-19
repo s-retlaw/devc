@@ -310,7 +310,7 @@ impl ContainerManager {
             let mut state = self.state.write().await;
             state.remove(id);
         }
-        self.save_state().await?;
+        self.save_state_with_tombstones(&[id.to_string()]).await?;
         Ok(())
     }
 }
