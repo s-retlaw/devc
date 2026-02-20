@@ -7,10 +7,29 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use tempfile::TempDir;
+
+fn create_test_devc_env() -> TempDir {
+    let root = tempfile::tempdir().expect("failed to create test env dir");
+    let state = root.path().join("state");
+    let config = root.path().join("config");
+    let cache = root.path().join("cache");
+    std::fs::create_dir_all(&state).expect("create DEVC_STATE_DIR");
+    std::fs::create_dir_all(&config).expect("create DEVC_CONFIG_DIR");
+    std::fs::create_dir_all(&cache).expect("create DEVC_CACHE_DIR");
+    root
+}
+
+fn apply_devc_env(cmd: &mut Command, root: &TempDir) {
+    cmd.env("DEVC_STATE_DIR", root.path().join("state"))
+        .env("DEVC_CONFIG_DIR", root.path().join("config"))
+        .env("DEVC_CACHE_DIR", root.path().join("cache"));
+}
 
 #[test]
 #[ignore]
 fn test_full_lifecycle() {
+    let xdg = create_test_devc_env();
     // Full lifecycle: init in a temp dir with a devcontainer.json
     let tmp = tempfile::tempdir().unwrap();
     let devcontainer_dir = tmp.path().join(".devcontainer");
@@ -21,9 +40,9 @@ fn test_full_lifecycle() {
     )
     .unwrap();
 
-    Command::cargo_bin("devc")
-        .unwrap()
-        .args(["init"])
+    let mut cmd = Command::cargo_bin("devc").unwrap();
+    apply_devc_env(&mut cmd, &xdg);
+    cmd.args(["init"])
         .current_dir(tmp.path())
         .assert()
         .success()
@@ -33,6 +52,7 @@ fn test_full_lifecycle() {
 #[test]
 #[ignore]
 fn test_build_and_up() {
+    let xdg = create_test_devc_env();
     // Build and bring up a container from a workspace with devcontainer.json.
     // Uses ubuntu which has /bin/bash (alpine only has /bin/sh).
     let tmp = tempfile::tempdir().unwrap();
@@ -45,17 +65,14 @@ fn test_build_and_up() {
     .unwrap();
 
     // init + up
-    Command::cargo_bin("devc")
-        .unwrap()
-        .args(["up"])
-        .current_dir(tmp.path())
-        .assert()
-        .success();
+    let mut up = Command::cargo_bin("devc").unwrap();
+    apply_devc_env(&mut up, &xdg);
+    up.args(["up"]).current_dir(tmp.path()).assert().success();
 
     // list should show the container as running
-    Command::cargo_bin("devc")
-        .unwrap()
-        .args(["list"])
+    let mut list = Command::cargo_bin("devc").unwrap();
+    apply_devc_env(&mut list, &xdg);
+    list.args(["list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("running"));

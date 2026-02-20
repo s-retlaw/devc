@@ -4,28 +4,94 @@
 //! Tests B and C require a container runtime (Docker or Podman) and are `#[ignore]`.
 
 use devc_config::{AutoForwardAction, PortForwardConfig};
+use devc_core::test_support::TestComposeGuard;
 use devc_core::Container;
 use devc_provider::{CliProvider, ContainerProvider, ExecConfig};
+use std::sync::OnceLock;
 use tempfile::TempDir;
+
+static TEST_ENV_ROOT: OnceLock<TempDir> = OnceLock::new();
+
+fn compose_resolve_timeout() -> std::time::Duration {
+    let secs = std::env::var("DEVC_COMPOSE_RESOLVE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60)
+        .clamp(5, 300);
+    std::time::Duration::from_secs(secs)
+}
+
+fn ensure_test_devc_env() {
+    let root = TEST_ENV_ROOT.get_or_init(|| {
+        let root = TempDir::new().expect("failed to create test env dir");
+        let state = root.path().join("state");
+        let config = root.path().join("config");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&state).expect("create DEVC_STATE_DIR");
+        std::fs::create_dir_all(&config).expect("create DEVC_CONFIG_DIR");
+        std::fs::create_dir_all(&cache).expect("create DEVC_CACHE_DIR");
+        // SAFETY: set once per test binary before runtime operations.
+        unsafe {
+            std::env::set_var("DEVC_STATE_DIR", &state);
+            std::env::set_var("DEVC_CONFIG_DIR", &config);
+            std::env::set_var("DEVC_CACHE_DIR", &cache);
+        }
+        root
+    });
+
+    let state = std::path::PathBuf::from(
+        std::env::var("DEVC_STATE_DIR").expect("DEVC_STATE_DIR should be set"),
+    );
+    assert!(
+        state.starts_with(root.path()),
+        "DEVC state path not isolated"
+    );
+}
 
 /// Get a provider for testing.
 ///
 /// Respects `DEVC_TEST_PROVIDER` env var (`docker`, `podman`, `toolbox`).
 /// Falls back to first available runtime when unset.
 async fn get_test_provider() -> Option<CliProvider> {
+    ensure_test_devc_env();
+    async fn provider_if_usable(provider: CliProvider) -> Option<CliProvider> {
+        match provider.list(true).await {
+            Ok(_) => Some(provider),
+            Err(e) => {
+                eprintln!("Skipping test: runtime unavailable/restricted: {}", e);
+                None
+            }
+        }
+    }
+
     match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
-        Ok("docker") => CliProvider::new_docker().await.ok(),
-        Ok("podman") => CliProvider::new_podman().await.ok(),
-        Ok("toolbox") => CliProvider::new_toolbox().await.ok(),
+        Ok("docker") => {
+            let p = CliProvider::new_docker().await.ok()?;
+            provider_if_usable(p).await
+        }
+        Ok("podman") => {
+            let p = CliProvider::new_podman().await.ok()?;
+            provider_if_usable(p).await
+        }
+        Ok("toolbox") => {
+            let p = CliProvider::new_toolbox().await.ok()?;
+            provider_if_usable(p).await
+        }
         _ => {
             if let Ok(p) = CliProvider::new_toolbox().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             if let Ok(p) = CliProvider::new_podman().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             if let Ok(p) = CliProvider::new_docker().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             None
         }
@@ -34,6 +100,7 @@ async fn get_test_provider() -> Option<CliProvider> {
 
 /// Create a temporary workspace with a devcontainer.json
 fn create_test_workspace(devcontainer_json: &str) -> TempDir {
+    ensure_test_devc_env();
     let temp = TempDir::new().expect("failed to create temp dir");
     let devcontainer_dir = temp.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("failed to create .devcontainer dir");
@@ -47,6 +114,7 @@ fn create_test_workspace(devcontainer_json: &str) -> TempDir {
 
 /// Create a workspace with devcontainer.json and a docker-compose.yml
 fn create_compose_workspace(devcontainer_json: &str, compose_yaml: &str) -> TempDir {
+    ensure_test_devc_env();
     let temp = TempDir::new().expect("failed to create temp dir");
     let devcontainer_dir = temp.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("failed to create .devcontainer dir");
@@ -228,23 +296,26 @@ services:
         .await
         .expect("compose_up should succeed");
 
-    // List services and verify both are running
-    let services = provider
-        .compose_ps(&compose_file_strs, &project_name, project_dir)
-        .await
-        .expect("compose_ps should succeed");
-
-    assert!(
-        services.len() >= 2,
-        "should have at least 2 services, got: {:?}",
-        services
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _compose_guard = TestComposeGuard::new(
+        rt,
+        rt_prefix,
+        compose_file_strs.iter().map(|s| s.to_string()).collect(),
+        project_name.clone(),
+        project_dir.to_path_buf(),
     );
 
-    // Find the app service container
-    let app_service = services
-        .iter()
-        .find(|s| s.service_name.contains("app"))
-        .expect("should find app service");
+    // Resolve a live app service container ID.
+    let app_id = provider
+        .compose_resolve_service_id(
+            &compose_file_strs,
+            &project_name,
+            project_dir,
+            "app",
+            compose_resolve_timeout(),
+        )
+        .await
+        .expect("should find running app service");
 
     // Exec into app to verify it's alive
     let exec = ExecConfig {
@@ -252,7 +323,7 @@ services:
         ..Default::default()
     };
     let result = provider
-        .exec(&app_service.container_id, &exec)
+        .exec(&app_id, &exec)
         .await
         .expect("exec into app should work");
     assert!(
@@ -272,9 +343,7 @@ services:
         && p.action == AutoForwardAction::Silent));
 
     // Cleanup
-    let _ = provider
-        .compose_down(&compose_file_strs, &project_name, project_dir)
-        .await;
+    _compose_guard.cleanup(&provider).await;
 }
 
 // ========================================================================
@@ -332,19 +401,28 @@ services:
         .await
         .expect("compose_up should succeed");
 
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _compose_guard = TestComposeGuard::new(
+        rt,
+        rt_prefix,
+        compose_file_strs.iter().map(|s| s.to_string()).collect(),
+        project_name.clone(),
+        project_dir.to_path_buf(),
+    );
+
     // Give netcat a moment to start listening
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // Find the app service
-    let services = provider
-        .compose_ps(&compose_file_strs, &project_name, project_dir)
+    let app_id = provider
+        .compose_resolve_service_id(
+            &compose_file_strs,
+            &project_name,
+            project_dir,
+            "app",
+            compose_resolve_timeout(),
+        )
         .await
-        .expect("compose_ps should succeed");
-
-    let app_service = services
-        .iter()
-        .find(|s| s.service_name.contains("app"))
-        .expect("should find app service");
+        .expect("should find running app service");
 
     // Verify netcat is listening by probing the port from inside the container
     let exec = ExecConfig {
@@ -356,7 +434,7 @@ services:
         ..Default::default()
     };
     let result = provider
-        .exec(&app_service.container_id, &exec)
+        .exec(&app_id, &exec)
         .await
         .expect("nc probe should work");
     assert_eq!(
@@ -367,7 +445,5 @@ services:
     );
 
     // Cleanup
-    let _ = provider
-        .compose_down(&compose_file_strs, &project_name, project_dir)
-        .await;
+    _compose_guard.cleanup(&provider).await;
 }

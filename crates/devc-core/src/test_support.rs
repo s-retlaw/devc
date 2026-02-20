@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
@@ -69,6 +70,10 @@ pub enum MockCall {
     ComposePs {
         project: String,
     },
+    ComposeResolveServiceId {
+        project: String,
+        service: String,
+    },
     Discover,
     CopyInto {
         id: String,
@@ -125,6 +130,8 @@ pub struct MockProvider {
     pub compose_down_result: Arc<Mutex<Result<()>>>,
     /// Result for compose_ps calls
     pub compose_ps_result: Arc<Mutex<Result<Vec<ComposeServiceInfo>>>>,
+    /// Result for compose_resolve_service_id calls
+    pub compose_resolve_service_id_result: Arc<Mutex<Result<ContainerId>>>,
 }
 
 impl MockProvider {
@@ -157,6 +164,9 @@ impl MockProvider {
             compose_up_result: Arc::new(Mutex::new(Ok(()))),
             compose_down_result: Arc::new(Mutex::new(Ok(()))),
             compose_ps_result: Arc::new(Mutex::new(Ok(Vec::new()))),
+            compose_resolve_service_id_result: Arc::new(Mutex::new(Ok(ContainerId::new(
+                "mock_compose_service_id",
+            )))),
         }
     }
 
@@ -241,6 +251,7 @@ fn mock_call_name(call: &MockCall) -> String {
         MockCall::ComposeUp { .. } => "ComposeUp",
         MockCall::ComposeDown { .. } => "ComposeDown",
         MockCall::ComposePs { .. } => "ComposePs",
+        MockCall::ComposeResolveServiceId { .. } => "ComposeResolveServiceId",
         MockCall::Discover => "Discover",
         MockCall::CopyInto { .. } => "CopyInto",
         MockCall::CopyFrom { .. } => "CopyFrom",
@@ -528,5 +539,207 @@ impl ContainerProvider for MockProvider {
             project: project_name.to_string(),
         });
         clone_result(&self.compose_ps_result)
+    }
+
+    async fn compose_resolve_service_id(
+        &self,
+        _compose_files: &[&str],
+        project_name: &str,
+        _project_dir: &Path,
+        service_name: &str,
+        _timeout: Duration,
+    ) -> Result<ContainerId> {
+        self.record(MockCall::ComposeResolveServiceId {
+            project: project_name.to_string(),
+            service: service_name.to_string(),
+        });
+        clone_result(&self.compose_resolve_service_id_result)
+    }
+}
+
+// ============================================================================
+// RAII guards for panic-safe container cleanup in E2E tests
+// ============================================================================
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// RAII guard for a single container created during an E2E test.
+///
+/// On drop (including panics), forcibly removes the container, its image, and
+/// any associated volumes via sync `std::process::Command`.
+pub struct TestContainerGuard {
+    runtime: String,
+    prefix: Vec<String>,
+    container_id: String,
+    container_name: Option<String>,
+    image: Option<String>,
+    volumes: Vec<String>,
+    cleaned: AtomicBool,
+}
+
+impl TestContainerGuard {
+    /// Create a guard for the given container.
+    ///
+    /// `runtime` and `prefix` come from `provider.runtime_args()`.
+    pub fn new(runtime: String, prefix: Vec<String>, container_id: String) -> Self {
+        Self {
+            runtime,
+            prefix,
+            container_id,
+            container_name: None,
+            image: None,
+            volumes: Vec::new(),
+            cleaned: AtomicBool::new(false),
+        }
+    }
+
+    /// Also track the container name (for cleanup by name as a fallback).
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.container_name = Some(name.into());
+        self
+    }
+
+    /// Also remove this image on cleanup.
+    pub fn with_image(mut self, tag: impl Into<String>) -> Self {
+        self.image = Some(tag.into());
+        self
+    }
+
+    /// Also remove this volume on cleanup.
+    pub fn with_volume(mut self, name: impl Into<String>) -> Self {
+        self.volumes.push(name.into());
+        self
+    }
+
+    /// Explicit async cleanup via the provider. Call at the end of a test's
+    /// happy path. Sets the `cleaned` flag so Drop is a no-op.
+    pub async fn cleanup(&self, provider: &dyn ContainerProvider) {
+        let cid = ContainerId::new(&self.container_id);
+        let _ = provider.remove(&cid, true).await;
+        self.cleaned.store(true, Ordering::SeqCst);
+    }
+
+    /// Mark as already cleaned so Drop is a no-op.
+    pub fn mark_cleaned(&self) {
+        self.cleaned.store(true, Ordering::SeqCst);
+    }
+
+    fn build_sync_cmd(&self) -> std::process::Command {
+        if self.prefix.is_empty() {
+            std::process::Command::new(&self.runtime)
+        } else {
+            let mut c = std::process::Command::new(&self.prefix[0]);
+            for arg in &self.prefix[1..] {
+                c.arg(arg);
+            }
+            c.arg(&self.runtime);
+            c
+        }
+    }
+}
+
+impl Drop for TestContainerGuard {
+    fn drop(&mut self) {
+        if self.cleaned.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Remove container by ID
+        let _ = self
+            .build_sync_cmd()
+            .args(["rm", "-f", &self.container_id])
+            .output();
+
+        // Remove container by name as fallback
+        if let Some(ref name) = self.container_name {
+            let _ = self.build_sync_cmd().args(["rm", "-f", name]).output();
+        }
+
+        // Remove image
+        if let Some(ref image) = self.image {
+            let _ = self.build_sync_cmd().args(["rmi", image]).output();
+        }
+
+        // Remove volumes
+        for vol in &self.volumes {
+            let _ = self.build_sync_cmd().args(["volume", "rm", vol]).output();
+        }
+    }
+}
+
+/// RAII guard for a Docker Compose project created during an E2E test.
+///
+/// On drop (including panics), runs `compose down --remove-orphans` via sync
+/// `std::process::Command`.
+pub struct TestComposeGuard {
+    runtime: String,
+    prefix: Vec<String>,
+    compose_files: Vec<String>,
+    project_name: String,
+    project_dir: std::path::PathBuf,
+    cleaned: AtomicBool,
+}
+
+impl TestComposeGuard {
+    /// Create a guard for the given compose project.
+    pub fn new(
+        runtime: String,
+        prefix: Vec<String>,
+        compose_files: Vec<String>,
+        project_name: String,
+        project_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            runtime,
+            prefix,
+            compose_files,
+            project_name,
+            project_dir,
+            cleaned: AtomicBool::new(false),
+        }
+    }
+
+    /// Explicit async cleanup via the provider. Sets the `cleaned` flag.
+    pub async fn cleanup(&self, provider: &dyn ContainerProvider) {
+        let file_strs: Vec<&str> = self.compose_files.iter().map(|s| s.as_str()).collect();
+        let _ = provider
+            .compose_down(&file_strs, &self.project_name, &self.project_dir)
+            .await;
+        self.cleaned.store(true, Ordering::SeqCst);
+    }
+
+    /// Mark as already cleaned so Drop is a no-op.
+    pub fn mark_cleaned(&self) {
+        self.cleaned.store(true, Ordering::SeqCst);
+    }
+
+    fn build_sync_cmd(&self) -> std::process::Command {
+        if self.prefix.is_empty() {
+            std::process::Command::new(&self.runtime)
+        } else {
+            let mut c = std::process::Command::new(&self.prefix[0]);
+            for arg in &self.prefix[1..] {
+                c.arg(arg);
+            }
+            c.arg(&self.runtime);
+            c
+        }
+    }
+}
+
+impl Drop for TestComposeGuard {
+    fn drop(&mut self) {
+        if self.cleaned.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let mut cmd = self.build_sync_cmd();
+        cmd.arg("compose");
+        for f in &self.compose_files {
+            cmd.arg("-f").arg(f);
+        }
+        cmd.args(["-p", &self.project_name, "down", "--remove-orphans"]);
+        cmd.current_dir(&self.project_dir);
+        let _ = cmd.output();
     }
 }

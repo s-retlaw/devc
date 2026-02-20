@@ -11,26 +11,82 @@ use devc_config::GlobalConfig;
 use devc_core::ContainerManager;
 use devc_provider::{CliProvider, ContainerId, ContainerProvider, ExecConfig};
 use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Duration;
 use tempfile::TempDir;
+
+static TEST_ENV_ROOT: OnceLock<TempDir> = OnceLock::new();
+
+fn ensure_test_devc_env() {
+    let root = TEST_ENV_ROOT.get_or_init(|| {
+        let root = TempDir::new().expect("failed to create test env dir");
+        let state = root.path().join("state");
+        let config = root.path().join("config");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&state).expect("create DEVC_STATE_DIR");
+        std::fs::create_dir_all(&config).expect("create DEVC_CONFIG_DIR");
+        std::fs::create_dir_all(&cache).expect("create DEVC_CACHE_DIR");
+        // SAFETY: set once per test binary before runtime operations.
+        unsafe {
+            std::env::set_var("DEVC_STATE_DIR", &state);
+            std::env::set_var("DEVC_CONFIG_DIR", &config);
+            std::env::set_var("DEVC_CACHE_DIR", &cache);
+        }
+        root
+    });
+
+    let state = std::path::PathBuf::from(
+        std::env::var("DEVC_STATE_DIR").expect("DEVC_STATE_DIR should be set"),
+    );
+    assert!(
+        state.starts_with(root.path()),
+        "DEVC state path not isolated"
+    );
+}
 
 /// Get a provider for testing.
 ///
 /// Respects `DEVC_TEST_PROVIDER` env var (`docker`, `podman`, `toolbox`).
 /// Falls back to first available runtime when unset.
 async fn get_test_provider() -> Option<CliProvider> {
+    async fn provider_if_usable(provider: CliProvider) -> Option<CliProvider> {
+        match provider.list(true).await {
+            Ok(_) => Some(provider),
+            Err(e) => {
+                eprintln!("Skipping test: runtime unavailable/restricted: {}", e);
+                None
+            }
+        }
+    }
+
     match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
-        Ok("docker") => CliProvider::new_docker().await.ok(),
-        Ok("podman") => CliProvider::new_podman().await.ok(),
-        Ok("toolbox") => CliProvider::new_toolbox().await.ok(),
+        Ok("docker") => {
+            let p = CliProvider::new_docker().await.ok()?;
+            provider_if_usable(p).await
+        }
+        Ok("podman") => {
+            let p = CliProvider::new_podman().await.ok()?;
+            provider_if_usable(p).await
+        }
+        Ok("toolbox") => {
+            let p = CliProvider::new_toolbox().await.ok()?;
+            provider_if_usable(p).await
+        }
         _ => {
             if let Ok(p) = CliProvider::new_toolbox().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             if let Ok(p) = CliProvider::new_podman().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             if let Ok(p) = CliProvider::new_docker().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             None
         }
@@ -38,7 +94,7 @@ async fn get_test_provider() -> Option<CliProvider> {
 }
 
 /// Read /tmp/lifecycle.log from the container, returning trimmed output.
-async fn read_lifecycle_log(provider: &CliProvider, container_id: &str) -> String {
+async fn read_lifecycle_log(provider: &CliProvider, container_id: &str) -> Result<String, String> {
     let cid = ContainerId::new(container_id);
     let config = ExecConfig {
         cmd: vec!["cat".to_string(), "/tmp/lifecycle.log".to_string()],
@@ -47,8 +103,8 @@ async fn read_lifecycle_log(provider: &CliProvider, container_id: &str) -> Strin
     let result = provider
         .exec(&cid, &config)
         .await
-        .expect("cat lifecycle.log");
-    result.output.trim().to_string()
+        .map_err(|e| e.to_string())?;
+    Ok(result.output.trim().to_string())
 }
 
 /// Create a workspace for the image-based lifecycle test.
@@ -119,16 +175,37 @@ async fn get_container_id(mgr: &ContainerManager, id: &str) -> String {
         .expect("container_id should be set")
 }
 
+async fn read_lifecycle_log_for_manager(mgr: &ContainerManager, id: &str) -> String {
+    for _ in 0..10 {
+        let cid = get_container_id(mgr, id).await;
+        let provider = get_test_provider()
+            .await
+            .expect("provider should be available");
+        match read_lifecycle_log(&provider, &cid).await {
+            Ok(log) => return log,
+            Err(e) if e.contains("does not exist") => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(e) => panic!("cat lifecycle.log failed: {e}"),
+        }
+    }
+    panic!("could not read lifecycle log from a live compose container")
+}
+
 /// Create a ContainerManager with credentials/SSH disabled and /bin/sh shell
 /// (alpine doesn't have /bin/bash).
-async fn create_test_manager(provider: CliProvider) -> ContainerManager {
+async fn create_test_manager(provider: CliProvider, state_path: &Path) -> ContainerManager {
     let mut config = GlobalConfig::default();
     config.credentials.docker = false;
     config.credentials.git = false;
     config.defaults.shell = "/bin/sh".to_string();
-    ContainerManager::with_config(Box::new(provider), config)
-        .await
-        .expect("create manager")
+    ContainerManager::with_config_and_state_path(
+        Box::new(provider),
+        config,
+        Some(state_path.to_path_buf()),
+    )
+    .await
+    .expect("create manager")
 }
 
 /// Parse lifecycle log lines into a Vec<&str>.
@@ -142,6 +219,7 @@ fn parse_log_lines(log: &str) -> Vec<&str> {
 #[tokio::test]
 #[ignore] // Requires container runtime
 async fn test_e2e_image_lifecycle_events() {
+    ensure_test_devc_env();
     let provider = match get_test_provider().await {
         Some(p) => p,
         None => {
@@ -159,7 +237,8 @@ async fn test_e2e_image_lifecycle_events() {
     let workspace = create_lifecycle_image_workspace(&host_marker);
     let config_path = workspace.path().join(".devcontainer/devcontainer.json");
 
-    let mgr = create_test_manager(get_test_provider().await.unwrap()).await;
+    let state_path = workspace.path().join(".devc-test-state.json");
+    let mgr = create_test_manager(get_test_provider().await.unwrap(), &state_path).await;
 
     // Phase 1: init + up (first create)
     let cs = mgr
@@ -184,7 +263,8 @@ async fn test_e2e_image_lifecycle_events() {
         &get_test_provider().await.unwrap(),
         &cid,
     )
-    .await;
+    .await
+    .expect("cat lifecycle.log");
     let lines = parse_log_lines(&log);
     assert_eq!(
         lines,
@@ -195,7 +275,9 @@ async fn test_e2e_image_lifecycle_events() {
 
     // Phase 2: postAttachCommand
     mgr.run_post_attach_command(&id).await.expect("post-attach");
-    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid).await;
+    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid)
+        .await
+        .expect("cat lifecycle.log");
     let lines = parse_log_lines(&log);
     assert_eq!(
         lines.last().copied(),
@@ -210,7 +292,9 @@ async fn test_e2e_image_lifecycle_events() {
 
     // After restart the container is new, but for image-based containers
     // the old /tmp/lifecycle.log should persist (stop doesn't destroy container)
-    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid).await;
+    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid)
+        .await
+        .expect("cat lifecycle.log");
     let lines = parse_log_lines(&log);
     assert_eq!(
         lines.last().copied(),
@@ -237,8 +321,7 @@ async fn test_e2e_image_lifecycle_events() {
         "initializeCommand should run during rebuild"
     );
 
-    let new_cid = get_container_id(&mgr, &id).await;
-    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &new_cid).await;
+    let log = read_lifecycle_log_for_manager(&mgr, &id).await;
     let lines = parse_log_lines(&log);
     assert_eq!(
         lines,
@@ -262,6 +345,7 @@ async fn test_e2e_image_lifecycle_events() {
 #[tokio::test]
 #[ignore] // Requires container runtime
 async fn test_e2e_compose_lifecycle_events() {
+    ensure_test_devc_env();
     let provider = match get_test_provider().await {
         Some(p) => p,
         None => {
@@ -279,7 +363,8 @@ async fn test_e2e_compose_lifecycle_events() {
     let workspace = create_lifecycle_compose_workspace(&host_marker);
     let config_path = workspace.path().join(".devcontainer/devcontainer.json");
 
-    let mgr = create_test_manager(get_test_provider().await.unwrap()).await;
+    let state_path = workspace.path().join(".devc-test-state.json");
+    let mgr = create_test_manager(get_test_provider().await.unwrap(), &state_path).await;
 
     // Phase 1: init + up
     let cs = mgr
@@ -297,7 +382,9 @@ async fn test_e2e_compose_lifecycle_events() {
     );
 
     let cid = get_container_id(&mgr, &id).await;
-    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid).await;
+    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid)
+        .await
+        .expect("cat lifecycle.log");
     let lines = parse_log_lines(&log);
     assert_eq!(
         lines,
@@ -308,7 +395,9 @@ async fn test_e2e_compose_lifecycle_events() {
 
     // Phase 2: postAttachCommand
     mgr.run_post_attach_command(&id).await.expect("post-attach");
-    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid).await;
+    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &cid)
+        .await
+        .expect("cat lifecycle.log");
     let lines = parse_log_lines(&log);
     assert_eq!(lines.len(), 5);
     assert_eq!(lines[4], "post-attach");
@@ -319,8 +408,7 @@ async fn test_e2e_compose_lifecycle_events() {
     mgr.stop(&id).await.expect("stop");
     mgr.start(&id).await.expect("start");
 
-    let new_cid = get_container_id(&mgr, &id).await;
-    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &new_cid).await;
+    let log = read_lifecycle_log_for_manager(&mgr, &id).await;
     let lines = parse_log_lines(&log);
     // After compose stop+start, container is recreated. Only post-start runs.
     assert_eq!(
@@ -337,8 +425,7 @@ async fn test_e2e_compose_lifecycle_events() {
         "initializeCommand should run during rebuild"
     );
 
-    let rebuilt_cid = get_container_id(&mgr, &id).await;
-    let log = read_lifecycle_log(&get_test_provider().await.unwrap(), &rebuilt_cid).await;
+    let log = read_lifecycle_log_for_manager(&mgr, &id).await;
     let lines = parse_log_lines(&log);
     assert_eq!(
         lines,

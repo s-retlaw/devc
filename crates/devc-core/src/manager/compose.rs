@@ -4,13 +4,43 @@ use crate::{
     features, run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, CoreError,
     DevcContainerStatus, Result, SshManager,
 };
-use devc_provider::ContainerProvider;
+use devc_provider::{ContainerId, ContainerProvider};
 use std::path::Path;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::{compose_file_strs, merge_remote_env, send_progress, ContainerManager};
 
 impl ContainerManager {
+    pub(crate) fn compose_resolve_timeout() -> Duration {
+        let secs = std::env::var("DEVC_COMPOSE_RESOLVE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60)
+            .clamp(5, 300);
+        Duration::from_secs(secs)
+    }
+
+    pub(crate) async fn resolve_running_compose_service_container_id(
+        &self,
+        provider: &dyn ContainerProvider,
+        compose_file_refs: &[&str],
+        project_name: &str,
+        project_dir: &Path,
+        service_name: &str,
+    ) -> Result<ContainerId> {
+        provider
+            .compose_resolve_service_id(
+                compose_file_refs,
+                project_name,
+                project_dir,
+                service_name,
+                Self::compose_resolve_timeout(),
+            )
+            .await
+            .map_err(|e| CoreError::InvalidState(e.to_string()))
+    }
+
     /// Handle Docker Compose `up` flow
     ///
     /// 1. Run `compose up -d --build` to start all services
@@ -112,21 +142,15 @@ impl ContainerManager {
         // Use original compose files (without override) for ps
         let original_owned = compose_file_strs(&compose_files);
         let original_refs: Vec<&str> = original_owned.iter().map(|s| s.as_str()).collect();
-        let services = provider
-            .compose_ps(&original_refs, &project_name, &container.workspace_path)
+        let container_id = self
+            .resolve_running_compose_service_container_id(
+                provider,
+                &original_refs,
+                &project_name,
+                &container.workspace_path,
+                service_name,
+            )
             .await?;
-
-        let dev_service = services
-            .iter()
-            .find(|s| s.service_name == service_name)
-            .ok_or_else(|| {
-                CoreError::InvalidState(format!(
-                    "Service '{}' not found in compose project",
-                    service_name
-                ))
-            })?;
-
-        let container_id = dev_service.container_id.clone();
 
         // 3. Install features via exec if any were resolved
         if !resolved_features.is_empty() {

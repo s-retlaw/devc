@@ -9,31 +9,117 @@
 use devc_core::features;
 use devc_core::features::merge_feature_properties;
 use devc_core::features::resolve::{parse_feature_ref, FeatureSource};
+use devc_core::test_support::{TestComposeGuard, TestContainerGuard};
 use devc_core::{Container, EnhancedBuildContext};
 use devc_provider::{
     BuildConfig, CliProvider, ContainerId, ContainerProvider, CreateContainerConfig, ExecConfig,
 };
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::Duration;
 use tempfile::TempDir;
+
+static TEST_ENV_ROOT: OnceLock<TempDir> = OnceLock::new();
+
+fn compose_resolve_timeout() -> Duration {
+    let secs = std::env::var("DEVC_COMPOSE_RESOLVE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60)
+        .clamp(5, 300);
+    Duration::from_secs(secs)
+}
+
+fn ensure_test_devc_env() {
+    let root = TEST_ENV_ROOT.get_or_init(|| {
+        let root = TempDir::new().expect("failed to create test env dir");
+        let state = root.path().join("state");
+        let config = root.path().join("config");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&state).expect("create DEVC_STATE_DIR");
+        std::fs::create_dir_all(&config).expect("create DEVC_CONFIG_DIR");
+        std::fs::create_dir_all(&cache).expect("create DEVC_CACHE_DIR");
+        // SAFETY: set once per test binary before runtime operations.
+        unsafe {
+            std::env::set_var("DEVC_STATE_DIR", &state);
+            std::env::set_var("DEVC_CONFIG_DIR", &config);
+            std::env::set_var("DEVC_CACHE_DIR", &cache);
+        }
+        root
+    });
+
+    let state = std::path::PathBuf::from(
+        std::env::var("DEVC_STATE_DIR").expect("DEVC_STATE_DIR should be set"),
+    );
+    assert!(
+        state.starts_with(root.path()),
+        "DEVC state path not isolated"
+    );
+}
+
+async fn resolve_running_compose_service_container_id(
+    provider: &CliProvider,
+    compose_file_strs: &[&str],
+    project_name: &str,
+    project_dir: &std::path::Path,
+    service_name: &str,
+) -> Option<ContainerId> {
+    provider
+        .compose_resolve_service_id(
+            compose_file_strs,
+            project_name,
+            project_dir,
+            service_name,
+            compose_resolve_timeout(),
+        )
+        .await
+        .ok()
+}
 
 /// Get a provider for testing.
 ///
 /// Respects `DEVC_TEST_PROVIDER` env var (`docker`, `podman`, `toolbox`).
 /// Falls back to first available runtime when unset.
 async fn get_test_provider() -> Option<CliProvider> {
+    ensure_test_devc_env();
+    async fn provider_if_usable(provider: CliProvider) -> Option<CliProvider> {
+        match provider.list(true).await {
+            Ok(_) => Some(provider),
+            Err(e) => {
+                eprintln!("Skipping test: runtime unavailable/restricted: {}", e);
+                None
+            }
+        }
+    }
+
     match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
-        Ok("docker") => CliProvider::new_docker().await.ok(),
-        Ok("podman") => CliProvider::new_podman().await.ok(),
-        Ok("toolbox") => CliProvider::new_toolbox().await.ok(),
+        Ok("docker") => {
+            let p = CliProvider::new_docker().await.ok()?;
+            provider_if_usable(p).await
+        }
+        Ok("podman") => {
+            let p = CliProvider::new_podman().await.ok()?;
+            provider_if_usable(p).await
+        }
+        Ok("toolbox") => {
+            let p = CliProvider::new_toolbox().await.ok()?;
+            provider_if_usable(p).await
+        }
         _ => {
             if let Ok(p) = CliProvider::new_toolbox().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             if let Ok(p) = CliProvider::new_podman().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             if let Ok(p) = CliProvider::new_docker().await {
-                return Some(p);
+                if let Some(p) = provider_if_usable(p).await {
+                    return Some(p);
+                }
             }
             None
         }
@@ -42,6 +128,7 @@ async fn get_test_provider() -> Option<CliProvider> {
 
 /// Create a temporary workspace with a devcontainer.json
 fn create_test_workspace(devcontainer_json: &str) -> TempDir {
+    ensure_test_devc_env();
     let temp = TempDir::new().expect("failed to create temp dir");
     let devcontainer_dir = temp.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("failed to create .devcontainer dir");
@@ -58,9 +145,9 @@ fn create_test_workspace(devcontainer_json: &str) -> TempDir {
 /// Handles direct runtime access and Toolbox (flatpak-spawn --host) environments.
 fn inspect_container_field(provider: &CliProvider, cid: &ContainerId, format: &str) -> String {
     let runtime = provider.info().provider_type.to_string();
-    let args = ["inspect", "--format", format, &cid.0];
+    let args = ["container", "inspect", "--format", format, &cid.0];
 
-    // Try direct command first
+    // Try direct command first.
     if let Ok(output) = std::process::Command::new(&runtime).args(&args).output() {
         let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !s.is_empty() {
@@ -118,7 +205,17 @@ async fn test_integration_oci_feature_download() {
         features::download::download_feature(&source, config_dir.path(), cache_dir.path(), &None)
             .await;
 
-    let feature_dir = result.expect("download should succeed");
+    let feature_dir = match result {
+        Ok(dir) => dir,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Failed to reach registry") || msg.contains("error sending request") {
+                eprintln!("Skipping test: network/registry unavailable: {}", msg);
+                return;
+            }
+            panic!("download should succeed: {}", msg);
+        }
+    };
 
     // Verify the feature was extracted correctly
     assert!(
@@ -290,6 +387,10 @@ async fn test_e2e_multiple_features_install() {
         .create(&create_config)
         .await
         .expect("create should succeed");
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _guard = TestContainerGuard::new(rt, rt_prefix, cid.0.clone())
+        .with_name("devc-test-features-e2e")
+        .with_image(&image_tag);
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify Node.js is installed with the right version
@@ -347,11 +448,7 @@ async fn test_e2e_multiple_features_install() {
     );
 
     // Cleanup
-    let runtime = provider.info().provider_type.to_string();
-    let _ = provider.remove(&cid, true).await;
-    let _ = std::process::Command::new(&runtime)
-        .args(["rmi", &image_tag])
-        .output();
+    _guard.cleanup(&provider).await;
     eprintln!("E2E features test passed!");
 }
 
@@ -471,6 +568,10 @@ async fn test_e2e_feature_container_properties() {
         .create(&config)
         .await
         .expect("create should succeed");
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _guard = TestContainerGuard::new(rt, rt_prefix, cid.0.clone())
+        .with_name("devc-test-feature-props-e2e")
+        .with_image(&image_tag);
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify container has SYS_PTRACE capability via inspect
@@ -492,11 +593,7 @@ async fn test_e2e_feature_container_properties() {
     );
 
     // Cleanup
-    let runtime = provider.info().provider_type.to_string();
-    let _ = provider.remove(&cid, true).await;
-    let _ = std::process::Command::new(&runtime)
-        .args(["rmi", &image_tag])
-        .output();
+    _guard.cleanup(&provider).await;
     eprintln!("E2E feature container properties test passed!");
 }
 
@@ -645,6 +742,11 @@ async fn test_e2e_feature_mounts() {
         .create(&config)
         .await
         .expect("create should succeed");
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _guard = TestContainerGuard::new(rt, rt_prefix, cid.0.clone())
+        .with_name("devc-test-feature-mounts-e2e")
+        .with_image(&image_tag)
+        .with_volume("devc-test-feature-mount-vol");
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify the mount is present via inspect
@@ -657,15 +759,7 @@ async fn test_e2e_feature_mounts() {
     );
 
     // Cleanup
-    let runtime = provider.info().provider_type.to_string();
-    let _ = provider.remove(&cid, true).await;
-    let _ = std::process::Command::new(&runtime)
-        .args(["rmi", &image_tag])
-        .output();
-    // Clean up the test volume
-    let _ = std::process::Command::new(&runtime)
-        .args(["volume", "rm", "devc-test-feature-mount-vol"])
-        .output();
+    _guard.cleanup(&provider).await;
     eprintln!("E2E feature mounts test passed!");
 }
 
@@ -795,6 +889,10 @@ async fn test_e2e_feature_lifecycle_commands() {
         .create(&config)
         .await
         .expect("create should succeed");
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _guard = TestContainerGuard::new(rt, rt_prefix, cid.0.clone())
+        .with_name("devc-test-feature-lifecycle-e2e")
+        .with_image(&image_tag);
     provider.start(&cid).await.expect("start should succeed");
 
     // Simulate what the manager does: run feature lifecycle commands, then devcontainer.json
@@ -897,11 +995,7 @@ async fn test_e2e_feature_lifecycle_commands() {
     );
 
     // Cleanup
-    let runtime = provider.info().provider_type.to_string();
-    let _ = provider.remove(&cid, true).await;
-    let _ = std::process::Command::new(&runtime)
-        .args(["rmi", &image_tag])
-        .output();
+    _guard.cleanup(&provider).await;
     eprintln!("E2E feature lifecycle commands test passed!");
 }
 
@@ -1010,27 +1104,57 @@ services:
         .await
         .expect("compose_up should succeed");
 
-    // Find the app service container
-    let services = provider
-        .compose_ps(&compose_file_strs, &project_name, project_dir)
-        .await
-        .expect("compose_ps should succeed");
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _compose_guard = TestComposeGuard::new(
+        rt,
+        rt_prefix,
+        compose_file_strs.iter().map(|s| s.to_string()).collect(),
+        project_name.clone(),
+        project_dir.to_path_buf(),
+    );
 
-    let app_service = services
-        .iter()
-        .find(|s| s.service_name.contains("app"))
-        .expect("should find app service");
-    let cid = &app_service.container_id;
+    // Find the app service container
+    let mut cid = resolve_running_compose_service_container_id(
+        &provider,
+        &compose_file_strs,
+        &project_name,
+        project_dir,
+        "app",
+    )
+    .await
+    .expect("should find running app service with a stable container id");
 
     // Install features via exec
-    features::install::install_features_via_exec(&provider, cid, &resolved, "root", None)
-        .await
-        .expect("feature install via exec should succeed");
+    let mut install_ok = false;
+    for attempt in 0..5 {
+        match features::install::install_features_via_exec(&provider, &cid, &resolved, "root", None)
+            .await
+        {
+            Ok(_) => {
+                install_ok = true;
+                break;
+            }
+            Err(e) if e.to_string().contains("does not exist") && attempt < 4 => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                cid = resolve_running_compose_service_container_id(
+                    &provider,
+                    &compose_file_strs,
+                    &project_name,
+                    project_dir,
+                    "app",
+                )
+                .await
+                .expect("should re-resolve running app service container");
+            }
+            Err(e) => panic!("feature install via exec should succeed: {e}"),
+        }
+    }
+    assert!(install_ok, "feature install via exec should succeed");
 
     // Verify the marker file was created by install.sh
     let marker_result = provider
         .exec(
-            cid,
+            &cid,
             &ExecConfig {
                 cmd: vec!["cat".into(), "/tmp/compose-feature-marker".into()],
                 ..Default::default()
@@ -1047,7 +1171,7 @@ services:
     // Verify containerEnv was written to profile script
     let env_result = provider
         .exec(
-            cid,
+            &cid,
             &ExecConfig {
                 cmd: vec!["cat".into(), "/etc/profile.d/devc-features.sh".into()],
                 ..Default::default()
@@ -1069,7 +1193,7 @@ services:
     // Verify the env var actually works at runtime when profile is sourced
     let runtime_env = provider
         .exec(
-            cid,
+            &cid,
             &ExecConfig {
                 cmd: vec![
                     "sh".into(),
@@ -1088,9 +1212,7 @@ services:
     );
 
     // Cleanup
-    let _ = provider
-        .compose_down(&compose_file_strs, &project_name, project_dir)
-        .await;
+    _compose_guard.cleanup(&provider).await;
     eprintln!("E2E compose feature install test passed!");
 }
 
@@ -1233,6 +1355,10 @@ async fn test_e2e_docker_in_docker_feature_install() {
         .create(&create_config)
         .await
         .expect("create should succeed");
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _guard = TestContainerGuard::new(rt, rt_prefix, cid.0.clone())
+        .with_name("devc-test-dind-e2e")
+        .with_image(&image_tag);
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify privileged mode is actually set on the running container
@@ -1317,11 +1443,7 @@ async fn test_e2e_docker_in_docker_feature_install() {
     }
 
     // Cleanup
-    let runtime = provider.info().provider_type.to_string();
-    let _ = provider.remove(&cid, true).await;
-    let _ = std::process::Command::new(&runtime)
-        .args(["rmi", &image_tag])
-        .output();
+    _guard.cleanup(&provider).await;
     eprintln!("E2E docker-in-docker feature install test passed!");
 }
 
@@ -1557,6 +1679,10 @@ async fn test_e2e_tarball_url_feature_install() {
         .create(&config)
         .await
         .expect("create should succeed");
+    let (rt, rt_prefix) = provider.runtime_args();
+    let _guard = TestContainerGuard::new(rt, rt_prefix, cid.0.clone())
+        .with_name("devc-test-tarball-url-e2e")
+        .with_image(&image_tag);
     provider.start(&cid).await.expect("start should succeed");
 
     // Verify the marker file was created by the feature's install.sh
@@ -1577,11 +1703,7 @@ async fn test_e2e_tarball_url_feature_install() {
     );
 
     // Cleanup
-    let runtime = provider.info().provider_type.to_string();
-    let _ = provider.remove(&cid, true).await;
-    let _ = std::process::Command::new(&runtime)
-        .args(["rmi", &image_tag])
-        .output();
+    _guard.cleanup(&provider).await;
     server.abort();
     eprintln!("E2E tarball URL feature install test passed!");
 }

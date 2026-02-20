@@ -2,10 +2,71 @@
 
 use crate::{CoreError, DevcContainerStatus, Result};
 use devc_provider::{ContainerId, ContainerProvider, ExecStream};
+use std::time::Duration;
 
 use super::{ContainerManager, ExecContext};
 
 impl ContainerManager {
+    async fn resolve_live_exec_container_id(
+        &self,
+        id: &str,
+        provider: &dyn ContainerProvider,
+        container_state: &crate::ContainerState,
+    ) -> Result<ContainerId> {
+        if let (Some(_project), Some(service)) = (
+            container_state.compose_project.as_ref(),
+            container_state.compose_service.as_deref(),
+        ) {
+            let container = self.load_container(&container_state.config_path)?;
+            let compose_files = container.compose_files().ok_or_else(|| {
+                CoreError::InvalidState("No dockerComposeFile specified".to_string())
+            })?;
+            let owned = super::compose_file_strs(&compose_files);
+            let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+            let project_name = container.compose_project_name();
+            let cid = self
+                .resolve_running_compose_service_container_id(
+                    provider,
+                    &refs,
+                    &project_name,
+                    &container.workspace_path,
+                    service,
+                )
+                .await?;
+
+            if container_state.container_id.as_deref() != Some(cid.0.as_str()) {
+                {
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.container_id = Some(cid.0.clone());
+                    }
+                }
+                self.save_state().await?;
+            }
+            return Ok(cid);
+        }
+
+        let stored = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container has no provider ID".into()))?;
+        let cid = ContainerId::new(stored);
+        if provider.inspect(&cid).await.is_err() {
+            return Err(CoreError::InvalidState(format!(
+                "Container '{}' is not inspectable/running",
+                cid.0
+            )));
+        }
+        Ok(cid)
+    }
+
+    fn is_container_missing_error(err: &CoreError) -> bool {
+        let msg = err.to_string().to_lowercase();
+        msg.contains("does not exist")
+            || msg.contains("no such container")
+            || msg.contains("no container with name or id")
+    }
+
     /// Shared preamble for exec/shell operations.
     /// Validates the container is running, extracts provider ID, and loads feature properties.
     pub(crate) async fn prepare_exec(&self, id: &str) -> Result<ExecContext<'_>> {
@@ -25,11 +86,9 @@ impl ContainerManager {
             ));
         }
 
-        let container_id = container_state
-            .container_id
-            .as_ref()
-            .ok_or_else(|| CoreError::InvalidState("Container has no provider ID".into()))?;
-        let cid = ContainerId::new(container_id);
+        let cid = self
+            .resolve_live_exec_container_id(id, provider, &container_state)
+            .await?;
         let feature_props = super::get_feature_properties(&container_state);
 
         Ok(ExecContext {
@@ -91,60 +150,79 @@ impl ContainerManager {
         cmd: Vec<String>,
         tty: bool,
     ) -> Result<devc_provider::ExecResult> {
-        let ctx = self.prepare_exec(id).await?;
+        let mut attempts = 0u8;
+        let max_attempts = 2u8;
+        loop {
+            let ctx = self.prepare_exec(id).await?;
 
-        // Try loading config for remoteEnv/user/workdir; fall back to a basic config
-        // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
-        let (config, user_for_creds) = match self.load_container(&ctx.container_state.config_path) {
-            Ok(container) => {
-                let user = container
-                    .devcontainer
-                    .effective_user()
-                    .map(|s| s.to_string());
-                (
-                    container.exec_config_with_feature_env(
-                        cmd,
-                        tty,
-                        tty,
-                        ctx.feature_props.remote_env_option(),
-                    ),
-                    user,
-                )
+            // Try loading config for remoteEnv/user/workdir; fall back to a basic config
+            // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
+            let (config, user_for_creds) =
+                match self.load_container(&ctx.container_state.config_path) {
+                    Ok(container) => {
+                        let user = container
+                            .devcontainer
+                            .effective_user()
+                            .map(|s| s.to_string());
+                        (
+                            container.exec_config_with_feature_env(
+                                cmd.clone(),
+                                tty,
+                                tty,
+                                ctx.feature_props.remote_env_option(),
+                            ),
+                            user,
+                        )
+                    }
+                    Err(_) => {
+                        let mut env = std::collections::HashMap::new();
+                        env.insert("TERM".to_string(), "xterm-256color".to_string());
+                        env.insert("COLORTERM".to_string(), "truecolor".to_string());
+                        env.insert("LANG".to_string(), "C.UTF-8".to_string());
+                        env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
+                        (
+                            devc_provider::ExecConfig {
+                                cmd: cmd.clone(),
+                                env,
+                                working_dir: None,
+                                user: None,
+                                tty,
+                                stdin: tty,
+                                privileged: false,
+                            },
+                            None,
+                        )
+                    }
+                };
+
+            self.refresh_credentials(
+                ctx.provider,
+                &ctx.cid,
+                user_for_creds.as_deref(),
+                &ctx.container_state.workspace_path,
+            )
+            .await;
+
+            match ctx.provider.exec(&ctx.cid, &config).await {
+                Ok(result) => {
+                    self.touch_last_used(id).await?;
+                    return Ok(result);
+                }
+                Err(e) => {
+                    let core_err: CoreError = e.into();
+                    attempts += 1;
+                    if attempts < max_attempts && Self::is_container_missing_error(&core_err) {
+                        tracing::warn!(
+                            "exec target '{}' vanished, retrying with re-resolved compose service",
+                            ctx.cid.0
+                        );
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                    return Err(core_err);
+                }
             }
-            Err(_) => {
-                let mut env = std::collections::HashMap::new();
-                env.insert("TERM".to_string(), "xterm-256color".to_string());
-                env.insert("COLORTERM".to_string(), "truecolor".to_string());
-                env.insert("LANG".to_string(), "C.UTF-8".to_string());
-                env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
-                (
-                    devc_provider::ExecConfig {
-                        cmd,
-                        env,
-                        working_dir: None,
-                        user: None,
-                        tty,
-                        stdin: tty,
-                        privileged: false,
-                    },
-                    None,
-                )
-            }
-        };
-
-        self.refresh_credentials(
-            ctx.provider,
-            &ctx.cid,
-            user_for_creds.as_deref(),
-            &ctx.container_state.workspace_path,
-        )
-        .await;
-
-        let result = ctx.provider.exec(&ctx.cid, &config).await?;
-
-        self.touch_last_used(id).await?;
-
-        Ok(result)
+        }
     }
 
     /// Execute a command interactively with PTY

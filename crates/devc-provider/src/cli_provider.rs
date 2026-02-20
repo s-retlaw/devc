@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -91,7 +92,7 @@ impl CliProvider {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    /// Build a command with the correct prefix
+    /// Build a command with the correct prefix.
     fn build_command(&self) -> Command {
         if self.cmd_prefix.is_empty() {
             Command::new(&self.cmd)
@@ -137,6 +138,184 @@ impl CliProvider {
         } else {
             src.to_string_lossy().to_string()
         }
+    }
+
+    /// Resolve a compose service to a concrete container ID via runtime labels.
+    async fn resolve_compose_container_id_by_labels(
+        &self,
+        project_name: &str,
+        service_name: &str,
+    ) -> Option<ContainerId> {
+        let filter_sets = [
+            (
+                format!("label=com.docker.compose.project={project_name}"),
+                format!("label=com.docker.compose.service={service_name}"),
+            ),
+            (
+                format!("label=io.podman.compose.project={project_name}"),
+                format!("label=io.podman.compose.service={service_name}"),
+            ),
+        ];
+
+        for (project_filter, service_filter) in filter_sets {
+            // Prefer running containers when possible.
+            let mut args = vec![
+                "ps".to_string(),
+                "-a".to_string(),
+                "--no-trunc".to_string(),
+                "--filter".to_string(),
+                project_filter.clone(),
+                "--filter".to_string(),
+                service_filter.clone(),
+                "--filter".to_string(),
+                "status=running".to_string(),
+                "--format".to_string(),
+                "{{.ID}}".to_string(),
+            ];
+            let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            if let Ok(output) = self.run_cmd(&args_refs).await {
+                if let Some(id) = output.lines().find(|l| !l.trim().is_empty()) {
+                    return Some(ContainerId::new(id.trim()));
+                }
+            }
+
+            // Fall back to any matching container.
+            args = vec![
+                "ps".to_string(),
+                "-a".to_string(),
+                "--no-trunc".to_string(),
+                "--filter".to_string(),
+                project_filter,
+                "--filter".to_string(),
+                service_filter,
+                "--format".to_string(),
+                "{{.ID}}".to_string(),
+            ];
+            let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            if let Ok(output) = self.run_cmd(&args_refs).await {
+                if let Some(id) = output.lines().find(|l| !l.trim().is_empty()) {
+                    return Some(ContainerId::new(id.trim()));
+                }
+            }
+        }
+
+        // Final fallback: compose-style container name match.
+        // Works in environments where compose labels are absent or renamed.
+        let name_prefix = format!("{project_name}-{service_name}-");
+        for running_only in [true, false] {
+            let mut args = vec![
+                "ps".to_string(),
+                "-a".to_string(),
+                "--no-trunc".to_string(),
+                "--filter".to_string(),
+                format!("name={name_prefix}"),
+            ];
+            if running_only {
+                args.push("--filter".to_string());
+                args.push("status=running".to_string());
+            }
+            args.push("--format".to_string());
+            args.push("{{.ID}}".to_string());
+
+            let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            if let Ok(output) = self.run_cmd(&args_refs).await {
+                if let Some(id) = output.lines().find(|l| !l.trim().is_empty()) {
+                    return Some(ContainerId::new(id.trim()));
+                }
+            }
+        }
+
+        None
+    }
+
+    async fn resolve_compose_container_id_with_compose_ps_q(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &Path,
+        service_name: &str,
+    ) -> Option<ContainerId> {
+        let mut args = vec!["compose".to_string()];
+        for f in compose_files {
+            args.push("-f".to_string());
+            args.push((*f).to_string());
+        }
+        args.push("-p".to_string());
+        args.push(project_name.to_string());
+        args.push("ps".to_string());
+        args.push("-q".to_string());
+        args.push(service_name.to_string());
+
+        let mut cmd = self.build_command();
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        cmd.current_dir(project_dir);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::null());
+
+        let output = cmd.output().await.ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|id| ContainerId::new(id.trim()))
+    }
+
+    async fn inspect_status_detail(
+        &self,
+        id: &ContainerId,
+    ) -> std::result::Result<ContainerStatus, String> {
+        match self.inspect(id).await {
+            Ok(details) => Ok(details.status),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Check if a container is running using `ps` instead of `container inspect`.
+    ///
+    /// Under Podman, `ps` and `container inspect` can use different code paths
+    /// to access the container store. After `compose up`, `ps` may see a newly
+    /// created container before `container inspect` does. This method serves as
+    /// a fallback verification when `inspect` fails due to this desync.
+    async fn is_container_running_via_ps(&self, id: &ContainerId) -> bool {
+        // Try matching as a container ID.
+        let id_filter = format!("id={}", id.0);
+        let args = [
+            "ps",
+            "-q",
+            "--no-trunc",
+            "--filter",
+            &id_filter,
+            "--filter",
+            "status=running",
+        ];
+        if let Ok(output) = self.run_cmd(&args).await {
+            if !output.trim().is_empty() {
+                return true;
+            }
+        }
+        // Try matching as a container name (ContainerId may hold a name).
+        let name_filter = format!("name={}", id.0);
+        let args = [
+            "ps",
+            "-q",
+            "--no-trunc",
+            "--filter",
+            &name_filter,
+            "--filter",
+            "status=running",
+        ];
+        if let Ok(output) = self.run_cmd(&args).await {
+            if !output.trim().is_empty() {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -547,7 +726,7 @@ impl ContainerProvider for CliProvider {
     async fn inspect(&self, id: &ContainerId) -> Result<ContainerDetails> {
         // Use native runtime JSON output. Docker/Podman both return JSON here
         // (typically an array for one ID), and this is more portable than template mode.
-        let output = self.run_cmd(&["inspect", &id.0]).await?;
+        let output = self.run_cmd(&["container", "inspect", &id.0]).await?;
         parse_inspect_output(&output, id)
     }
 
@@ -749,6 +928,202 @@ impl ContainerProvider for CliProvider {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_compose_ps_output(&stdout)
+    }
+
+    async fn compose_resolve_service_id(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &Path,
+        service_name: &str,
+        timeout: Duration,
+    ) -> Result<ContainerId> {
+        let deadline = Instant::now() + timeout;
+        let mut last_candidate: Option<ContainerId> = None;
+        let mut last_compose_state: Option<String> = None;
+        let mut last_inspect_detail: Option<String> = None;
+
+        while Instant::now() < deadline {
+            // Strategy 0: Try well-known container names directly.
+            // Compose container names follow predictable patterns and are
+            // resolvable immediately via direct CLI, avoiding compose API desync.
+            for name in [
+                format!("{}-{}-1", project_name, service_name),
+                format!("{}_{}_1", project_name, service_name),
+            ] {
+                let name_cid = ContainerId(name.clone());
+                match self.inspect_status_detail(&name_cid).await {
+                    Ok(ContainerStatus::Running) => {
+                        tracing::debug!(
+                            "compose_resolve_service_id via name+inspect: project='{}' service='{}' name='{}'",
+                            project_name,
+                            service_name,
+                            name
+                        );
+                        return Ok(name_cid);
+                    }
+                    Ok(status) => {
+                        last_candidate = Some(name_cid);
+                        last_inspect_detail = Some(format!("name_inspect_status={}", status));
+                    }
+                    Err(_) => {
+                        // inspect may fail due to Podman API/CLI store desync;
+                        // fall back to ps-based check which uses a different path.
+                        if self.is_container_running_via_ps(&name_cid).await {
+                            tracing::debug!(
+                                "compose_resolve_service_id via name+ps: project='{}' service='{}' name='{}'",
+                                project_name,
+                                service_name,
+                                name
+                            );
+                            return Ok(name_cid);
+                        }
+                    }
+                }
+            }
+
+            // Strategy 0b: Try compose_ps() and use the container ID it returns.
+            match self
+                .compose_ps(compose_files, project_name, project_dir)
+                .await
+            {
+                Ok(services) => {
+                    if let Some(svc) = services.iter().find(|s| s.service_name == service_name) {
+                        last_compose_state = Some(svc.status.to_string());
+                        if !svc.container_id.0.is_empty() {
+                            let ps_cid = &svc.container_id;
+                            match self.inspect_status_detail(ps_cid).await {
+                                Ok(ContainerStatus::Running) => {
+                                    tracing::debug!(
+                                        "compose_resolve_service_id via compose_ps id+inspect: project='{}' service='{}' id='{}'",
+                                        project_name,
+                                        service_name,
+                                        ps_cid.0
+                                    );
+                                    return Ok(ps_cid.clone());
+                                }
+                                _ => {
+                                    // inspect failed or status not running; try ps fallback
+                                    if self.is_container_running_via_ps(ps_cid).await {
+                                        tracing::debug!(
+                                            "compose_resolve_service_id via compose_ps id+ps: project='{}' service='{}' id='{}'",
+                                            project_name,
+                                            service_name,
+                                            ps_cid.0
+                                        );
+                                        return Ok(ps_cid.clone());
+                                    }
+                                    last_candidate = Some(ps_cid.clone());
+                                    last_inspect_detail =
+                                        Some("compose_ps_id: inspect and ps both failed".into());
+                                }
+                            }
+                        }
+                    } else {
+                        last_compose_state = Some("missing".to_string());
+                    }
+                }
+                Err(e) => {
+                    last_compose_state = Some(format!("compose_ps_error: {}", e));
+                }
+            }
+
+            // Strategy 1: compose ps -q returns a container ID for the service.
+            if let Some(cid) = self
+                .resolve_compose_container_id_with_compose_ps_q(
+                    compose_files,
+                    project_name,
+                    project_dir,
+                    service_name,
+                )
+                .await
+            {
+                last_candidate = Some(cid.clone());
+                match self.inspect_status_detail(&cid).await {
+                    Ok(ContainerStatus::Running) => {
+                        tracing::debug!(
+                            "compose_resolve_service_id via compose ps -q: project='{}' service='{}' id='{}'",
+                            project_name,
+                            service_name,
+                            cid.0
+                        );
+                        return Ok(cid);
+                    }
+                    Ok(status) => {
+                        last_inspect_detail = Some(format!("inspect_status={}", status));
+                    }
+                    Err(_) => {
+                        if self.is_container_running_via_ps(&cid).await {
+                            tracing::debug!(
+                                "compose_resolve_service_id via compose ps -q +ps: project='{}' service='{}' id='{}'",
+                                project_name,
+                                service_name,
+                                cid.0
+                            );
+                            return Ok(cid);
+                        }
+                        last_inspect_detail =
+                            Some("compose_ps_q: inspect and ps both failed".into());
+                    }
+                }
+            }
+
+            // Strategy 2: label-based lookup via `ps --filter label=...`.
+            // resolve_compose_container_id_by_labels already uses `ps --filter
+            // status=running` internally, so a successful return means the
+            // container was visible and running to `ps`. We still try inspect
+            // for consistency, but fall back to trusting the ps result.
+            if let Some(cid) = self
+                .resolve_compose_container_id_by_labels(project_name, service_name)
+                .await
+            {
+                last_candidate = Some(cid.clone());
+                match self.inspect_status_detail(&cid).await {
+                    Ok(ContainerStatus::Running) => {
+                        tracing::debug!(
+                            "compose_resolve_service_id via labels+inspect: project='{}' service='{}' id='{}'",
+                            project_name,
+                            service_name,
+                            cid.0
+                        );
+                        return Ok(cid);
+                    }
+                    _ => {
+                        // Labels strategy found the container via `ps`, which
+                        // means it IS accessible to the CLI. Trust the ps result
+                        // even when inspect desyncs.
+                        if self.is_container_running_via_ps(&cid).await {
+                            tracing::debug!(
+                                "compose_resolve_service_id via labels+ps: project='{}' service='{}' id='{}'",
+                                project_name,
+                                service_name,
+                                cid.0
+                            );
+                            return Ok(cid);
+                        }
+                        last_inspect_detail = Some("labels: inspect and ps both failed".into());
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        Err(ProviderError::RuntimeError(format!(
+            "Compose service '{}' in project '{}' did not stabilize to running within {}s{}{}{}",
+            service_name,
+            project_name,
+            timeout.as_secs(),
+            last_candidate
+                .map(|c| format!(" (last candidate: {})", c.0))
+                .unwrap_or_default(),
+            last_compose_state
+                .map(|s| format!(" (last compose state: {})", s))
+                .unwrap_or_default(),
+            last_inspect_detail
+                .map(|s| format!(" (last inspect: {})", s))
+                .unwrap_or_default()
+        )))
     }
 
     async fn discover_devcontainers(&self) -> Result<Vec<DiscoveredContainer>> {
@@ -1296,10 +1671,13 @@ fn parse_compose_ps_output(stdout: &str) -> Result<Vec<crate::ComposeServiceInfo
             .or_else(|| parsed["Labels"]["com.docker.compose.service"].as_str())
             .unwrap_or("")
             .to_string();
-        // Docker compose uses "ID"; podman-compose uses "Id"
+        // Prefer ID fields first; they are the most portable exec target.
+        // Fall back to name fields when IDs are missing.
         let container_id = parsed["ID"]
             .as_str()
             .or_else(|| parsed["Id"].as_str())
+            .or_else(|| parsed["Name"].as_str())
+            .or_else(|| parsed["Names"].as_str())
             .unwrap_or("")
             .to_string();
         let state = parsed["State"].as_str().unwrap_or("unknown");
@@ -1333,7 +1711,38 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-    use tempfile::tempdir;
+    use std::sync::OnceLock;
+    use tempfile::{tempdir, TempDir};
+
+    static TEST_ENV_ROOT: OnceLock<TempDir> = OnceLock::new();
+
+    fn ensure_test_xdg_env() {
+        let root = TEST_ENV_ROOT.get_or_init(|| {
+            let root = TempDir::new().expect("failed to create test env dir");
+            let config = root.path().join("config");
+            let data = root.path().join("data");
+            let cache = root.path().join("cache");
+            std::fs::create_dir_all(&config).expect("create XDG_CONFIG_HOME");
+            std::fs::create_dir_all(&data).expect("create XDG_DATA_HOME");
+            std::fs::create_dir_all(&cache).expect("create XDG_CACHE_HOME");
+            // SAFETY: set once per test binary before runtime operations.
+            unsafe {
+                std::env::set_var("XDG_CONFIG_HOME", &config);
+                std::env::set_var("XDG_DATA_HOME", &data);
+                std::env::set_var("XDG_CACHE_HOME", &cache);
+            }
+            root
+        });
+
+        let cfg = std::path::PathBuf::from(
+            std::env::var("XDG_CONFIG_HOME").expect("XDG_CONFIG_HOME should be set"),
+        );
+        let data = std::path::PathBuf::from(
+            std::env::var("XDG_DATA_HOME").expect("XDG_DATA_HOME should be set"),
+        );
+        assert!(cfg.starts_with(root.path()), "XDG config path not isolated");
+        assert!(data.starts_with(root.path()), "XDG data path not isolated");
+    }
 
     #[test]
     fn test_cp_source_spec_handles_dir_and_file() {
@@ -1493,6 +1902,24 @@ mod tests {
         assert_eq!(services[1].service_name, "redis");
         assert_eq!(services[1].container_id.0, "bbb222");
         assert_eq!(services[1].status, ContainerStatus::Exited);
+    }
+
+    #[test]
+    fn test_parse_compose_ps_prefers_id_for_container_reference() {
+        let stdout = r#"{"ID":"aaa111","Name":"proj-app-1","Service":"app","State":"running"}"#;
+        let services = parse_compose_ps_output(stdout).unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].service_name, "app");
+        assert_eq!(services[0].container_id.0, "aaa111");
+        assert_eq!(services[0].status, ContainerStatus::Running);
+    }
+
+    #[test]
+    fn test_parse_compose_ps_falls_back_to_name_when_id_missing() {
+        let stdout = r#"{"Name":"proj-app-1","Service":"app","State":"running"}"#;
+        let services = parse_compose_ps_output(stdout).unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].container_id.0, "proj-app-1");
     }
 
     #[test]
@@ -1937,19 +2364,45 @@ mod tests {
     }
 
     async fn get_test_provider() -> Option<CliProvider> {
+        ensure_test_xdg_env();
+        async fn provider_if_usable(provider: CliProvider) -> Option<CliProvider> {
+            match provider.list(true).await {
+                Ok(_) => Some(provider),
+                Err(e) => {
+                    eprintln!("Skipping test: runtime unavailable/restricted: {}", e);
+                    None
+                }
+            }
+        }
+
         match std::env::var("DEVC_TEST_PROVIDER").as_deref() {
-            Ok("docker") => CliProvider::new_docker().await.ok(),
-            Ok("podman") => CliProvider::new_podman().await.ok(),
-            Ok("toolbox") => CliProvider::new_toolbox().await.ok(),
+            Ok("docker") => {
+                let p = CliProvider::new_docker().await.ok()?;
+                provider_if_usable(p).await
+            }
+            Ok("podman") => {
+                let p = CliProvider::new_podman().await.ok()?;
+                provider_if_usable(p).await
+            }
+            Ok("toolbox") => {
+                let p = CliProvider::new_toolbox().await.ok()?;
+                provider_if_usable(p).await
+            }
             _ => {
                 if let Ok(p) = CliProvider::new_toolbox().await {
-                    return Some(p);
+                    if let Some(p) = provider_if_usable(p).await {
+                        return Some(p);
+                    }
                 }
                 if let Ok(p) = CliProvider::new_podman().await {
-                    return Some(p);
+                    if let Some(p) = provider_if_usable(p).await {
+                        return Some(p);
+                    }
                 }
                 if let Ok(p) = CliProvider::new_docker().await {
-                    return Some(p);
+                    if let Some(p) = provider_if_usable(p).await {
+                        return Some(p);
+                    }
                 }
                 None
             }

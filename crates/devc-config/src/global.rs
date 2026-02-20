@@ -287,20 +287,44 @@ impl GlobalConfig {
         })
     }
 
-    /// Get the default config file path
+    /// Get the default config file path.
+    ///
+    /// Checks `DEVC_CONFIG_DIR` first, then `DEVC_STATE_DIR/config/`,
+    /// then falls back to the XDG/directories crate default.
     pub fn config_path() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("DEVC_CONFIG_DIR") {
+            return Ok(PathBuf::from(dir).join("config.toml"));
+        }
+        if let Ok(dir) = std::env::var("DEVC_STATE_DIR") {
+            return Ok(PathBuf::from(dir).join("config/config.toml"));
+        }
         let dirs = ProjectDirs::from("", "", "devc").ok_or(ConfigError::NoConfigDir)?;
         Ok(dirs.config_dir().join("config.toml"))
     }
 
-    /// Get the data directory path
+    /// Get the data directory path.
+    ///
+    /// Checks `DEVC_STATE_DIR` first, then falls back to the XDG/directories
+    /// crate default.
     pub fn data_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("DEVC_STATE_DIR") {
+            return Ok(PathBuf::from(dir).join("data"));
+        }
         let dirs = ProjectDirs::from("", "", "devc").ok_or(ConfigError::NoDataDir)?;
         Ok(dirs.data_dir().to_path_buf())
     }
 
-    /// Get the cache directory path
+    /// Get the cache directory path.
+    ///
+    /// Checks `DEVC_CACHE_DIR` first, then `DEVC_STATE_DIR/cache/`,
+    /// then falls back to the XDG/directories crate default.
     pub fn cache_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("DEVC_CACHE_DIR") {
+            return Ok(PathBuf::from(dir));
+        }
+        if let Ok(dir) = std::env::var("DEVC_STATE_DIR") {
+            return Ok(PathBuf::from(dir).join("cache"));
+        }
         let dirs = ProjectDirs::from("", "", "devc").ok_or(ConfigError::NoDataDir)?;
         Ok(dirs.cache_dir().to_path_buf())
     }

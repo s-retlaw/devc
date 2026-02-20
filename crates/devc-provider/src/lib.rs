@@ -19,6 +19,7 @@ pub use types::*;
 
 use async_trait::async_trait;
 use std::pin::Pin;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
@@ -117,6 +118,19 @@ pub trait ContainerProvider: Send + Sync {
         project_name: &str,
         project_dir: &std::path::Path,
     ) -> Result<Vec<ComposeServiceInfo>>;
+
+    /// Resolve a compose service to a live, inspectable running container ID.
+    ///
+    /// Implementations should use provider/runtime-specific fallbacks and retry
+    /// within the provided timeout budget.
+    async fn compose_resolve_service_id(
+        &self,
+        compose_files: &[&str],
+        project_name: &str,
+        project_dir: &std::path::Path,
+        service_name: &str,
+        timeout: Duration,
+    ) -> Result<ContainerId>;
 }
 
 /// Interactive exec stream with stdin/stdout/stderr

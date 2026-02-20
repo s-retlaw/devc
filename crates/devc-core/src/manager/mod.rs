@@ -49,29 +49,7 @@ impl ContainerManager {
     /// Create a new container manager
     pub async fn new(provider: Box<dyn ContainerProvider>) -> Result<Self> {
         let global_config = GlobalConfig::load()?;
-        let state = StateStore::load()?;
-        let default_type = provider.info().provider_type;
-
-        let mut providers = HashMap::new();
-        providers.insert(default_type, provider);
-
-        // Try to also cache the other provider type for cross-provider operations
-        for &pt in &[ProviderType::Docker, ProviderType::Podman] {
-            if pt != default_type {
-                if let Ok(p) = devc_provider::create_provider(pt, &global_config).await {
-                    providers.insert(pt, p);
-                }
-            }
-        }
-
-        Ok(Self {
-            providers,
-            default_provider_type: Some(default_type),
-            state: Arc::new(RwLock::new(state)),
-            global_config,
-            connection_error: None,
-            state_path_override: None,
-        })
+        Self::with_config_and_state_path(provider, global_config, None).await
     }
 
     /// Create with specific global config
@@ -79,7 +57,22 @@ impl ContainerManager {
         provider: Box<dyn ContainerProvider>,
         global_config: GlobalConfig,
     ) -> Result<Self> {
-        let state = StateStore::load()?;
+        Self::with_config_and_state_path(provider, global_config, None).await
+    }
+
+    /// Create with specific global config and optional state file path override.
+    ///
+    /// When `state_path_override` is set, state is loaded from and persisted to that path.
+    pub async fn with_config_and_state_path(
+        provider: Box<dyn ContainerProvider>,
+        global_config: GlobalConfig,
+        state_path_override: Option<PathBuf>,
+    ) -> Result<Self> {
+        let state = if let Some(path) = &state_path_override {
+            StateStore::load_from(path)?
+        } else {
+            StateStore::load()?
+        };
         let default_type = provider.info().provider_type;
 
         let mut providers = HashMap::new();
@@ -100,7 +93,7 @@ impl ContainerManager {
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: None,
-            state_path_override: None,
+            state_path_override,
         })
     }
 
@@ -165,7 +158,22 @@ impl ContainerManager {
 
     /// Create a disconnected manager (no provider available)
     pub fn disconnected(global_config: GlobalConfig, error: String) -> Result<Self> {
-        let state = StateStore::load()?;
+        Self::disconnected_with_state_path(global_config, error, None)
+    }
+
+    /// Create a disconnected manager with optional state file path override.
+    ///
+    /// When `state_path_override` is set, state is loaded from and persisted to that path.
+    pub fn disconnected_with_state_path(
+        global_config: GlobalConfig,
+        error: String,
+        state_path_override: Option<PathBuf>,
+    ) -> Result<Self> {
+        let state = if let Some(path) = &state_path_override {
+            StateStore::load_from(path)?
+        } else {
+            StateStore::load()?
+        };
 
         Ok(Self {
             providers: HashMap::new(),
@@ -173,7 +181,7 @@ impl ContainerManager {
             state: Arc::new(RwLock::new(state)),
             global_config,
             connection_error: Some(error),
-            state_path_override: None,
+            state_path_override,
         })
     }
 
@@ -671,26 +679,22 @@ impl ContainerManager {
                     )
                     .await?;
 
-                // Re-discover the primary service container ID after compose_up
-                let services = provider
-                    .compose_ps(&compose_file_refs, &project_name, &container.workspace_path)
-                    .await?;
                 let primary_service = container.compose_service().ok_or_else(|| {
                     CoreError::InvalidState("No service specified for compose project".to_string())
                 })?;
-                let svc = services
-                    .iter()
-                    .find(|s| s.service_name == primary_service)
-                    .ok_or_else(|| {
-                        CoreError::InvalidState(format!(
-                            "Service '{}' not found in compose project",
-                            primary_service
-                        ))
-                    })?;
+                let cid = self
+                    .resolve_running_compose_service_container_id(
+                        provider,
+                        &compose_file_refs,
+                        &project_name,
+                        &container.workspace_path,
+                        primary_service,
+                    )
+                    .await?;
                 {
                     let mut state = self.state.write().await;
                     if let Some(cs) = state.get_mut(id) {
-                        cs.container_id = Some(svc.container_id.0.clone());
+                        cs.container_id = Some(cid.0.clone());
                         cs.compose_project = Some(project_name);
                         cs.compose_service = Some(primary_service.to_string());
                     }
@@ -705,8 +709,7 @@ impl ContainerManager {
                     .map(|v| v == "true")
                     .unwrap_or(false)
                 {
-                    self.ensure_ssh_daemon_running(provider, &svc.container_id)
-                        .await?;
+                    self.ensure_ssh_daemon_running(provider, &cid).await?;
                 }
 
                 // Run post-start commands (feature commands first, then devcontainer.json)
@@ -718,7 +721,7 @@ impl ContainerManager {
                 if !feature_props.post_start_commands.is_empty() {
                     run_feature_lifecycle_commands(
                         provider,
-                        &svc.container_id,
+                        &cid,
                         &feature_props.post_start_commands,
                         container.devcontainer.effective_user(),
                         container.devcontainer.workspace_folder.as_deref(),
@@ -729,7 +732,7 @@ impl ContainerManager {
                 if let Some(ref cmd) = container.devcontainer.post_start_command {
                     run_lifecycle_command_with_env(
                         provider,
-                        &svc.container_id,
+                        &cid,
                         cmd,
                         container.devcontainer.effective_user(),
                         container.devcontainer.workspace_folder.as_deref(),
@@ -1322,7 +1325,7 @@ pub(crate) fn send_progress(progress: Option<&mpsc::UnboundedSender<String>>, ms
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use devc_provider::{ComposeServiceInfo, ContainerStatus, ProviderError, ProviderType};
+    use devc_provider::{ContainerStatus, ProviderError, ProviderType};
 
     /// Create a test workspace with a devcontainer.json that uses an image
     fn create_test_workspace() -> tempfile::TempDir {
@@ -2279,12 +2282,8 @@ mod tests {
 
         let mock = MockProvider::new(ProviderType::Docker);
         let calls = mock.calls.clone();
-        // compose_ps returns a service entry
-        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
-            service_name: "app".to_string(),
-            container_id: ContainerId::new("compose_container_123"),
-            status: ContainerStatus::Running,
-        }]);
+        *mock.compose_resolve_service_id_result.lock().unwrap() =
+            Ok(ContainerId::new("compose_container_123"));
 
         let mut state = StateStore::new();
         let cs = make_container_state(
@@ -2306,7 +2305,7 @@ mod tests {
             .any(|c| matches!(c, MockCall::ComposeUp { .. })));
         assert!(recorded
             .iter()
-            .any(|c| matches!(c, MockCall::ComposePs { .. })));
+            .any(|c| matches!(c, MockCall::ComposeResolveServiceId { .. })));
 
         // Verify state was updated with compose metadata
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2423,11 +2422,8 @@ mod tests {
 
         let mock = MockProvider::new(ProviderType::Docker);
         let calls = mock.calls.clone();
-        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
-            service_name: "app".to_string(),
-            container_id: ContainerId::new("compose_start_abc"),
-            status: ContainerStatus::Running,
-        }]);
+        *mock.compose_resolve_service_id_result.lock().unwrap() =
+            Ok(ContainerId::new("compose_start_abc"));
 
         let mut state = StateStore::new();
         // Use Stopped status — can_start() requires Created or Stopped
@@ -2441,14 +2437,14 @@ mod tests {
         let mgr = test_manager_with_state(mock, state);
         mgr.start(&id).await.unwrap();
 
-        // Verify compose_up and compose_ps were called
+        // Verify compose_up and compose service resolution were called
         let recorded = calls.lock().unwrap();
         assert!(recorded
             .iter()
             .any(|c| matches!(c, MockCall::ComposeUp { .. })));
         assert!(recorded
             .iter()
-            .any(|c| matches!(c, MockCall::ComposePs { .. })));
+            .any(|c| matches!(c, MockCall::ComposeResolveServiceId { .. })));
 
         // Verify container_id was set from the matched service
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2461,12 +2457,10 @@ mod tests {
         let workspace = create_compose_workspace();
 
         let mock = MockProvider::new(ProviderType::Docker);
-        // compose_ps returns a service that does NOT match the primary service "app"
-        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
-            service_name: "db".to_string(),
-            container_id: ContainerId::new("compose_db_123"),
-            status: ContainerStatus::Running,
-        }]);
+        *mock.compose_resolve_service_id_result.lock().unwrap() =
+            Err(devc_provider::ProviderError::RuntimeError(
+                "Service 'app' not found in compose project".to_string(),
+            ));
 
         let mut state = StateStore::new();
         let mut cs =
@@ -4393,11 +4387,8 @@ mod tests {
     async fn test_up_compose_stores_metadata() {
         let workspace = create_compose_workspace();
         let mock = MockProvider::new(ProviderType::Docker);
-        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
-            service_name: "app".to_string(),
-            container_id: ContainerId::new("compose_meta_abc"),
-            status: ContainerStatus::Running,
-        }]);
+        *mock.compose_resolve_service_id_result.lock().unwrap() =
+            Ok(ContainerId::new("compose_meta_abc"));
 
         let mut state = StateStore::new();
         let cs = make_container_state(
@@ -4426,12 +4417,10 @@ mod tests {
     async fn test_up_compose_service_not_found_fails() {
         let workspace = create_compose_workspace();
         let mock = MockProvider::new(ProviderType::Docker);
-        // compose_ps returns a service that does NOT match "app"
-        *mock.compose_ps_result.lock().unwrap() = Ok(vec![ComposeServiceInfo {
-            service_name: "wrong-service".to_string(),
-            container_id: ContainerId::new("wrong_id"),
-            status: ContainerStatus::Running,
-        }]);
+        *mock.compose_resolve_service_id_result.lock().unwrap() =
+            Err(devc_provider::ProviderError::RuntimeError(
+                "Service 'app' not found in compose project".to_string(),
+            ));
 
         let mut state = StateStore::new();
         let cs = make_container_state(

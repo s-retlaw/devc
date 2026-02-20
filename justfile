@@ -14,13 +14,24 @@ build:
 build-release:
     cargo build --release
 
-# Run all unit tests (skips e2e tests that need a container runtime)
-test:
+# Run hermetic tests (default lane; expected to pass in restricted environments)
+test: test-hermetic
+
+# Run hermetic unit/integration tests (no runtime required)
+test-hermetic:
     cargo nextest run -p devc-config -p devc-core -p devc-cli -p devc-tui -p devc-provider
+
+# Run localhost/socket-sensitive local integration tests
+test-local:
+    cargo nextest run -p devc-tui -E 'test(~tunnel)'
+
+# Run runtime-dependent ignored tests (Docker/Podman/toolbox via DEVC_TEST_PROVIDER)
+test-runtime: _fix-docker-creds
+    cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
 
 # Run e2e tests (requires Docker or Podman)
 test-e2e: _fix-docker-creds
-    cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
+    just test-runtime
 
 # Run e2e tests against Docker
 test-e2e-docker: _fix-docker-creds
@@ -28,7 +39,7 @@ test-e2e-docker: _fix-docker-creds
 
 # Run e2e tests against Podman
 test-e2e-podman: _fix-docker-creds
-    DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
+    CARGO_BUILD_JOBS="${DEVC_E2E_BUILD_JOBS:-2}" GOMAXPROCS="${DEVC_E2E_GOMAXPROCS:-4}" DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e --test-threads "${DEVC_E2E_TEST_THREADS:-1}" -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
 
 # Run e2e tests via simulated toolbox (Podman through flatpak-spawn shim)
 test-e2e-toolbox: _toolbox-setup
@@ -57,12 +68,14 @@ test-e2e-toolbox: _toolbox-setup
 test-all: _fix-docker-creds
     #!/usr/bin/env bash
     source "{{justfile_directory()}}/.devcontainer/test-runner.sh"
-    run_section "Unit Tests" \
+    run_section "Hermetic Tests" \
         cargo nextest run -p devc-config -p devc-core -p devc-cli -p devc-tui -p devc-provider
+    run_section "Local Integration Tests" \
+        cargo nextest run -p devc-tui -E 'test(~tunnel)'
     run_section "E2E: Docker" \
         env DEVC_TEST_PROVIDER=docker cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
     run_section "E2E: Podman" \
-        env DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
+        env CARGO_BUILD_JOBS="${DEVC_E2E_BUILD_JOBS:-2}" GOMAXPROCS="${DEVC_E2E_GOMAXPROCS:-4}" DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e --test-threads "${DEVC_E2E_TEST_THREADS:-1}" -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
     # TODO: add E2E: Toolbox section once toolbox sim container is validated
     print_summary
 
@@ -116,6 +129,34 @@ test-filter PATTERN:
 # Fast agent-focused tests (no runtime needed)
 test-agents:
     cargo nextest run -p devc-config -p devc-core -p devc-cli -E 'test(agent)'
+
+# Remove orphaned test containers, images, and volumes left by failed E2E runs
+test-sweep:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for rt in podman docker; do
+        command -v "$rt" &>/dev/null || continue
+        echo "=== Sweeping $rt ==="
+        # Remove containers matching test naming conventions
+        ids=$("$rt" ps -a --filter "name=devc_test" --filter "name=devc-test" -q 2>/dev/null || true)
+        if [ -n "$ids" ]; then
+            echo "Removing containers: $ids"
+            echo "$ids" | xargs "$rt" rm -f 2>/dev/null || true
+        fi
+        # Remove images matching test naming conventions
+        imgs=$("$rt" images --filter "reference=devc/test-*" -q 2>/dev/null || true)
+        if [ -n "$imgs" ]; then
+            echo "Removing images: $imgs"
+            echo "$imgs" | xargs "$rt" rmi -f 2>/dev/null || true
+        fi
+        # Remove volumes matching test naming conventions
+        vols=$("$rt" volume ls --filter "name=devc-test" -q 2>/dev/null || true)
+        if [ -n "$vols" ]; then
+            echo "Removing volumes: $vols"
+            echo "$vols" | xargs "$rt" volume rm -f 2>/dev/null || true
+        fi
+        echo "=== $rt sweep done ==="
+    done
 
 # Install git hooks (auto-formats on commit)
 setup-hooks:

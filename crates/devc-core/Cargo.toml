@@ -26,5 +26,8 @@ tar = { workspace = true }
 flate2 = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+[dev-dependencies]
+devc-core = { path = ".", features = ["test-support"] }
+
 [features]
 test-support = []

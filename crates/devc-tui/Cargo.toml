@@ -21,5 +21,6 @@ ansi-to-tui = "4"
 nix = { workspace = true }
 
 [dev-dependencies]
+devc-core = { workspace = true, features = ["test-support"] }
 insta = "1"
 tempfile = { workspace = true }

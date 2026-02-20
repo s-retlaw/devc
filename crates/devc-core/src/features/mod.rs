@@ -35,11 +35,10 @@ pub async fn resolve_and_prepare_features(
         return Ok(vec![]);
     }
 
-    // Determine cache directory
-    let cache_dir = directories::BaseDirs::new()
-        .map(|d| d.cache_dir().to_path_buf())
-        .unwrap_or_else(std::env::temp_dir)
-        .join("devc/features");
+    // Determine cache directory via GlobalConfig (respects DEVC_CACHE_DIR / DEVC_STATE_DIR)
+    let cache_dir = devc_config::GlobalConfig::cache_dir()
+        .map(|d| d.join("features"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("devc/features"));
     std::fs::create_dir_all(&cache_dir)?;
 
     // Parse and filter user-requested features
