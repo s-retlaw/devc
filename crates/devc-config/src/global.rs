@@ -231,11 +231,11 @@ impl GlobalConfig {
     }
 
     /// Save configuration to a specific path
-    pub fn save_to(&self, path: &PathBuf) -> Result<()> {
+    pub fn save_to(&self, path: &Path) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| ConfigError::WriteError {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 source: e,
             })?;
         }
@@ -244,7 +244,7 @@ impl GlobalConfig {
             let content =
                 toml::to_string_pretty(self).map_err(|e| ConfigError::Invalid(e.to_string()))?;
             atomic_write(path, content.as_bytes()).map_err(|e| ConfigError::WriteError {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 source: e,
             })
         })
@@ -354,8 +354,7 @@ where
         path: lock_path_for(path),
         source: e,
     })?;
-    let result = f();
-    result
+    f()
 }
 
 fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {

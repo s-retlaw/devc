@@ -3246,7 +3246,9 @@ impl App {
         Ok(())
     }
 
-    /// Toggle start/stop for selected container (background task with spinner)
+    /// Toggle start/stop for selected container.
+    ///
+    /// Start is immediate; stop shows a confirmation dialog first.
     async fn toggle_selected(&mut self) -> AppResult<()> {
         if self.containers.is_empty() || self.container_op.is_some() {
             return Ok(());
@@ -3260,62 +3262,44 @@ impl App {
         let id = container.id.clone();
         let name = container.name.clone();
 
-        let op = match container.status {
-            DevcContainerStatus::Running => ContainerOperation::Stopping {
-                id: id.clone(),
-                name: name.clone(),
-            },
+        match container.status {
+            DevcContainerStatus::Running => {
+                // Show confirmation dialog before stopping
+                self.dialog_focus = DialogFocus::Cancel;
+                self.confirm_action = Some(ConfirmAction::Stop(id));
+                self.view = View::Confirm;
+            }
             DevcContainerStatus::Stopped | DevcContainerStatus::Created => {
-                ContainerOperation::Starting {
+                // Start immediately (no confirmation needed)
+                let op = ContainerOperation::Starting {
                     id: id.clone(),
-                    name: name.clone(),
-                }
+                    name,
+                };
+                self.container_op = Some(op.clone());
+                self.loading = true;
+                self.spinner_frame = 0;
+
+                let tx = self.async_event_tx.clone();
+                let manager = Arc::clone(&self.manager);
+                tokio::spawn(async move {
+                    match manager.read().await.start(&id).await {
+                        Ok(()) => {
+                            let _ = tx.send(AsyncEvent::OperationComplete(
+                                ContainerOpResult::Success(op),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AsyncEvent::OperationComplete(
+                                ContainerOpResult::Failed(op, e.to_string()),
+                            ));
+                        }
+                    }
+                });
             }
             _ => {
                 self.status_message = Some("Cannot start/stop in current state".to_string());
-                return Ok(());
             }
-        };
-
-        let is_start = matches!(op, ContainerOperation::Starting { .. });
-        self.container_op = Some(op.clone());
-        self.loading = true;
-        self.spinner_frame = 0;
-
-        let tx = self.async_event_tx.clone();
-
-        let manager = Arc::clone(&self.manager);
-        tokio::spawn(async move {
-            if is_start {
-                match manager.read().await.start(&id).await {
-                    Ok(()) => {
-                        let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(
-                            op,
-                        )));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(
-                            op,
-                            e.to_string(),
-                        )));
-                    }
-                }
-            } else {
-                match manager.read().await.stop(&id).await {
-                    Ok(()) => {
-                        let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(
-                            op,
-                        )));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(
-                            op,
-                            e.to_string(),
-                        )));
-                    }
-                }
-            }
-        });
+        }
 
         Ok(())
     }

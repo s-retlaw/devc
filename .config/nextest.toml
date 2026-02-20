@@ -15,5 +15,3 @@ retries = 1
 # Features e2e test builds images with 3 features (~2.5 min)
 slow-timeout = { period = "60s", terminate-after = 5 }
 fail-fast = false
-# Run e2e tests with fewer threads to avoid container conflicts
-test-threads = 2

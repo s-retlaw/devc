@@ -34,8 +34,7 @@ where
     F: FnOnce() -> std::io::Result<T>,
 {
     let _lock = acquire_lock(path)?;
-    let result = f();
-    result
+    f()
 }
 
 fn lock_path_for(path: &Path) -> PathBuf {

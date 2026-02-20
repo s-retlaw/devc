@@ -39,7 +39,7 @@ test-e2e-docker: _fix-docker-creds
 
 # Run e2e tests against Podman
 test-e2e-podman: _fix-docker-creds
-    CARGO_BUILD_JOBS="${DEVC_E2E_BUILD_JOBS:-2}" GOMAXPROCS="${DEVC_E2E_GOMAXPROCS:-4}" DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e --test-threads "${DEVC_E2E_TEST_THREADS:-1}" -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
+    DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
 
 # Run e2e tests via simulated toolbox (Podman through flatpak-spawn shim)
 test-e2e-toolbox: _toolbox-setup
@@ -75,7 +75,7 @@ test-all: _fix-docker-creds
     run_section "E2E: Docker" \
         env DEVC_TEST_PROVIDER=docker cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
     run_section "E2E: Podman" \
-        env CARGO_BUILD_JOBS="${DEVC_E2E_BUILD_JOBS:-2}" GOMAXPROCS="${DEVC_E2E_GOMAXPROCS:-4}" DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e --test-threads "${DEVC_E2E_TEST_THREADS:-1}" -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
+        env DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
     # TODO: add E2E: Toolbox section once toolbox sim container is validated
     print_summary
 
