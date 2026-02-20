@@ -30,10 +30,51 @@ jobs:
           components: clippy
       - run: cargo clippy --workspace -- -D warnings
 
-  test:
-    name: Test
+  test-hermetic:
+    name: Hermetic (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run -p devc-config -p devc-core -p devc-cli -p devc-tui -p devc-provider
+
+  test-restricted:
+    name: Hermetic (restricted env)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - uses: taiki-e/install-action@nextest
+      - name: Run hermetic tests with isolated XDG paths
+        run: |
+          mkdir -p "$RUNNER_TEMP/xdg/config" "$RUNNER_TEMP/xdg/data" "$RUNNER_TEMP/xdg/cache"
+          XDG_CONFIG_HOME="$RUNNER_TEMP/xdg/config" \
+          XDG_DATA_HOME="$RUNNER_TEMP/xdg/data" \
+          XDG_CACHE_HOME="$RUNNER_TEMP/xdg/cache" \
+          cargo nextest run -p devc-config -p devc-core -p devc-cli -p devc-tui -p devc-provider
+
+  test-runtime-docker:
+    name: Runtime (docker, linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - run: DEVC_TEST_PROVIDER=docker cargo nextest run --profile e2e -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
+
+  test-runtime-podman:
+    name: Runtime (podman, linux)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - run: CARGO_BUILD_JOBS=1 GOMAXPROCS=2 DEVC_TEST_PROVIDER=podman cargo nextest run --profile e2e --test-threads 1 -p devc-core -p devc-tui -p devc-provider --run-ignored ignored-only
