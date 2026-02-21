@@ -275,7 +275,37 @@ fn copy_features_to_context(features: &[ResolvedFeature], context_dir: &Path) ->
         let dir_name = format!("feature-{}-{}", i, short_name);
         let dst = context_dir.join(&dir_name);
         copy_dir_recursive(&feature.dir, &dst)?;
+        // Ensure files are readable by Podman's rootless build process
+        // (runs in a user namespace that may lack access to 0700 temp dirs)
+        make_world_readable(&dst)?;
     }
+    Ok(())
+}
+
+/// Recursively ensure a directory tree is world-readable (and executable for dirs).
+///
+/// Podman rootless builds run in a user namespace where the build process may not
+/// have access to files in the host's temp directory (mode 0700). This adds the
+/// read bit for others on files and read+execute on directories.
+fn make_world_readable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let p = entry.path();
+        let mut perms = std::fs::metadata(&p)?.permissions();
+        if p.is_dir() {
+            perms.set_mode(perms.mode() | 0o055);
+            std::fs::set_permissions(&p, perms)?;
+            make_world_readable(&p)?;
+        } else {
+            perms.set_mode(perms.mode() | 0o044);
+            std::fs::set_permissions(&p, perms)?;
+        }
+    }
+    // Also fix the directory itself
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(perms.mode() | 0o055);
+    std::fs::set_permissions(path, perms)?;
     Ok(())
 }
 
