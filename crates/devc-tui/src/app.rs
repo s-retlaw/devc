@@ -2835,13 +2835,10 @@ impl App {
             return Ok(());
         }
 
-        let provider_container_id = match &container.container_id {
-            Some(id) => id.clone(),
-            None => {
-                self.status_message = Some("Container has not been created yet".to_string());
-                return Ok(());
-            }
-        };
+        if container.container_id.is_none() {
+            self.status_message = Some("Container has not been created yet".to_string());
+            return Ok(());
+        }
 
         let container_id = container.id.clone();
 
@@ -2858,25 +2855,31 @@ impl App {
             self.shell_state.shell_sessions.remove(&container_id);
         }
 
-        // Set up credential forwarding and resolve runtime args before spawning shell
-        let (rt_program, rt_prefix, gh_token) = {
+        // Prepare exec context: re-resolve compose ID, load feature env, set up credentials
+        let (rt_program, rt_prefix, exec_env) = {
             let manager = self.manager.read().await;
-            let gh_token = match manager.setup_credentials_for_container(&container.id).await {
-                Ok(status) => status.gh_token,
+            let exec_env = match manager.prepare_exec_context(&container.id).await {
+                Ok(env) => env,
                 Err(e) => {
-                    tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
-                    None
+                    self.status_message = Some(format!("Failed to prepare shell context: {}", e));
+                    return Ok(());
                 }
             };
             let (prog, prefix) = manager
                 .runtime_args_for(container)
                 .unwrap_or_else(|_| (container.provider.to_string(), vec![]));
-            (prog, prefix, gh_token)
+            (prog, prefix, exec_env)
         };
 
-        // Build extra env vars to inject into the shell
+        // Use the live container ID from exec context (may differ for compose)
+        let provider_container_id = exec_env.container_id.clone();
+
+        // Build extra env vars to inject into the shell (feature remoteEnv + GH_TOKEN)
         let mut shell_env = std::collections::HashMap::new();
-        if let Some(token) = gh_token {
+        if let Some(feature_env) = exec_env.feature_remote_env {
+            shell_env.extend(feature_env);
+        }
+        if let Some(token) = exec_env.gh_token {
             shell_env.insert("GH_TOKEN".to_string(), token);
         }
 

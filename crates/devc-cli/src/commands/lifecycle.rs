@@ -18,25 +18,22 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
         bail!("No command specified");
     }
 
-    let container_id = state
-        .container_id
-        .as_ref()
-        .ok_or_else(|| anyhow!("Container has no container ID"))?;
-
-    // Set up credential forwarding (non-fatal)
-    let gh_token = match manager.setup_credentials_for_container(&state.id).await {
-        Ok(status) => status.gh_token,
-        Err(e) => {
-            eprintln!("Warning: credential forwarding failed: {}", e);
-            None
-        }
-    };
+    // Prepare exec context: re-resolve compose ID, load feature env, set up credentials
+    let exec_env = manager
+        .prepare_exec_context(&state.id)
+        .await
+        .map_err(|e| anyhow!("{}", e))?;
 
     // Load config for remoteEnv/user/workdir (fallback if config is missing)
     let mut exec_config = match Container::from_config(&state.config_path) {
         Ok(container) => {
             let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
-            container.exec_config(cmd, is_tty, true)
+            container.exec_config_with_feature_env(
+                cmd,
+                is_tty,
+                true,
+                exec_env.feature_remote_env.as_ref(),
+            )
         }
         Err(_) => {
             let mut env = std::collections::HashMap::new();
@@ -57,7 +54,7 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
     };
 
     // Inject GH_TOKEN if resolved from host
-    if let Some(ref token) = gh_token {
+    if let Some(ref token) = exec_env.gh_token {
         exec_config
             .env
             .insert("GH_TOKEN".to_string(), token.clone());
@@ -93,7 +90,7 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
         args.push(format!("{}={}", key, val));
     }
 
-    args.push(container_id.clone());
+    args.push(exec_env.container_id.clone());
     args.extend(exec_config.cmd);
 
     let status = std::process::Command::new(&program)
@@ -119,13 +116,26 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
         {
             println!("Starting container '{}'...", state.name);
             manager.start(&state.id).await?;
-            // Re-fetch state after starting
+            // Re-fetch state after starting — prepare_exec_context handles credentials + feature env
             let state = find_container(manager, container).await?;
             let (program, prefix) = manager
                 .runtime_args_for(&state)
                 .map_err(|e| anyhow!("{}", e))?;
-            let gh_token = setup_and_print_credentials(manager, &state).await;
-            return ssh_to_container(&state, &cmd, &program, &prefix, gh_token.as_deref()).await;
+            let exec_env = manager
+                .prepare_exec_context(&state.id)
+                .await
+                .map_err(|e| anyhow!("{}", e))?;
+            print_credential_status(&exec_env);
+            let extra_env = build_shell_extra_env(&exec_env);
+            return ssh_to_container(
+                &state,
+                &exec_env.container_id,
+                &cmd,
+                &program,
+                &prefix,
+                &extra_env,
+            )
+            .await;
         } else {
             bail!(
                 "Container '{}' is not running (status: {})",
@@ -138,47 +148,58 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
     let (program, prefix) = manager
         .runtime_args_for(&state)
         .map_err(|e| anyhow!("{}", e))?;
-    let gh_token = setup_and_print_credentials(manager, &state).await;
-    ssh_to_container(&state, &cmd, &program, &prefix, gh_token.as_deref()).await
+    let exec_env = manager
+        .prepare_exec_context(&state.id)
+        .await
+        .map_err(|e| anyhow!("{}", e))?;
+    print_credential_status(&exec_env);
+    let extra_env = build_shell_extra_env(&exec_env);
+    ssh_to_container(
+        &state,
+        &exec_env.container_id,
+        &cmd,
+        &program,
+        &prefix,
+        &extra_env,
+    )
+    .await
 }
 
-/// Set up credential forwarding, print a one-line status, and return the GH_TOKEN if resolved
-async fn setup_and_print_credentials(
-    manager: &ContainerManager,
-    state: &ContainerState,
-) -> Option<String> {
-    match manager.setup_credentials_for_container(&state.id).await {
-        Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
-            eprintln!(
-                "Forwarding credentials: {} Docker registries, {} Git hosts",
-                status.docker_registries, status.git_hosts
-            );
-            status.gh_token
-        }
-        Ok(status) => {
-            eprintln!("No host credentials found (run 'docker login' to store Docker credentials)");
-            status.gh_token
-        }
-        Err(e) => {
-            eprintln!("Warning: credential forwarding failed: {}", e);
-            None
-        }
+/// Print a one-line credential forwarding status
+fn print_credential_status(exec_env: &devc_core::ExecEnv) {
+    if exec_env.docker_registries > 0 || exec_env.git_hosts > 0 {
+        eprintln!(
+            "Forwarding credentials: {} Docker registries, {} Git hosts",
+            exec_env.docker_registries, exec_env.git_hosts
+        );
+    } else {
+        eprintln!("No host credentials found (run 'docker login' to store Docker credentials)");
     }
+}
+
+/// Build extra env vars for shell sessions from ExecEnv (GH_TOKEN + feature remoteEnv)
+fn build_shell_extra_env(
+    exec_env: &devc_core::ExecEnv,
+) -> std::collections::HashMap<String, String> {
+    let mut env = std::collections::HashMap::new();
+    if let Some(ref feature_env) = exec_env.feature_remote_env {
+        env.extend(feature_env.clone());
+    }
+    if let Some(ref token) = exec_env.gh_token {
+        env.insert("GH_TOKEN".to_string(), token.clone());
+    }
+    env
 }
 
 /// Connect to container, preferring SSH over stdio when available
 async fn ssh_to_container(
     state: &ContainerState,
+    container_id: &str,
     cmd: &[String],
     program: &str,
     prefix: &[String],
-    gh_token: Option<&str>,
+    extra_env: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
-    let container_id = state
-        .container_id
-        .as_ref()
-        .ok_or_else(|| anyhow!("Container has no container ID"))?;
-
     // Check if SSH is available for this container
     let ssh_available = state
         .metadata
@@ -202,11 +223,12 @@ async fn ssh_to_container(
     if ssh_available {
         match ssh_via_dropbear(
             state,
+            container_id,
             cmd,
             program,
             prefix,
             workspace_folder.as_deref(),
-            gh_token,
+            extra_env,
         )
         .await
         {
@@ -235,7 +257,7 @@ async fn ssh_to_container(
         cmd,
         effective_user.as_deref(),
         workspace_folder.as_deref(),
-        gh_token,
+        extra_env,
     )
     .await
 }
@@ -243,17 +265,13 @@ async fn ssh_to_container(
 /// Connect via SSH over stdio using dropbear in inetd mode
 async fn ssh_via_dropbear(
     state: &ContainerState,
+    container_id: &str,
     cmd: &[String],
     program: &str,
     prefix: &[String],
     working_dir: Option<&str>,
-    gh_token: Option<&str>,
+    extra_env: &std::collections::HashMap<String, String>,
 ) -> Result<std::process::ExitStatus> {
-    let container_id = state
-        .container_id
-        .as_ref()
-        .ok_or_else(|| anyhow!("Container has no container ID"))?;
-
     let user = state
         .metadata
         .get("remote_user")
@@ -300,15 +318,15 @@ async fn ssh_via_dropbear(
         "UserKnownHostsFile=/dev/null".to_string(),
         "-o".to_string(),
         "LogLevel=ERROR".to_string(),
-        // Pass through terminal and locale settings for proper rendering
+        // Pass through terminal and locale settings + extra env (feature remoteEnv, GH_TOKEN)
         "-o".to_string(),
         {
             let mut set_env = format!(
                 "SetEnv=TERM={} COLORTERM={} LANG=C.UTF-8 LC_ALL=C.UTF-8",
                 term, colorterm
             );
-            if let Some(token) = gh_token {
-                set_env.push_str(&format!(" GH_TOKEN={}", token));
+            for (key, val) in extra_env {
+                set_env.push_str(&format!(" {}={}", key, val));
             }
             set_env
         },
@@ -344,7 +362,7 @@ async fn exec_shell_fallback(
     cmd: &[String],
     user: Option<&str>,
     working_dir: Option<&str>,
-    gh_token: Option<&str>,
+    extra_env: &std::collections::HashMap<String, String>,
 ) -> Result<()> {
     // Build the shell command: interactive shell, or `bash -lc "cmd"` for commands
     let shell_args: Vec<String> = if cmd.is_empty() {
@@ -368,9 +386,9 @@ async fn exec_shell_fallback(
         args.push("--workdir".to_string());
         args.push(wd.to_string());
     }
-    if let Some(token) = gh_token {
+    for (key, val) in extra_env {
         args.push("-e".to_string());
-        args.push(format!("GH_TOKEN={}", token));
+        args.push(format!("{}={}", key, val));
     }
     args.push(container_id.to_string());
     args.extend(shell_args);

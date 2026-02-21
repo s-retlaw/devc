@@ -3,7 +3,6 @@
 mod build;
 mod compose;
 mod discovery;
-mod exec;
 mod lifecycle;
 
 use crate::features;
@@ -37,12 +36,21 @@ pub struct ContainerManager {
     state_path_override: Option<PathBuf>,
 }
 
-/// Context prepared by `prepare_exec()` for exec/shell operations.
-pub(crate) struct ExecContext<'a> {
-    pub(crate) provider: &'a dyn ContainerProvider,
-    pub(crate) container_state: ContainerState,
-    pub(crate) cid: ContainerId,
-    pub(crate) feature_props: features::MergedFeatureProperties,
+/// Resolved context for exec/shell — container ID, feature env, credential info.
+///
+/// Returned by [`ContainerManager::prepare_exec_context()`] so CLI and TUI
+/// can inject feature remoteEnv + GH_TOKEN into their direct-spawn flows.
+pub struct ExecEnv {
+    /// The live container ID (re-resolved for compose services).
+    pub container_id: String,
+    /// Feature remoteEnv to merge into exec config.
+    pub feature_remote_env: Option<HashMap<String, String>>,
+    /// GH_TOKEN resolved from host credentials.
+    pub gh_token: Option<String>,
+    /// Number of Docker registries with forwarded credentials.
+    pub docker_registries: usize,
+    /// Number of Git hosts with forwarded credentials.
+    pub git_hosts: usize,
 }
 
 impl ContainerManager {
@@ -320,6 +328,133 @@ impl ContainerManager {
             &container_state.workspace_path,
         )
         .await
+    }
+
+    /// Prepare context for exec/shell operations.
+    ///
+    /// This resolves the live container ID (re-resolving for compose services),
+    /// loads feature remoteEnv, sets up credential forwarding, and touches
+    /// last-used timestamp. CLI and TUI should call this before spawning
+    /// their own `docker exec` / SSH commands.
+    pub async fn prepare_exec_context(&self, id: &str) -> Result<ExecEnv> {
+        let container_state = {
+            let state = self.state.read().await;
+            state
+                .get(id)
+                .cloned()
+                .ok_or_else(|| CoreError::ContainerNotFound(id.to_string()))?
+        };
+
+        if container_state.status != DevcContainerStatus::Running {
+            return Err(CoreError::InvalidState(
+                "Container is not running".to_string(),
+            ));
+        }
+
+        let provider = self.require_container_provider(&container_state)?;
+
+        // Re-resolve container ID for compose services (may have been recreated)
+        let live_container_id = self
+            .resolve_live_exec_container_id(id, provider, &container_state)
+            .await?;
+
+        // Load feature remoteEnv from state metadata
+        let feature_props = get_feature_properties(&container_state);
+        let feature_remote_env = feature_props.remote_env_option().cloned();
+
+        // Set up credential forwarding (non-fatal)
+        let user = self
+            .load_container(&container_state.config_path)
+            .ok()
+            .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()));
+
+        let (gh_token, docker_registries, git_hosts) = match crate::credentials::setup_credentials(
+            provider,
+            &live_container_id,
+            &self.global_config,
+            user.as_deref(),
+            &container_state.workspace_path,
+        )
+        .await
+        {
+            Ok(status) => (status.gh_token, status.docker_registries, status.git_hosts),
+            Err(e) => {
+                tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+                (None, 0, 0)
+            }
+        };
+
+        // Touch last-used timestamp
+        {
+            let mut state = self.state.write().await;
+            state.touch(id);
+        }
+        self.save_state().await?;
+
+        Ok(ExecEnv {
+            container_id: live_container_id.0,
+            feature_remote_env,
+            gh_token,
+            docker_registries,
+            git_hosts,
+        })
+    }
+
+    /// Resolve the live container ID, re-resolving for compose services.
+    ///
+    /// If a compose service has been recreated, the stored container_id may be
+    /// stale. This re-resolves via `compose ps` and updates state if changed.
+    async fn resolve_live_exec_container_id(
+        &self,
+        id: &str,
+        provider: &dyn ContainerProvider,
+        container_state: &ContainerState,
+    ) -> Result<ContainerId> {
+        if let (Some(_project), Some(service)) = (
+            container_state.compose_project.as_ref(),
+            container_state.compose_service.as_deref(),
+        ) {
+            let container = self.load_container(&container_state.config_path)?;
+            let compose_files = container.compose_files().ok_or_else(|| {
+                CoreError::InvalidState("No dockerComposeFile specified".to_string())
+            })?;
+            let owned = compose_file_strs(&compose_files);
+            let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+            let project_name = container.compose_project_name();
+            let cid = self
+                .resolve_running_compose_service_container_id(
+                    provider,
+                    &refs,
+                    &project_name,
+                    &container.workspace_path,
+                    service,
+                )
+                .await?;
+
+            if container_state.container_id.as_deref() != Some(cid.0.as_str()) {
+                {
+                    let mut state = self.state.write().await;
+                    if let Some(cs) = state.get_mut(id) {
+                        cs.container_id = Some(cid.0.clone());
+                    }
+                }
+                self.save_state().await?;
+            }
+            return Ok(cid);
+        }
+
+        let stored = container_state
+            .container_id
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidState("Container has no provider ID".into()))?;
+        let cid = ContainerId::new(stored);
+        if provider.inspect(&cid).await.is_err() {
+            return Err(CoreError::InvalidState(format!(
+                "Container '{}' is not inspectable/running",
+                cid.0
+            )));
+        }
+        Ok(cid)
     }
 
     /// Set up configured agents for a running container.
