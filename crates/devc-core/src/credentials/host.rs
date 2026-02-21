@@ -427,6 +427,34 @@ pub async fn resolve_git_credentials(hosts: &[(String, String)]) -> Vec<GitCrede
         .collect()
 }
 
+/// Resolve the GitHub CLI token from the host via `gh auth token`.
+///
+/// Returns `None` if `gh` is not installed, not authenticated, or the command times out.
+pub async fn resolve_gh_token() -> Option<String> {
+    let result = tokio::time::timeout(
+        HELPER_TIMEOUT,
+        Command::new("gh")
+            .args(["auth", "token"])
+            .env("GH_PROMPT_DISABLED", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if token.is_empty() {
+                None
+            } else {
+                Some(token)
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Format git credentials as a git-credentials store file
 pub fn format_git_credentials(credentials: &[GitCredential]) -> String {
     credentials

@@ -14,12 +14,14 @@ use std::path::Path;
 pub const CREDS_TMPFS_PATH: &str = "/run/devc-creds";
 
 /// Result of credential setup, for user-visible reporting
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct CredentialStatus {
     pub docker_registries: usize,
     pub git_hosts: usize,
     /// True if helper scripts were injected (first-time setup)
     pub helpers_injected: bool,
+    /// GitHub CLI token resolved from the host, if any
+    pub gh_token: Option<String>,
 }
 
 /// Docker credential helper script template.
@@ -133,7 +135,10 @@ pub async fn setup_credentials(
     user: Option<&str>,
     workspace_path: &Path,
 ) -> Result<CredentialStatus> {
-    if !global_config.credentials.docker && !global_config.credentials.git {
+    if !global_config.credentials.docker
+        && !global_config.credentials.git
+        && !global_config.credentials.gh
+    {
         return Ok(CredentialStatus::default());
     }
 
@@ -146,13 +151,14 @@ pub async fn setup_credentials(
     let helpers_injected = inject_helpers(provider, container_id, user).await?;
 
     // Refresh credential cache in tmpfs
-    let (docker_registries, git_hosts) =
+    let (docker_registries, git_hosts, gh_token) =
         refresh_credentials(provider, container_id, global_config, workspace_path).await?;
 
     Ok(CredentialStatus {
         docker_registries,
         git_hosts,
         helpers_injected,
+        gh_token,
     })
 }
 
@@ -241,16 +247,16 @@ async fn inject_helpers(
 
 /// Refresh credential cache on the tmpfs mount.
 ///
-/// Resolves Docker and Git credentials on the host, then writes them into
-/// the container's `/run/devc-creds/` directory.
+/// Resolves Docker, Git, and GitHub CLI credentials on the host, then writes
+/// them into the container's `/run/devc-creds/` directory.
 ///
-/// Returns `(docker_registry_count, git_host_count)`.
+/// Returns `(docker_registry_count, git_host_count, gh_token)`.
 async fn refresh_credentials(
     provider: &dyn ContainerProvider,
     container_id: &ContainerId,
     global_config: &GlobalConfig,
     workspace_path: &Path,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, usize, Option<String>)> {
     // Ensure the tmpfs directory exists (it should from the mount, but just in case)
     exec_script(
         provider,
@@ -306,7 +312,30 @@ async fn refresh_credentials(
         }
     }
 
-    Ok((docker_count, git_count))
+    // Resolve and write GitHub CLI token
+    let gh_token = if global_config.credentials.gh {
+        match host::resolve_gh_token().await {
+            Some(token) => {
+                write_file_to_container(
+                    provider,
+                    container_id,
+                    &format!("{}/gh-token", CREDS_TMPFS_PATH),
+                    &token,
+                )
+                .await?;
+                tracing::debug!("Wrote GitHub CLI token to tmpfs");
+                Some(token)
+            }
+            None => {
+                tracing::debug!("No GitHub CLI token found on host, skipping");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok((docker_count, git_count, gh_token))
 }
 
 /// Read the container's Docker config credsStore value
@@ -607,7 +636,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_setup_credentials_disabled() {
-        // When both docker and git credentials are disabled, setup should be a no-op
+        // When all credentials are disabled, setup should be a no-op
         use crate::test_support::MockProvider;
         use devc_provider::ProviderType;
 
@@ -616,6 +645,7 @@ mod tests {
         let mut config = GlobalConfig::default();
         config.credentials.docker = false;
         config.credentials.git = false;
+        config.credentials.gh = false;
 
         let tmp = std::env::temp_dir();
         let result = setup_credentials(&provider, &container_id, &config, None, &tmp).await;

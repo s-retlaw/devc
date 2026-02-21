@@ -15,6 +15,8 @@ pub struct ShellSession {
     pub user: Option<String>,
     /// Working directory for the shell (from metadata or devcontainer.json workspaceFolder)
     pub working_dir: Option<String>,
+    /// Extra environment variables to inject into the shell (e.g. GH_TOKEN)
+    pub env: HashMap<String, String>,
     #[cfg(unix)]
     pub pty: Option<PtyShell>,
 }

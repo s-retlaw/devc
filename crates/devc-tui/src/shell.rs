@@ -33,6 +33,8 @@ pub struct ShellConfig {
     pub shell: String,
     pub user: Option<String>,
     pub working_dir: Option<String>,
+    /// Extra environment variables to inject (e.g. GH_TOKEN)
+    pub env: std::collections::HashMap<String, String>,
 }
 
 /// Why the relay loop stopped
@@ -104,6 +106,10 @@ mod pty {
             }
             if let Some(ref wd) = config.working_dir {
                 cmd.args(["-w", wd]);
+            }
+
+            for (key, val) in &config.env {
+                cmd.args(["-e", &format!("{}={}", key, val)]);
             }
 
             cmd.arg(&config.container_id);
@@ -367,6 +373,7 @@ mod tests {
             shell: "/bin/bash".to_string(),
             user: None,
             working_dir: None,
+            env: std::collections::HashMap::new(),
         };
         assert_eq!(config.container_id, "abc123");
         assert_eq!(config.shell, "/bin/bash");
@@ -381,6 +388,7 @@ mod tests {
             shell: "/bin/zsh".to_string(),
             user: Some("root".to_string()),
             working_dir: Some("/workspace".to_string()),
+            env: std::collections::HashMap::new(),
         };
         assert_eq!(config.user, Some("root".to_string()));
         assert_eq!(config.working_dir, Some("/workspace".to_string()));
@@ -395,6 +403,7 @@ mod tests {
             shell: "/bin/bash".to_string(),
             user: None,
             working_dir: None,
+            env: std::collections::HashMap::new(),
         };
         assert_eq!(config.runtime_program, "flatpak-spawn");
         assert_eq!(config.runtime_prefix, vec!["--host", "podman"]);

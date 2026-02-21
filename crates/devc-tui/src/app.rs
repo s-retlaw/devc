@@ -2859,15 +2859,26 @@ impl App {
         }
 
         // Set up credential forwarding and resolve runtime args before spawning shell
-        let (rt_program, rt_prefix) = {
+        let (rt_program, rt_prefix, gh_token) = {
             let manager = self.manager.read().await;
-            if let Err(e) = manager.setup_credentials_for_container(&container.id).await {
-                tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
-            }
-            manager
+            let gh_token = match manager.setup_credentials_for_container(&container.id).await {
+                Ok(status) => status.gh_token,
+                Err(e) => {
+                    tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+                    None
+                }
+            };
+            let (prog, prefix) = manager
                 .runtime_args_for(container)
-                .unwrap_or_else(|_| (container.provider.to_string(), vec![]))
+                .unwrap_or_else(|_| (container.provider.to_string(), vec![]));
+            (prog, prefix, gh_token)
         };
+
+        // Build extra env vars to inject into the shell
+        let mut shell_env = std::collections::HashMap::new();
+        if let Some(token) = gh_token {
+            shell_env.insert("GH_TOKEN".to_string(), token);
+        }
 
         // Resolve effective user and working dir: metadata > devcontainer.json
         let parsed = Container::from_config(&container.config_path).ok();
@@ -2902,6 +2913,7 @@ impl App {
                 runtime_prefix: rt_prefix,
                 user: effective_user,
                 working_dir: effective_working_dir,
+                env: shell_env,
                 pty: None,
             },
         );
@@ -2933,6 +2945,7 @@ impl App {
         container_id: String,
         user: Option<String>,
         working_dir: Option<String>,
+        env: std::collections::HashMap<String, String>,
     ) -> ShellConfig {
         ShellConfig {
             runtime_program,
@@ -2941,6 +2954,7 @@ impl App {
             shell: self.config.defaults.shell.clone(),
             user,
             working_dir,
+            env,
         }
     }
 
@@ -2994,6 +3008,7 @@ impl App {
             runtime_prefix,
             user,
             working_dir,
+            env,
             has_pty,
         ) = {
             match self.shell_state.shell_sessions.get(&container_id) {
@@ -3004,6 +3019,7 @@ impl App {
                     s.runtime_prefix.clone(),
                     s.user.clone(),
                     s.working_dir.clone(),
+                    s.env.clone(),
                     s.pty.is_some(),
                 ),
                 None => {
@@ -3054,6 +3070,7 @@ impl App {
                         provider_container_id.clone(),
                         user.clone(),
                         working_dir.clone(),
+                        env.clone(),
                     );
                     config.shell = Self::detect_shell(
                         &runtime_program,
@@ -3092,6 +3109,7 @@ impl App {
                     provider_container_id.clone(),
                     user.clone(),
                     working_dir.clone(),
+                    env.clone(),
                 );
                 config.shell = Self::detect_shell(
                     &runtime_program,

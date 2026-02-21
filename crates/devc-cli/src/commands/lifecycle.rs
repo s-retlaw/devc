@@ -23,8 +23,17 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
         .as_ref()
         .ok_or_else(|| anyhow!("Container has no container ID"))?;
 
+    // Set up credential forwarding (non-fatal)
+    let gh_token = match manager.setup_credentials_for_container(&state.id).await {
+        Ok(status) => status.gh_token,
+        Err(e) => {
+            eprintln!("Warning: credential forwarding failed: {}", e);
+            None
+        }
+    };
+
     // Load config for remoteEnv/user/workdir (fallback if config is missing)
-    let exec_config = match Container::from_config(&state.config_path) {
+    let mut exec_config = match Container::from_config(&state.config_path) {
         Ok(container) => {
             let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
             container.exec_config(cmd, is_tty, true)
@@ -46,6 +55,13 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
             }
         }
     };
+
+    // Inject GH_TOKEN if resolved from host
+    if let Some(ref token) = gh_token {
+        exec_config
+            .env
+            .insert("GH_TOKEN".to_string(), token.clone());
+    }
 
     // Build runtime args for direct spawn with inherited stdio
     let (program, prefix) = manager
@@ -108,8 +124,8 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
             let (program, prefix) = manager
                 .runtime_args_for(&state)
                 .map_err(|e| anyhow!("{}", e))?;
-            print_credential_status(manager, &state).await;
-            return ssh_to_container(&state, &cmd, &program, &prefix).await;
+            let gh_token = setup_and_print_credentials(manager, &state).await;
+            return ssh_to_container(&state, &cmd, &program, &prefix, gh_token.as_deref()).await;
         } else {
             bail!(
                 "Container '{}' is not running (status: {})",
@@ -122,24 +138,30 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
     let (program, prefix) = manager
         .runtime_args_for(&state)
         .map_err(|e| anyhow!("{}", e))?;
-    print_credential_status(manager, &state).await;
-    ssh_to_container(&state, &cmd, &program, &prefix).await
+    let gh_token = setup_and_print_credentials(manager, &state).await;
+    ssh_to_container(&state, &cmd, &program, &prefix, gh_token.as_deref()).await
 }
 
-/// Set up credential forwarding and print a one-line status
-async fn print_credential_status(manager: &ContainerManager, state: &ContainerState) {
+/// Set up credential forwarding, print a one-line status, and return the GH_TOKEN if resolved
+async fn setup_and_print_credentials(
+    manager: &ContainerManager,
+    state: &ContainerState,
+) -> Option<String> {
     match manager.setup_credentials_for_container(&state.id).await {
         Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
             eprintln!(
                 "Forwarding credentials: {} Docker registries, {} Git hosts",
                 status.docker_registries, status.git_hosts
             );
+            status.gh_token
         }
-        Ok(_) => {
+        Ok(status) => {
             eprintln!("No host credentials found (run 'docker login' to store Docker credentials)");
+            status.gh_token
         }
         Err(e) => {
             eprintln!("Warning: credential forwarding failed: {}", e);
+            None
         }
     }
 }
@@ -150,6 +172,7 @@ async fn ssh_to_container(
     cmd: &[String],
     program: &str,
     prefix: &[String],
+    gh_token: Option<&str>,
 ) -> Result<()> {
     let container_id = state
         .container_id
@@ -177,7 +200,16 @@ async fn ssh_to_container(
     });
 
     if ssh_available {
-        match ssh_via_dropbear(state, cmd, program, prefix, workspace_folder.as_deref()).await {
+        match ssh_via_dropbear(
+            state,
+            cmd,
+            program,
+            prefix,
+            workspace_folder.as_deref(),
+            gh_token,
+        )
+        .await
+        {
             Ok(status) if status.success() => return Ok(()),
             Ok(status) => {
                 // SSH exited with non-zero but we should still respect that
@@ -203,6 +235,7 @@ async fn ssh_to_container(
         cmd,
         effective_user.as_deref(),
         workspace_folder.as_deref(),
+        gh_token,
     )
     .await
 }
@@ -214,6 +247,7 @@ async fn ssh_via_dropbear(
     program: &str,
     prefix: &[String],
     working_dir: Option<&str>,
+    gh_token: Option<&str>,
 ) -> Result<std::process::ExitStatus> {
     let container_id = state
         .container_id
@@ -268,10 +302,16 @@ async fn ssh_via_dropbear(
         "LogLevel=ERROR".to_string(),
         // Pass through terminal and locale settings for proper rendering
         "-o".to_string(),
-        format!(
-            "SetEnv=TERM={} COLORTERM={} LANG=C.UTF-8 LC_ALL=C.UTF-8",
-            term, colorterm
-        ),
+        {
+            let mut set_env = format!(
+                "SetEnv=TERM={} COLORTERM={} LANG=C.UTF-8 LC_ALL=C.UTF-8",
+                term, colorterm
+            );
+            if let Some(token) = gh_token {
+                set_env.push_str(&format!(" GH_TOKEN={}", token));
+            }
+            set_env
+        },
         "-i".to_string(),
         key_path_str.to_string(),
         "-t".to_string(), // Force PTY allocation
@@ -304,6 +344,7 @@ async fn exec_shell_fallback(
     cmd: &[String],
     user: Option<&str>,
     working_dir: Option<&str>,
+    gh_token: Option<&str>,
 ) -> Result<()> {
     // Build the shell command: interactive shell, or `bash -lc "cmd"` for commands
     let shell_args: Vec<String> = if cmd.is_empty() {
@@ -326,6 +367,10 @@ async fn exec_shell_fallback(
     if let Some(wd) = working_dir {
         args.push("--workdir".to_string());
         args.push(wd.to_string());
+    }
+    if let Some(token) = gh_token {
+        args.push("-e".to_string());
+        args.push(format!("GH_TOKEN={}", token));
     }
     args.push(container_id.to_string());
     args.extend(shell_args);

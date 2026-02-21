@@ -100,13 +100,14 @@ impl ContainerManager {
     }
 
     /// Refresh credential forwarding, logging results. Failures are non-fatal.
+    /// Returns the GitHub CLI token if one was resolved, for injection into ExecConfig.
     pub(crate) async fn refresh_credentials(
         &self,
         provider: &dyn ContainerProvider,
         cid: &ContainerId,
         user: Option<&str>,
         workspace_path: &std::path::Path,
-    ) {
+    ) -> Option<String> {
         match crate::credentials::setup_credentials(
             provider,
             cid,
@@ -116,15 +117,20 @@ impl ContainerManager {
         )
         .await
         {
-            Ok(status) if status.docker_registries > 0 || status.git_hosts > 0 => {
-                tracing::info!(
-                    "Credential forwarding: {} Docker registries, {} Git hosts",
-                    status.docker_registries,
-                    status.git_hosts
-                );
+            Ok(status) => {
+                if status.docker_registries > 0 || status.git_hosts > 0 {
+                    tracing::info!(
+                        "Credential forwarding: {} Docker registries, {} Git hosts",
+                        status.docker_registries,
+                        status.git_hosts
+                    );
+                }
+                status.gh_token
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e),
+            Err(e) => {
+                tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+                None
+            }
         }
     }
 
@@ -157,7 +163,7 @@ impl ContainerManager {
 
             // Try loading config for remoteEnv/user/workdir; fall back to a basic config
             // if the devcontainer.json is no longer accessible (e.g. tmp dir cleaned up)
-            let (config, user_for_creds) =
+            let (mut config, user_for_creds) =
                 match self.load_container(&ctx.container_state.config_path) {
                     Ok(container) => {
                         let user = container
@@ -195,13 +201,17 @@ impl ContainerManager {
                     }
                 };
 
-            self.refresh_credentials(
-                ctx.provider,
-                &ctx.cid,
-                user_for_creds.as_deref(),
-                &ctx.container_state.workspace_path,
-            )
-            .await;
+            let gh_token = self
+                .refresh_credentials(
+                    ctx.provider,
+                    &ctx.cid,
+                    user_for_creds.as_deref(),
+                    &ctx.container_state.workspace_path,
+                )
+                .await;
+            if let Some(token) = gh_token {
+                config.env.insert("GH_TOKEN".to_string(), token);
+            }
 
             match ctx.provider.exec(&ctx.cid, &config).await {
                 Ok(result) => {
@@ -230,20 +240,24 @@ impl ContainerManager {
         let ctx = self.prepare_exec(id).await?;
         let container = self.load_container(&ctx.container_state.config_path)?;
 
-        self.refresh_credentials(
-            ctx.provider,
-            &ctx.cid,
-            container.devcontainer.effective_user(),
-            &ctx.container_state.workspace_path,
-        )
-        .await;
+        let gh_token = self
+            .refresh_credentials(
+                ctx.provider,
+                &ctx.cid,
+                container.devcontainer.effective_user(),
+                &ctx.container_state.workspace_path,
+            )
+            .await;
 
-        let config = container.exec_config_with_feature_env(
+        let mut config = container.exec_config_with_feature_env(
             cmd,
             true,
             true,
             ctx.feature_props.remote_env_option(),
         );
+        if let Some(token) = gh_token {
+            config.env.insert("GH_TOKEN".to_string(), token);
+        }
         let stream = ctx.provider.exec_interactive(&ctx.cid, &config).await?;
 
         self.touch_last_used(id).await?;
@@ -256,15 +270,20 @@ impl ContainerManager {
         let ctx = self.prepare_exec(id).await?;
         let container = self.load_container(&ctx.container_state.config_path)?;
 
-        self.refresh_credentials(
-            ctx.provider,
-            &ctx.cid,
-            container.devcontainer.effective_user(),
-            &ctx.container_state.workspace_path,
-        )
-        .await;
+        let gh_token = self
+            .refresh_credentials(
+                ctx.provider,
+                &ctx.cid,
+                container.devcontainer.effective_user(),
+                &ctx.container_state.workspace_path,
+            )
+            .await;
 
-        let config = container.shell_config_with_feature_env(ctx.feature_props.remote_env_option());
+        let mut config =
+            container.shell_config_with_feature_env(ctx.feature_props.remote_env_option());
+        if let Some(token) = gh_token {
+            config.env.insert("GH_TOKEN".to_string(), token);
+        }
         let stream = ctx.provider.exec_interactive(&ctx.cid, &config).await?;
 
         self.touch_last_used(id).await?;

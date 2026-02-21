@@ -55,6 +55,8 @@ pub struct CredentialsConfig {
     pub docker: bool,
     /// Forward Git credentials into containers (default: true)
     pub git: bool,
+    /// Forward GitHub CLI (`gh`) token into containers (default: true)
+    pub gh: bool,
 }
 
 impl Default for CredentialsConfig {
@@ -62,6 +64,7 @@ impl Default for CredentialsConfig {
         Self {
             docker: true,
             git: true,
+            gh: true,
         }
     }
 }

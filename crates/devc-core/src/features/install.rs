@@ -178,9 +178,24 @@ async fn write_container_env(
         ..Default::default()
     };
 
-    provider.exec(container_id, &exec_config).await?;
-
-    Ok(skipped_keys)
+    let mut last_output = String::new();
+    for attempt in 0..3 {
+        let result = provider.exec(container_id, &exec_config).await?;
+        if result.exit_code == 0 {
+            return Ok(skipped_keys);
+        }
+        last_output = result.output;
+        tracing::warn!(
+            "write_container_env exec failed (attempt {}/3): {}",
+            attempt + 1,
+            last_output.trim()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    Err(crate::CoreError::ExecFailed(format!(
+        "Failed to write /etc/profile.d/devc-features.sh after 3 attempts: {}",
+        last_output.trim()
+    )))
 }
 
 #[cfg(test)]

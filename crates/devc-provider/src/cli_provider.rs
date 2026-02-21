@@ -601,8 +601,38 @@ impl ContainerProvider for CliProvider {
     }
 
     async fn start(&self, id: &ContainerId) -> Result<()> {
-        self.run_cmd(&["start", &id.0]).await?;
-        Ok(())
+        let max_retries = if self.provider_type == ProviderType::Podman {
+            3
+        } else {
+            0
+        };
+        let mut last_err = None;
+
+        for attempt in 0..=max_retries {
+            match self.run_cmd(&["start", &id.0]).await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let msg = e.to_string();
+                    let is_transient = self.provider_type == ProviderType::Podman
+                        && (msg.contains("creating temporary passwd file")
+                            || (msg.contains("no such file or directory")
+                                && msg.contains("passwd")));
+                    if is_transient && attempt < max_retries {
+                        tracing::warn!(
+                            "Podman start transient error (attempt {}/{}): {}",
+                            attempt + 1,
+                            max_retries,
+                            msg
+                        );
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err.unwrap())
     }
 
     async fn stop(&self, id: &ContainerId, timeout: Option<u32>) -> Result<()> {
