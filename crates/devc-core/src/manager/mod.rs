@@ -3732,6 +3732,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_lifecycle_commands_use_workspace_folder() {
         let (workspace, _marker, feature_json) = create_lifecycle_workspace_with_features();
@@ -3773,6 +3774,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_lifecycle_commands_use_remote_user() {
         let (workspace, _marker, feature_json) = create_lifecycle_workspace_with_features();

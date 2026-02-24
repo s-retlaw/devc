@@ -6,6 +6,16 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn test_help_flag() {
     Command::cargo_bin("devc")
@@ -48,10 +58,14 @@ fn test_unknown_subcommand_fails() {
 
 #[test]
 fn test_init_no_devcontainer_fails() {
+    if !docker_available() {
+        eprintln!("Skipping: docker not available");
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     Command::cargo_bin("devc")
         .unwrap()
-        .args(["--provider", "docker", "init"])
+        .args(["init"])
         .current_dir(tmp.path())
         .assert()
         .failure()
@@ -69,10 +83,14 @@ fn test_config_shows_output() {
 
 #[test]
 fn test_list_succeeds() {
+    if !docker_available() {
+        eprintln!("Skipping: docker not available");
+        return;
+    }
     // List should succeed even with no containers (prints "No containers found")
     Command::cargo_bin("devc")
         .unwrap()
-        .args(["--provider", "docker", "list"])
+        .args(["list"])
         .assert()
         .success();
 }
