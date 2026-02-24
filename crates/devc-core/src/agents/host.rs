@@ -254,7 +254,6 @@ mod tests {
             .contains("host config missing"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_cursor_host_availability_uses_resolved_tokens() {
         let _guard = HOME_ENV_LOCK.lock().unwrap();

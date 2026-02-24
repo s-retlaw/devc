@@ -711,7 +711,6 @@ mod tests {
         assert!(result.unwrap_err().contains("path traversal"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_safe_unpack_rejects_absolute_path() {
         let tmp = tempfile::tempdir().unwrap();

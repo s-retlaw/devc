@@ -911,7 +911,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_setup_agents_cursor_materializes_config_auth_json() {
         let _guard = HOME_ENV_LOCK.lock().unwrap();

@@ -1224,7 +1224,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_host_command_string() {
         let dir = std::env::temp_dir();
@@ -1249,7 +1248,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_host_command_object() {
         let dir = std::env::temp_dir();
@@ -1267,7 +1265,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_host_command_captures_stdout() {
         let dir = std::env::temp_dir();
@@ -1282,7 +1279,6 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("captured_line")));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_host_command_captures_stderr() {
         let dir = std::env::temp_dir();
@@ -1297,7 +1293,6 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("stderr_line")));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_host_command_object_separators() {
         let dir = std::env::temp_dir();
