@@ -51,7 +51,7 @@ fn test_init_no_devcontainer_fails() {
     let tmp = tempfile::tempdir().unwrap();
     Command::cargo_bin("devc")
         .unwrap()
-        .arg("init")
+        .args(["--provider", "docker", "init"])
         .current_dir(tmp.path())
         .assert()
         .failure()
@@ -72,7 +72,7 @@ fn test_list_succeeds() {
     // List should succeed even with no containers (prints "No containers found")
     Command::cargo_bin("devc")
         .unwrap()
-        .arg("list")
+        .args(["--provider", "docker", "list"])
         .assert()
         .success();
 }

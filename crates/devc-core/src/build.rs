@@ -277,6 +277,7 @@ fn copy_features_to_context(features: &[ResolvedFeature], context_dir: &Path) ->
         copy_dir_recursive(&feature.dir, &dst)?;
         // Ensure files are readable by Podman's rootless build process
         // (runs in a user namespace that may lack access to 0700 temp dirs)
+        #[cfg(unix)]
         make_world_readable(&dst)?;
     }
     Ok(())
@@ -287,6 +288,7 @@ fn copy_features_to_context(features: &[ResolvedFeature], context_dir: &Path) ->
 /// Podman rootless builds run in a user namespace where the build process may not
 /// have access to files in the host's temp directory (mode 0700). This adds the
 /// read bit for others on files and read+execute on directories.
+#[cfg(unix)]
 fn make_world_readable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     for entry in std::fs::read_dir(path)? {
