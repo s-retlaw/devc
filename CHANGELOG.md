@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.5
+
+### Build Output UX
+- Stream lifecycle and dotfiles command output into the dedicated Build Output view only, instead of spilling verbose hook output into other TUI surfaces
+- Add structured build stage tracking in the Build Output title with a shared dots spinner
+- Insert clear stage markers into the Build Output log so transitions remain visible during long rebuilds
+- Tighten stage labels in the Build Output header and markers for better scanability
+
+### Fixes
+- Stop using output text matching to decide when a build is complete; completion now comes from explicit terminal events
+- Keep the Build Output close hint disabled until the build actually finishes
+- Restore visibility of dotfiles install output and devcontainer lifecycle hook output during build and rebuild flows
+
 ## 1.1.1
 
 ### Fixes
