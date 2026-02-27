@@ -106,6 +106,69 @@ impl CliProvider {
         }
     }
 
+    fn spawn_exec(&self, id: &ContainerId, config: &ExecConfig) -> Command {
+        let mut args = vec!["exec".to_string()];
+
+        if config.tty {
+            args.push("-t".to_string());
+        }
+
+        if let Some(ref wd) = config.working_dir {
+            args.push(format!("--workdir={}", wd));
+        }
+
+        if let Some(ref user) = config.user {
+            args.push(format!("--user={}", user));
+        }
+
+        args.extend(Self::env_args(&config.env));
+        args.push(id.0.clone());
+        args.extend(config.cmd.clone());
+
+        let mut cmd = self.build_command();
+        cmd.args(&args);
+        cmd
+    }
+
+    async fn read_stream_lines<R>(
+        stream: R,
+        progress: Option<mpsc::UnboundedSender<String>>,
+    ) -> Result<Vec<u8>>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut lines = BufReader::new(stream).lines();
+        let mut output = Vec::new();
+
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|e| ProviderError::ExecError(e.to_string()))?
+        {
+            if let Some(ref tx) = progress {
+                let _ = tx.send(line.clone());
+            }
+            output.extend_from_slice(line.as_bytes());
+            output.push(b'\n');
+        }
+
+        Ok(output)
+    }
+
+    fn exec_result_from_output(
+        status: std::process::ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    ) -> ExecResult {
+        let stdout = String::from_utf8_lossy(&stdout);
+        let stderr = String::from_utf8_lossy(&stderr);
+
+        ExecResult {
+            exit_code: status.code().unwrap_or(-1) as i64,
+            output: format!("{}{}", stdout, stderr),
+        }
+    }
+
     /// Build `--env=K=V` arguments from an environment variable map
     fn env_args(env: &HashMap<String, String>) -> Vec<String> {
         env.iter()
@@ -658,44 +721,59 @@ impl ContainerProvider for CliProvider {
     }
 
     async fn exec(&self, id: &ContainerId, config: &ExecConfig) -> Result<ExecResult> {
-        let mut args = vec!["exec".to_string()];
-
-        if config.tty {
-            args.push("-t".to_string());
-        }
-
-        if let Some(ref wd) = config.working_dir {
-            args.push(format!("--workdir={}", wd));
-        }
-
-        if let Some(ref user) = config.user {
-            args.push(format!("--user={}", user));
-        }
-
-        args.extend(Self::env_args(&config.env));
-
-        args.push(id.0.clone());
-        args.extend(config.cmd.clone());
-
-        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-        let mut cmd = self.build_command();
-        cmd.args(&args_refs);
-
-        let output = cmd
+        let output = self
+            .spawn_exec(id, config)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
             .map_err(|e| ProviderError::ExecError(e.to_string()))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        Ok(Self::exec_result_from_output(
+            output.status,
+            output.stdout,
+            output.stderr,
+        ))
+    }
 
-        Ok(ExecResult {
-            exit_code: output.status.code().unwrap_or(-1) as i64,
-            output: format!("{}{}", stdout, stderr),
-        })
+    async fn exec_with_progress(
+        &self,
+        id: &ContainerId,
+        config: &ExecConfig,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<ExecResult> {
+        let mut child = self
+            .spawn_exec(id, config)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| ProviderError::ExecError(e.to_string()))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProviderError::ExecError("missing exec stdout".to_string()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ProviderError::ExecError("missing exec stderr".to_string()))?;
+
+        let stdout_task = tokio::spawn(Self::read_stream_lines(stdout, Some(progress.clone())));
+        let stderr_task = tokio::spawn(Self::read_stream_lines(stderr, Some(progress)));
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| ProviderError::ExecError(e.to_string()))?;
+
+        let stdout = stdout_task
+            .await
+            .map_err(|e| ProviderError::ExecError(e.to_string()))??;
+        let stderr = stderr_task
+            .await
+            .map_err(|e| ProviderError::ExecError(e.to_string()))??;
+
+        Ok(Self::exec_result_from_output(status, stdout, stderr))
     }
 
     async fn exec_interactive(&self, id: &ContainerId, config: &ExecConfig) -> Result<ExecStream> {

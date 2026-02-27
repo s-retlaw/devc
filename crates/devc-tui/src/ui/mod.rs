@@ -7,6 +7,7 @@ mod header_footer;
 mod output;
 mod ports;
 mod progress;
+mod spinner;
 
 use crate::app::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
 use crate::settings::SettingsSection;

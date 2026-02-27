@@ -61,6 +61,14 @@ pub trait ContainerProvider: Send + Sync {
     /// Execute a command in a running container
     async fn exec(&self, id: &ContainerId, config: &ExecConfig) -> Result<ExecResult>;
 
+    /// Execute a command and stream stdout/stderr lines to the provided channel.
+    async fn exec_with_progress(
+        &self,
+        id: &ContainerId,
+        config: &ExecConfig,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<ExecResult>;
+
     /// Execute a command with interactive I/O streams
     async fn exec_interactive(&self, id: &ContainerId, config: &ExecConfig) -> Result<ExecStream>;
 

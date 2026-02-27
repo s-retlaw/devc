@@ -1,3 +1,4 @@
+use super::spinner;
 use super::*;
 
 pub(super) fn draw_disconnection_warning(frame: &mut Frame, app: &App, area: Rect) {
@@ -26,8 +27,7 @@ pub(super) fn draw_disconnection_warning(frame: &mut Frame, app: &App, area: Rec
 }
 
 pub(super) fn draw_install_progress(frame: &mut Frame, app: &App, area: Rect) {
-    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let spinner = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
+    let spinner = spinner::frame(app.spinner_frame);
 
     DialogBuilder::new("Installing")
         .width(40)
@@ -44,8 +44,7 @@ pub(super) fn draw_install_progress(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Draw container operation progress modal with spinner
 pub(super) fn draw_operation_progress(frame: &mut Frame, app: &App, area: Rect) {
-    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let spinner = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
+    let spinner = spinner::frame(app.spinner_frame);
 
     let op = match &app.container_op {
         Some(op) => op,

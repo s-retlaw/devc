@@ -428,6 +428,19 @@ impl ContainerProvider for MockProvider {
         })
     }
 
+    async fn exec_with_progress(
+        &self,
+        id: &ContainerId,
+        config: &ExecConfig,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<ExecResult> {
+        let result = self.exec(id, config).await?;
+        for line in result.output.lines() {
+            let _ = progress.send(line.to_string());
+        }
+        Ok(result)
+    }
+
     async fn exec_interactive(&self, id: &ContainerId, _config: &ExecConfig) -> Result<ExecStream> {
         self.record(MockCall::ExecInteractive { id: id.0.clone() });
         Ok(ExecStream {

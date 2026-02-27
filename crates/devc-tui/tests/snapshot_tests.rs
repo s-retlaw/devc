@@ -152,6 +152,8 @@ fn test_build_output_view() {
     ];
     app.build_complete = false;
     app.build_auto_scroll = true;
+    app.current_build_stage = Some(devc_core::BuildStage::BuildingImage);
+    app.spinner_frame = 1;
 
     let output = render_app(&mut app, 80, 24);
     insta::assert_snapshot!(output);

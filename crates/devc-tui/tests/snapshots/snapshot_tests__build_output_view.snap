@@ -1,11 +1,12 @@
 ---
 source: crates/devc-tui/tests/snapshot_tests.rs
+assertion_line: 159
 expression: output
 ---
 ┌ devc - Dev Container Manager ────────────────────────────────────────────────┐
 │ 1:Containers  │  2:Providers  │  3:Settings                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
-┌ Build Output [1/4] - Building... ────────────────────────────────────────────┐
+┌ Build Output [1/4] - Build ⠙ ────────────────────────────────────────────────┐
 │   1 Building container: test-container                                       │
 │   2 Step 1/5: FROM rust:latest                                               │
 │   3 Step 2/5: WORKDIR /app                                                   │

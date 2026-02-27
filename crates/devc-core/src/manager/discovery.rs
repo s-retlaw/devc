@@ -266,7 +266,17 @@ impl ContainerManager {
 
                 // Run first-create lifecycle (non-fatal — adopt succeeds even if lifecycle fails)
                 if let Err(e) = self
-                    .run_first_create_lifecycle(&state_id, &container, provider, &cid, None)
+                    .run_first_create_lifecycle(
+                        &state_id,
+                        &container,
+                        provider,
+                        &cid,
+                        crate::manager::lifecycle::LifecycleChannels {
+                            progress: None,
+                            output: None,
+                            stage: None,
+                        },
+                    )
                     .await
                 {
                     tracing::warn!("Lifecycle commands failed during adopt (non-fatal): {}", e);

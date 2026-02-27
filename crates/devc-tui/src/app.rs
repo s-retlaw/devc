@@ -18,7 +18,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use devc_config::GlobalConfig;
 use devc_core::{
     agents::{AgentContainerPresence, AgentKind, AgentSyncResult, AgentSyncSelection},
-    Container, ContainerManager, ContainerState, DevcContainerStatus,
+    BuildStage, Container, ContainerManager, ContainerState, DevcContainerStatus,
 };
 use devc_provider::{
     create_provider, detect_available_providers, ContainerProvider, DevcontainerSource,
@@ -200,6 +200,10 @@ pub struct AgentPanelRow {
 pub enum AsyncEvent {
     /// Build/rebuild progress line
     BuildProgress(String),
+    /// Structured build/rebuild stage
+    BuildStage(BuildStage),
+    /// Final build/rebuild terminal state
+    BuildFinished { success: bool },
     /// Port detection update (from manual ports popup)
     PortDetected(PortDetectionUpdate),
     /// Container operation completed (start/stop/delete/up)
@@ -269,6 +273,10 @@ pub struct App {
     pub build_auto_scroll: bool,
     /// Whether the build has completed (success or error)
     pub build_complete: bool,
+    /// Current structured build stage for the Build Output title
+    pub current_build_stage: Option<BuildStage>,
+    /// Last stage marker written into the build output log
+    pub last_stage_marker: Option<BuildStage>,
     /// Container logs
     pub logs: Vec<String>,
     /// Logs scroll position (line offset from top)
@@ -390,6 +398,8 @@ impl App {
             build_output_scroll: 0,
             build_auto_scroll: true,
             build_complete: false,
+            current_build_stage: None,
+            last_stage_marker: None,
             logs: Vec::new(),
             logs_scroll: 0,
             status_message: None,
@@ -578,6 +588,8 @@ impl App {
             build_output_scroll: 0,
             build_auto_scroll: true,
             build_complete: false,
+            current_build_stage: None,
+            last_stage_marker: None,
             logs: Vec::new(),
             logs_scroll: 0,
             status_message: None,
@@ -703,9 +715,12 @@ impl App {
         self.build_output_scroll = 0;
         self.build_auto_scroll = true;
         self.build_complete = false;
+        self.current_build_stage = None;
+        self.last_stage_marker = None;
 
         let event_tx = self.async_event_tx.clone();
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
         // Forward build progress to unified event channel
         let fwd_tx = event_tx.clone();
         tokio::spawn(async move {
@@ -715,20 +730,30 @@ impl App {
                 }
             }
         });
+        let fwd_stage_tx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(stage) = stage_rx.recv().await {
+                if fwd_stage_tx.send(AsyncEvent::BuildStage(stage)).is_err() {
+                    break;
+                }
+            }
+        });
 
         let manager = Arc::clone(&self.manager);
+        let done_tx = event_tx.clone();
         tokio::spawn(async move {
             match manager
                 .read()
                 .await
-                .rebuild_with_progress(&id, false, progress_tx.clone())
+                .rebuild_with_progress(&id, false, progress_tx.clone(), Some(stage_tx))
                 .await
             {
                 Ok(()) => {
-                    // Success message is sent by rebuild_with_progress
+                    let _ = done_tx.send(AsyncEvent::BuildFinished { success: true });
                 }
                 Err(e) => {
                     let _ = progress_tx.send(format!("Error: Build failed: {}", e));
+                    let _ = done_tx.send(AsyncEvent::BuildFinished { success: false });
                 }
             }
         });
@@ -815,6 +840,12 @@ impl App {
         match event {
             AsyncEvent::BuildProgress(line) => {
                 self.handle_build_progress(line).await?;
+            }
+            AsyncEvent::BuildStage(stage) => {
+                self.handle_build_stage(stage);
+            }
+            AsyncEvent::BuildFinished { success } => {
+                self.handle_build_finished(success).await?;
             }
             AsyncEvent::PortDetected(update) => {
                 self.port_state.handle_port_update(update);
@@ -1258,17 +1289,58 @@ impl App {
 
     /// Handle a single build progress message
     async fn handle_build_progress(&mut self, line: String) -> AppResult<()> {
-        let is_complete =
-            line.contains("complete") || line.contains("Error:") || line.contains("Failed:");
         self.build_output.push(line);
 
-        if is_complete {
-            self.loading = false;
-            self.build_complete = true;
-            self.refresh_containers().await?;
+        Ok(())
+    }
+
+    async fn handle_build_finished(&mut self, success: bool) -> AppResult<()> {
+        if success {
+            if self.current_build_stage != Some(BuildStage::Completed) {
+                self.handle_build_stage(BuildStage::Completed);
+            }
+        } else if self.current_build_stage != Some(BuildStage::Failed) {
+            self.handle_build_stage(BuildStage::Failed);
         }
 
+        self.loading = false;
+        self.build_complete = true;
+        self.refresh_containers().await?;
         Ok(())
+    }
+
+    fn handle_build_stage(&mut self, stage: BuildStage) {
+        if self.last_stage_marker != Some(stage) {
+            self.build_output.push(format!(
+                "========== Stage: {} ==========",
+                Self::build_stage_label(stage)
+            ));
+            self.last_stage_marker = Some(stage);
+        }
+        self.current_build_stage = Some(stage);
+    }
+
+    pub fn build_stage_label(stage: BuildStage) -> &'static str {
+        match stage {
+            BuildStage::Starting => "Start",
+            BuildStage::StoppingContainer => "Stop",
+            BuildStage::ProviderMigration => "Migrate",
+            BuildStage::InitializeCommandHost => "Init",
+            BuildStage::BuildingImage => "Build",
+            BuildStage::CreatingContainer => "Create",
+            BuildStage::StartingContainer => "Launch",
+            BuildStage::LifecycleFeatureOnCreate => "Feat onCreate",
+            BuildStage::LifecycleOnCreate => "onCreate",
+            BuildStage::LifecycleFeatureUpdateContent => "Feat update",
+            BuildStage::LifecycleUpdateContent => "Update",
+            BuildStage::LifecycleFeaturePostCreate => "Feat postCreate",
+            BuildStage::LifecyclePostCreate => "postCreate",
+            BuildStage::SetupSsh => "SSH",
+            BuildStage::InstallDotfiles => "Dotfiles",
+            BuildStage::AgentSetup => "Agents",
+            BuildStage::Completed => "Done",
+            BuildStage::Failed => "Failed",
+        }
     }
 
     /// Handle an event
@@ -1279,7 +1351,10 @@ impl App {
             }
             Event::Tick => {
                 // Advance spinner frame when installing or operating
-                if self.port_state.socat_installing || self.container_op.is_some() {
+                if self.port_state.socat_installing
+                    || self.container_op.is_some()
+                    || (self.view == View::BuildOutput && !self.build_complete)
+                {
                     self.spinner_frame = (self.spinner_frame + 1) % 10;
                 }
                 // Refresh container list periodically (only on Containers tab main view)
@@ -1463,6 +1538,8 @@ impl App {
                 self.build_output_scroll = 0;
                 self.build_complete = false;
                 self.build_auto_scroll = true;
+                self.current_build_stage = None;
+                self.last_stage_marker = None;
                 self.view = View::Main;
                 return Ok(());
             }
@@ -3628,9 +3705,12 @@ impl App {
                 self.build_output_scroll = 0;
                 self.build_auto_scroll = true;
                 self.build_complete = false;
+                self.current_build_stage = None;
+                self.last_stage_marker = None;
 
                 let event_tx = self.async_event_tx.clone();
                 let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+                let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
                 // Forward build progress to unified event channel
                 let fwd_tx = event_tx.clone();
                 tokio::spawn(async move {
@@ -3640,11 +3720,20 @@ impl App {
                         }
                     }
                 });
+                let fwd_stage_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(stage) = stage_rx.recv().await {
+                        if fwd_stage_tx.send(AsyncEvent::BuildStage(stage)).is_err() {
+                            break;
+                        }
+                    }
+                });
 
                 // Clone values for the background task
                 let manager = Arc::clone(&self.manager);
                 let no_cache = self.rebuild_no_cache;
                 self.rebuild_no_cache = false;
+                let done_tx = event_tx.clone();
 
                 // Spawn background task for rebuild
                 tokio::spawn(async move {
@@ -3652,14 +3741,15 @@ impl App {
                     match manager
                         .read()
                         .await
-                        .rebuild_with_progress(&id, no_cache, progress_tx.clone())
+                        .rebuild_with_progress(&id, no_cache, progress_tx.clone(), Some(stage_tx))
                         .await
                     {
                         Ok(()) => {
-                            // Success message is sent by rebuild_with_progress
+                            let _ = done_tx.send(AsyncEvent::BuildFinished { success: true });
                         }
                         Err(e) => {
                             let _ = progress_tx.send(format!("Error: Rebuild failed: {}", e));
+                            let _ = done_tx.send(AsyncEvent::BuildFinished { success: false });
                         }
                     }
                 });
@@ -3760,6 +3850,8 @@ impl App {
                 self.build_output.clear();
                 self.build_output_scroll = 0;
                 self.build_auto_scroll = true;
+                self.current_build_stage = None;
+                self.last_stage_marker = None;
                 self.view = View::Main;
                 self.status_message = Some("Build cancelled".to_string());
                 self.refresh_containers().await?;

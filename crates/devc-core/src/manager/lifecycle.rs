@@ -1,15 +1,41 @@
 //! Lifecycle command execution for ContainerManager
 
 use crate::{
-    run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, CoreError,
-    DotfilesManager, Result, SshManager,
+    run_feature_lifecycle_commands, run_feature_lifecycle_commands_with_output,
+    run_lifecycle_command_with_env, run_lifecycle_command_with_env_and_output, Container,
+    CoreError, DotfilesManager, LifecycleExecOpts, Result, SshManager,
 };
 use devc_provider::{ContainerId, ContainerProvider, ContainerStatus};
 use tokio::sync::mpsc;
 
-use super::{get_feature_properties, merge_remote_env, send_progress, ContainerManager};
+use super::{
+    get_feature_properties, merge_remote_env, send_progress, send_stage, BuildStage,
+    ContainerManager,
+};
+
+pub(crate) struct LifecycleChannels<'a> {
+    pub progress: Option<&'a mpsc::UnboundedSender<String>>,
+    pub output: Option<&'a mpsc::UnboundedSender<String>>,
+    pub stage: Option<&'a mpsc::UnboundedSender<BuildStage>>,
+}
 
 impl ContainerManager {
+    fn lifecycle_exec_opts<'a>(
+        user: Option<&'a str>,
+        workspace_folder: Option<&'a str>,
+        remote_env: Option<&'a std::collections::HashMap<String, String>>,
+        output: Option<&'a mpsc::UnboundedSender<String>>,
+        tag: Option<&'a str>,
+    ) -> LifecycleExecOpts<'a> {
+        LifecycleExecOpts {
+            user,
+            working_dir: workspace_folder,
+            env: remote_env,
+            output,
+            tag,
+        }
+    }
+
     /// Run first-create lifecycle commands on a container.
     ///
     /// This runs (in order):
@@ -29,7 +55,7 @@ impl ContainerManager {
         container: &Container,
         provider: &dyn ContainerProvider,
         container_id: &ContainerId,
-        progress: Option<&mpsc::UnboundedSender<String>>,
+        channels: LifecycleChannels<'_>,
     ) -> Result<()> {
         let container_state = {
             let state = self.state.read().await;
@@ -49,112 +75,146 @@ impl ContainerManager {
 
         // Feature onCreateCommands run first (per spec)
         if !feature_props.on_create_commands.is_empty() {
-            send_progress(progress, "Running feature onCreateCommand(s)...");
+            send_stage(channels.stage, BuildStage::LifecycleFeatureOnCreate);
+            send_progress(channels.progress, "Running feature onCreateCommand(s)...");
             let details = provider.inspect(container_id).await?;
             if details.status != ContainerStatus::Running {
                 provider.start(container_id).await?;
             }
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 container_id,
                 &feature_props.on_create_commands,
-                user,
-                workspace_folder,
-                remote_env,
+                Self::lifecycle_exec_opts(
+                    user,
+                    workspace_folder,
+                    remote_env,
+                    channels.output,
+                    Some("feature:onCreate"),
+                ),
             )
             .await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.on_create_command {
-            send_progress(progress, "Running onCreate command...");
+            send_stage(channels.stage, BuildStage::LifecycleOnCreate);
+            send_progress(channels.progress, "Running onCreate command...");
             let details = provider.inspect(container_id).await?;
             if details.status != ContainerStatus::Running {
                 provider.start(container_id).await?;
             }
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 container_id,
                 cmd,
-                user,
-                workspace_folder,
-                remote_env,
+                Self::lifecycle_exec_opts(
+                    user,
+                    workspace_folder,
+                    remote_env,
+                    channels.output,
+                    Some("onCreate"),
+                ),
             )
             .await?;
         }
 
         // Feature updateContentCommands run first (per spec)
         if !feature_props.update_content_commands.is_empty() {
-            send_progress(progress, "Running feature updateContentCommand(s)...");
+            send_stage(channels.stage, BuildStage::LifecycleFeatureUpdateContent);
+            send_progress(
+                channels.progress,
+                "Running feature updateContentCommand(s)...",
+            );
             let details = provider.inspect(container_id).await?;
             if details.status != ContainerStatus::Running {
                 provider.start(container_id).await?;
             }
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 container_id,
                 &feature_props.update_content_commands,
-                user,
-                workspace_folder,
-                remote_env,
+                Self::lifecycle_exec_opts(
+                    user,
+                    workspace_folder,
+                    remote_env,
+                    channels.output,
+                    Some("feature:updateContent"),
+                ),
             )
             .await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.update_content_command {
-            send_progress(progress, "Running updateContentCommand...");
+            send_stage(channels.stage, BuildStage::LifecycleUpdateContent);
+            send_progress(channels.progress, "Running updateContentCommand...");
             let details = provider.inspect(container_id).await?;
             if details.status != ContainerStatus::Running {
                 provider.start(container_id).await?;
             }
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 container_id,
                 cmd,
-                user,
-                workspace_folder,
-                remote_env,
+                Self::lifecycle_exec_opts(
+                    user,
+                    workspace_folder,
+                    remote_env,
+                    channels.output,
+                    Some("updateContent"),
+                ),
             )
             .await?;
         }
 
         // Feature postCreateCommands run first (per spec)
         if !feature_props.post_create_commands.is_empty() {
-            send_progress(progress, "Running feature postCreateCommand(s)...");
+            send_stage(channels.stage, BuildStage::LifecycleFeaturePostCreate);
+            send_progress(channels.progress, "Running feature postCreateCommand(s)...");
             let details = provider.inspect(container_id).await?;
             if details.status != ContainerStatus::Running {
                 provider.start(container_id).await?;
             }
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 container_id,
                 &feature_props.post_create_commands,
-                user,
-                workspace_folder,
-                remote_env,
+                Self::lifecycle_exec_opts(
+                    user,
+                    workspace_folder,
+                    remote_env,
+                    channels.output,
+                    Some("feature:postCreate"),
+                ),
             )
             .await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.post_create_command {
-            send_progress(progress, "Running postCreateCommand...");
+            send_stage(channels.stage, BuildStage::LifecyclePostCreate);
+            send_progress(channels.progress, "Running postCreateCommand...");
             let details = provider.inspect(container_id).await?;
             if details.status != ContainerStatus::Running {
                 provider.start(container_id).await?;
             }
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 container_id,
                 cmd,
-                user,
-                workspace_folder,
-                remote_env,
+                Self::lifecycle_exec_opts(
+                    user,
+                    workspace_folder,
+                    remote_env,
+                    channels.output,
+                    Some("postCreate"),
+                ),
             )
             .await?;
         }
 
         // Setup SSH if enabled (for proper TTY/resize support)
         if self.global_config.defaults.ssh_enabled.unwrap_or(false) {
-            send_progress(progress, "Setting up SSH...");
+            send_stage(channels.stage, BuildStage::SetupSsh);
+            send_progress(channels.progress, "Setting up SSH...");
             let details = provider.inspect(container_id).await?;
             if details.status != ContainerStatus::Running {
                 provider.start(container_id).await?;
@@ -204,13 +264,15 @@ impl ContainerManager {
         };
 
         if dotfiles_manager.is_configured() {
-            send_progress(progress, "Installing dotfiles...");
+            send_stage(channels.stage, BuildStage::InstallDotfiles);
+            send_progress(channels.progress, "Installing dotfiles...");
             dotfiles_manager
                 .inject_with_progress(
                     provider,
                     container_id,
                     container.devcontainer.effective_user(),
-                    progress,
+                    channels.progress,
+                    channels.output,
                 )
                 .await?;
         }

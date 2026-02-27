@@ -770,21 +770,51 @@ pub async fn run_lifecycle_command_with_env(
     working_dir: Option<&str>,
     env: Option<&HashMap<String, String>>,
 ) -> Result<()> {
-    let base_env = env.cloned().unwrap_or_default();
+    run_lifecycle_command_with_env_and_output(
+        provider,
+        container_id,
+        command,
+        LifecycleExecOpts {
+            user,
+            working_dir,
+            env,
+            output: None,
+            tag: None,
+        },
+    )
+    .await
+}
+
+pub struct LifecycleExecOpts<'a> {
+    pub user: Option<&'a str>,
+    pub working_dir: Option<&'a str>,
+    pub env: Option<&'a HashMap<String, String>>,
+    pub output: Option<&'a tokio::sync::mpsc::UnboundedSender<String>>,
+    pub tag: Option<&'a str>,
+}
+
+pub async fn run_lifecycle_command_with_env_and_output(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    command: &devc_config::Command,
+    opts: LifecycleExecOpts<'_>,
+) -> Result<()> {
+    let base_env = opts.env.cloned().unwrap_or_default();
 
     match command {
         devc_config::Command::String(cmd) => {
             let config = ExecConfig {
                 cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
                 env: base_env,
-                working_dir: working_dir.map(|s| s.to_string()),
-                user: user.map(|s| s.to_string()),
+                working_dir: opts.working_dir.map(|s| s.to_string()),
+                user: opts.user.map(|s| s.to_string()),
                 tty: false,
                 stdin: false,
                 privileged: false,
             };
 
-            let result = provider.exec(container_id, &config).await?;
+            let result =
+                exec_lifecycle(provider, container_id, &config, opts.output, opts.tag).await?;
             if result.exit_code != 0 {
                 return Err(CoreError::ExecFailed(format!(
                     "Command '{}' exited with code {}",
@@ -796,14 +826,15 @@ pub async fn run_lifecycle_command_with_env(
             let config = ExecConfig {
                 cmd: args.clone(),
                 env: base_env,
-                working_dir: working_dir.map(|s| s.to_string()),
-                user: user.map(|s| s.to_string()),
+                working_dir: opts.working_dir.map(|s| s.to_string()),
+                user: opts.user.map(|s| s.to_string()),
                 tty: false,
                 stdin: false,
                 privileged: false,
             };
 
-            let result = provider.exec(container_id, &config).await?;
+            let result =
+                exec_lifecycle(provider, container_id, &config, opts.output, opts.tag).await?;
             if result.exit_code != 0 {
                 return Err(CoreError::ExecFailed(format!(
                     "Command {:?} exited with code {}",
@@ -820,8 +851,10 @@ pub async fn run_lifecycle_command_with_env(
                 .map(|(name, cmd)| {
                     let name = name.clone();
                     let base_env = base_env.clone();
-                    let working_dir = working_dir.map(|s| s.to_string());
-                    let user = user.map(|s| s.to_string());
+                    let working_dir = opts.working_dir.map(|s| s.to_string());
+                    let user = opts.user.map(|s| s.to_string());
+                    let output = opts.output;
+                    let tag = opts.tag.map(str::to_string);
                     async move {
                         tracing::info!("Running lifecycle command: {}", name);
                         let config = match cmd {
@@ -844,7 +877,19 @@ pub async fn run_lifecycle_command_with_env(
                                 privileged: false,
                             },
                         };
-                        let result = provider.exec(container_id, &config).await?;
+                        let named_tag = if let Some(tag) = tag {
+                            format!("{}:{}", tag, name)
+                        } else {
+                            name.clone()
+                        };
+                        let result = exec_lifecycle(
+                            provider,
+                            container_id,
+                            &config,
+                            output,
+                            Some(&named_tag),
+                        )
+                        .await?;
                         if result.exit_code != 0 {
                             return Err(CoreError::ExecFailed(format!(
                                 "Command '{}' exited with code {}",
@@ -880,6 +925,63 @@ pub async fn run_feature_lifecycle_commands(
         run_lifecycle_command_with_env(provider, container_id, cmd, user, working_dir, env).await?;
     }
     Ok(())
+}
+
+pub async fn run_feature_lifecycle_commands_with_output(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    commands: &[devc_config::Command],
+    opts: LifecycleExecOpts<'_>,
+) -> Result<()> {
+    for cmd in commands {
+        run_lifecycle_command_with_env_and_output(
+            provider,
+            container_id,
+            cmd,
+            LifecycleExecOpts {
+                user: opts.user,
+                working_dir: opts.working_dir,
+                env: opts.env,
+                output: opts.output,
+                tag: opts.tag,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn exec_lifecycle(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    config: &ExecConfig,
+    output: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    tag: Option<&str>,
+) -> Result<devc_provider::ExecResult> {
+    if let Some(tx) = output {
+        let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel();
+        let forward_tx = tx.clone();
+        let tag = tag.map(str::to_string);
+        let forward = tokio::spawn(async move {
+            while let Some(line) = line_rx.recv().await {
+                let formatted = match &tag {
+                    Some(tag) => format!("[{}] {}", tag, line),
+                    None => line,
+                };
+                let _ = forward_tx.send(formatted);
+            }
+        });
+        let result = provider
+            .exec_with_progress(container_id, config, line_tx)
+            .await?;
+        let _ = forward.await;
+        Ok(result)
+    } else {
+        provider
+            .exec(container_id, config)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]

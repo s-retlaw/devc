@@ -1,3 +1,4 @@
+use super::spinner;
 use super::*;
 
 pub(super) fn draw_build_output(frame: &mut Frame, app: &App, area: Rect) {
@@ -49,24 +50,33 @@ pub(super) fn draw_build_output(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let spinner = spinner::frame(app.spinner_frame);
+    let stage_label = app
+        .current_build_stage
+        .map(App::build_stage_label)
+        .unwrap_or("Building");
+
     let title = if app.build_complete {
         if total_lines > 0 {
             format!(
-                " Build Output [{}/{}] - Press q to close ",
+                " Build Output [{}/{}] - {} - Press q to close ",
                 scroll + 1,
-                total_lines
+                total_lines,
+                stage_label
             )
         } else {
-            " Build Output - Press q to close ".to_string()
+            format!(" Build Output - {} - Press q to close ", stage_label)
         }
     } else if total_lines > 0 {
         format!(
-            " Build Output [{}/{}] - Building... ",
+            " Build Output [{}/{}] - {} {} ",
             scroll + 1,
-            total_lines
+            total_lines,
+            stage_label,
+            spinner
         )
     } else {
-        " Build Output - Building... ".to_string()
+        format!(" Build Output - {} {} ", stage_label, spinner)
     };
 
     let border_color = if app.build_complete {

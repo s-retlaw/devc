@@ -6,7 +6,7 @@ use devc_provider::ContainerProvider;
 use std::path::Path;
 use tokio::sync::mpsc;
 
-use super::ContainerManager;
+use super::{send_stage, BuildStage, ContainerManager};
 
 // Send a progress message to the channel, or log via tracing if no channel.
 fn emit(progress: &Option<mpsc::UnboundedSender<String>>, msg: String) {
@@ -33,12 +33,12 @@ async fn dispatch_build(
 impl ContainerManager {
     /// Build a container image
     pub async fn build(&self, id: &str) -> Result<String> {
-        self.build_inner(id, false, None).await
+        self.build_inner(id, false, None, None).await
     }
 
     /// Build a container image with options
     pub async fn build_with_options(&self, id: &str, no_cache: bool) -> Result<String> {
-        self.build_inner(id, no_cache, None).await
+        self.build_inner(id, no_cache, None, None).await
     }
 
     /// Build a container image with progress updates streamed to a channel
@@ -48,7 +48,7 @@ impl ContainerManager {
         no_cache: bool,
         progress: mpsc::UnboundedSender<String>,
     ) -> Result<String> {
-        self.build_inner(id, no_cache, Some(progress)).await
+        self.build_inner(id, no_cache, Some(progress), None).await
     }
 
     /// Unified build implementation.
@@ -61,6 +61,7 @@ impl ContainerManager {
         id: &str,
         no_cache: bool,
         progress: Option<mpsc::UnboundedSender<String>>,
+        stage: Option<mpsc::UnboundedSender<BuildStage>>,
     ) -> Result<String> {
         let container_state = {
             let state = self.state.read().await;
@@ -83,6 +84,7 @@ impl ContainerManager {
             }
         }
         self.save_state().await?;
+        send_stage(stage.as_ref(), BuildStage::BuildingImage);
 
         // Check if SSH injection is enabled
         let inject_ssh = self.global_config.defaults.ssh_enabled.unwrap_or(false);
@@ -301,7 +303,7 @@ impl ContainerManager {
     /// 3. Build image with optional --no-cache
     /// 4. Create and start the new container
     pub async fn rebuild(&self, id: &str, no_cache: bool) -> Result<()> {
-        self.rebuild_inner(id, no_cache, None).await
+        self.rebuild_inner(id, no_cache, None, None).await
     }
 
     /// Rebuild a container with progress updates streamed to a channel
@@ -312,8 +314,10 @@ impl ContainerManager {
         id: &str,
         no_cache: bool,
         progress: mpsc::UnboundedSender<String>,
+        stage: Option<mpsc::UnboundedSender<BuildStage>>,
     ) -> Result<()> {
-        self.rebuild_inner(id, no_cache, Some(progress)).await
+        self.rebuild_inner(id, no_cache, Some(progress), stage)
+            .await
     }
 
     /// Unified rebuild implementation.
@@ -325,7 +329,9 @@ impl ContainerManager {
         id: &str,
         no_cache: bool,
         progress: Option<mpsc::UnboundedSender<String>>,
+        stage: Option<mpsc::UnboundedSender<BuildStage>>,
     ) -> Result<()> {
+        send_stage(stage.as_ref(), BuildStage::Starting);
         let new_provider = self.provider_type().ok_or_else(|| {
             CoreError::NotConnected("Cannot rebuild: no provider available".to_string())
         })?;
@@ -343,12 +349,14 @@ impl ContainerManager {
 
         // 1. Stop and remove runtime container
         if container_state.container_id.is_some() {
+            send_stage(stage.as_ref(), BuildStage::StoppingContainer);
             emit(&progress, "Stopping container...".to_string());
             self.down(id).await?;
         }
 
         // 2. Handle provider migration
         if provider_changed {
+            send_stage(stage.as_ref(), BuildStage::ProviderMigration);
             emit(
                 &progress,
                 format!("Migrating provider: {} -> {}", old_provider, new_provider),
@@ -368,6 +376,7 @@ impl ContainerManager {
         // 3. Run initializeCommand on host before build (per spec)
         let container = self.load_container(&container_state.config_path)?;
         if let Some(ref cmd) = container.devcontainer.initialize_command {
+            send_stage(stage.as_ref(), BuildStage::InitializeCommandHost);
             emit(
                 &progress,
                 "Running initializeCommand on host...".to_string(),
@@ -377,13 +386,16 @@ impl ContainerManager {
         }
 
         // 4. Rebuild image
-        self.build_inner(id, no_cache, progress.clone()).await?;
+        self.build_inner(id, no_cache, progress.clone(), stage.clone())
+            .await?;
 
         // 5. Create and start container
         let progress_ref = progress.as_ref();
-        self.up_with_progress_inner(id, progress_ref, progress_ref, false)
+        let stage_ref = stage.as_ref();
+        self.up_with_progress_inner(id, progress_ref, progress_ref, stage_ref, false)
             .await?;
 
+        send_stage(stage.as_ref(), BuildStage::AgentSetup);
         let results = self.setup_agents_for_container(id).await?;
         let warning_count: usize = results.iter().map(|r| r.warnings.len()).sum();
         if warning_count > 0 {
@@ -396,6 +408,7 @@ impl ContainerManager {
             );
         }
 
+        send_stage(stage.as_ref(), BuildStage::Completed);
         emit(&progress, "Build complete.".to_string());
         Ok(())
     }

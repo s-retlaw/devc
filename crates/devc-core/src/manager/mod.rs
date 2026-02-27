@@ -53,6 +53,28 @@ pub struct ExecEnv {
     pub git_hosts: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildStage {
+    Starting,
+    StoppingContainer,
+    ProviderMigration,
+    InitializeCommandHost,
+    BuildingImage,
+    CreatingContainer,
+    StartingContainer,
+    LifecycleFeatureOnCreate,
+    LifecycleOnCreate,
+    LifecycleFeatureUpdateContent,
+    LifecycleUpdateContent,
+    LifecycleFeaturePostCreate,
+    LifecyclePostCreate,
+    SetupSsh,
+    InstallDotfiles,
+    AgentSetup,
+    Completed,
+    Failed,
+}
+
 impl ContainerManager {
     /// Create a new container manager
     pub async fn new(provider: Box<dyn ContainerProvider>) -> Result<Self> {
@@ -1174,7 +1196,8 @@ fi
 
     /// Build, create, and start a container (full lifecycle)
     pub async fn up(&self, id: &str) -> Result<()> {
-        self.up_with_progress_inner(id, None, None, true).await
+        self.up_with_progress_inner(id, None, None, None, true)
+            .await
     }
 
     /// Build, create, and start a container with progress updates
@@ -1184,7 +1207,7 @@ fi
         progress: Option<&mpsc::UnboundedSender<String>>,
         output: Option<&mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
-        self.up_with_progress_inner(id, progress, output, true)
+        self.up_with_progress_inner(id, progress, output, None, true)
             .await
     }
 
@@ -1193,6 +1216,7 @@ fi
         id: &str,
         progress: Option<&mpsc::UnboundedSender<String>>,
         output: Option<&mpsc::UnboundedSender<String>>,
+        stage: Option<&mpsc::UnboundedSender<BuildStage>>,
         run_agent_injection: bool,
     ) -> Result<()> {
         let container_state = {
@@ -1224,9 +1248,11 @@ fi
         if container_state.image_id.is_none() {
             // initializeCommand runs on host before build (per spec)
             if let Some(ref cmd) = container.devcontainer.initialize_command {
+                send_stage(stage, BuildStage::InitializeCommandHost);
                 send_progress(progress, "Running initializeCommand on host...");
                 crate::run_host_command(cmd, &container.workspace_path, output).await?;
             }
+            send_stage(stage, BuildStage::BuildingImage);
             send_progress(progress, "Building image...");
             self.build(id).await?;
         }
@@ -1241,6 +1267,7 @@ fi
         };
 
         if container_state.container_id.is_none() {
+            send_stage(stage, BuildStage::CreatingContainer);
             send_progress(progress, "Creating container...");
             self.create(id).await?;
         }
@@ -1263,11 +1290,23 @@ fi
 
         // Run first-create lifecycle if this is a newly created container
         if container_state.status == DevcContainerStatus::Created {
-            self.run_first_create_lifecycle(id, &container, provider, &container_id, progress)
-                .await?;
+            let verbose_output = if stage.is_some() { output } else { None };
+            self.run_first_create_lifecycle(
+                id,
+                &container,
+                provider,
+                &container_id,
+                crate::manager::lifecycle::LifecycleChannels {
+                    progress,
+                    output: verbose_output,
+                    stage,
+                },
+            )
+            .await?;
         }
 
         // Start container (idempotent) and run post-start phase
+        send_stage(stage, BuildStage::StartingContainer);
         send_progress(progress, "Starting container...");
         self.start_inner(id, false, progress).await?;
         if run_agent_injection {
@@ -1453,6 +1492,12 @@ pub(crate) fn merge_remote_env(
 pub(crate) fn send_progress(progress: Option<&mpsc::UnboundedSender<String>>, msg: &str) {
     if let Some(tx) = progress {
         let _ = tx.send(msg.to_string());
+    }
+}
+
+pub(crate) fn send_stage(stage: Option<&mpsc::UnboundedSender<BuildStage>>, value: BuildStage) {
+    if let Some(tx) = stage {
+        let _ = tx.send(value);
     }
 }
 
@@ -3016,7 +3061,9 @@ mod tests {
 
         let mgr = test_manager_no_creds(mock, state);
         let (tx, _rx) = mpsc::unbounded_channel();
-        mgr.rebuild_with_progress(&id, false, tx).await.unwrap();
+        mgr.rebuild_with_progress(&id, false, tx, None)
+            .await
+            .unwrap();
 
         // initializeCommand marker must exist
         assert!(

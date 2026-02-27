@@ -99,7 +99,7 @@ impl DotfilesManager {
         container_id: &ContainerId,
         user: Option<&str>,
     ) -> Result<()> {
-        self.inject_with_progress(provider, container_id, user, None)
+        self.inject_with_progress(provider, container_id, user, None, None)
             .await
     }
 
@@ -110,6 +110,7 @@ impl DotfilesManager {
         container_id: &ContainerId,
         user: Option<&str>,
         progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+        output: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
         if !self.is_configured() {
             tracing::debug!("No dotfiles configured, skipping injection");
@@ -133,12 +134,12 @@ impl DotfilesManager {
         // Run install command if configured
         if let Some(ref cmd) = self.install_command {
             send_progress(progress, "Running dotfiles install command...");
-            self.run_install_command(provider, container_id, cmd, user)
+            self.run_install_command(provider, container_id, cmd, user, output)
                 .await?;
         } else {
             // Try to run default install scripts
             send_progress(progress, "Running dotfiles install script...");
-            self.run_default_install(provider, container_id, user)
+            self.run_default_install(provider, container_id, user, output)
                 .await?;
         }
 
@@ -274,6 +275,7 @@ impl DotfilesManager {
         container_id: &ContainerId,
         cmd: &str,
         user: Option<&str>,
+        output: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
         tracing::info!("Running dotfiles install command: {}", cmd);
 
@@ -290,7 +292,7 @@ impl DotfilesManager {
             privileged: false,
         };
 
-        let result = provider.exec(container_id, &config).await?;
+        let result = exec_dotfiles(provider, container_id, &config, output).await?;
         if result.exit_code != 0 {
             tracing::warn!(
                 "Dotfiles install command failed with exit code {}: {}",
@@ -308,6 +310,7 @@ impl DotfilesManager {
         provider: &dyn ContainerProvider,
         container_id: &ContainerId,
         user: Option<&str>,
+        output: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
         let install_scripts = [
             "install.sh",
@@ -346,7 +349,7 @@ impl DotfilesManager {
                     privileged: false,
                 };
 
-                let result = provider.exec(container_id, &config).await?;
+                let result = exec_dotfiles(provider, container_id, &config, output).await?;
                 if result.exit_code != 0 {
                     tracing::warn!(
                         "Dotfiles install script {} failed with exit code {}: {}",
@@ -416,6 +419,33 @@ impl DotfilesManager {
 fn send_progress(progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>, msg: &str) {
     if let Some(tx) = progress {
         let _ = tx.send(msg.to_string());
+    }
+}
+
+async fn exec_dotfiles(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    config: &ExecConfig,
+    output: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<devc_provider::ExecResult> {
+    if let Some(tx) = output {
+        let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel();
+        let forward_tx = tx.clone();
+        let forward = tokio::spawn(async move {
+            while let Some(line) = line_rx.recv().await {
+                let _ = forward_tx.send(format!("[dotfiles] {}", line));
+            }
+        });
+        let result = provider
+            .exec_with_progress(container_id, config, line_tx)
+            .await?;
+        let _ = forward.await;
+        Ok(result)
+    } else {
+        provider
+            .exec(container_id, config)
+            .await
+            .map_err(Into::into)
     }
 }
 
