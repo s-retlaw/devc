@@ -1,10 +1,12 @@
 //! Port forwarding state extracted from App
 
-use crate::ports::{DetectedPort, PortDetectionUpdate};
-use crate::tunnel::PortForwarder;
+use crate::ports::DetectedPort;
+use crate::ports::PortDetectionUpdate;
+use crate::tunnel::{spawn_forwarder, PortForwarder};
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 
 /// All port-forwarding state, both per-view and persistent across views.
 pub struct PortForwardingState {
@@ -45,6 +47,8 @@ pub struct PortForwardingState {
     pub auto_opened_ports: HashSet<(String, u16)>,
     /// Cached runtime args per provider container ID (for auto-forwarding)
     pub auto_runtime_args: HashMap<String, (String, Vec<String>)>,
+    /// Containers with auto-forward-all enabled (provider container IDs)
+    pub auto_forward_all_containers: HashSet<String>,
 }
 
 impl PortForwardingState {
@@ -67,6 +71,7 @@ impl PortForwardingState {
             auto_forwarded_ports: HashSet::new(),
             auto_opened_ports: HashSet::new(),
             auto_runtime_args: HashMap::new(),
+            auto_forward_all_containers: HashSet::new(),
         }
     }
 
@@ -172,10 +177,137 @@ impl PortForwardingState {
         self.socat_installed = None;
         self.socat_installing = false;
     }
+
+    /// Extract auto-forwarding state for a background task (used during shell sessions).
+    /// After this call, the auto-forwarding fields on self are empty.
+    pub fn take_auto_forward_state(&mut self) -> ShellAutoForwardState {
+        ShellAutoForwardState {
+            detectors: std::mem::take(&mut self.auto_port_detectors),
+            configs: std::mem::take(&mut self.auto_forward_configs),
+            runtime_args: std::mem::take(&mut self.auto_runtime_args),
+            forwarded_ports: std::mem::take(&mut self.auto_forwarded_ports),
+            opened_ports: std::mem::take(&mut self.auto_opened_ports),
+            forwarders: std::mem::take(&mut self.active_forwarders),
+            auto_forward_all: self.auto_forward_all_containers.clone(),
+        }
+    }
+
+    /// Merge auto-forwarding state back from a background task.
+    pub fn restore_auto_forward_state(&mut self, state: ShellAutoForwardState) {
+        self.auto_port_detectors = state.detectors;
+        self.auto_forward_configs = state.configs;
+        self.auto_runtime_args = state.runtime_args;
+        self.auto_forwarded_ports = state.forwarded_ports;
+        self.auto_opened_ports = state.opened_ports;
+        self.active_forwarders = state.forwarders;
+        // auto_forward_all_containers stays on self (clone, not take)
+    }
 }
 
 impl Default for PortForwardingState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// State extracted from PortForwardingState for background auto-forwarding during shell sessions.
+pub struct ShellAutoForwardState {
+    pub detectors: HashMap<String, mpsc::UnboundedReceiver<PortDetectionUpdate>>,
+    pub configs: HashMap<String, Vec<devc_config::PortForwardConfig>>,
+    pub runtime_args: HashMap<String, (String, Vec<String>)>,
+    pub forwarded_ports: HashSet<(String, u16)>,
+    pub opened_ports: HashSet<(String, u16)>,
+    pub forwarders: HashMap<(String, u16), PortForwarder>,
+    pub auto_forward_all: HashSet<String>,
+}
+
+/// Poll auto port detectors in background mode (no TUI actions).
+/// Shell-session equivalent of App::poll_auto_port_detectors().
+async fn poll_detectors_background(state: &mut ShellAutoForwardState) {
+    let cids: Vec<String> = state.detectors.keys().cloned().collect();
+    for cid in cids {
+        let rx = match state.detectors.get_mut(&cid) {
+            Some(rx) => rx,
+            None => continue,
+        };
+
+        while let Ok(update) = rx.try_recv() {
+            let is_auto_all = state.auto_forward_all.contains(&cid);
+            let config = state.configs.get(&cid).cloned().unwrap_or_default();
+
+            for detected in &update.ports {
+                // Check if this port matches a config entry
+                let matching_config = config.iter().find(|pfc| pfc.port == detected.port);
+
+                // Determine if we should forward this port
+                let should_forward = if let Some(pfc) = matching_config {
+                    pfc.action != devc_config::AutoForwardAction::Ignore
+                } else {
+                    is_auto_all
+                };
+
+                if !should_forward {
+                    continue;
+                }
+
+                let key = (cid.clone(), detected.port);
+                if state.forwarded_ports.contains(&key) {
+                    continue;
+                }
+                if state.forwarders.contains_key(&key) {
+                    state.forwarded_ports.insert(key);
+                    continue;
+                }
+
+                let (rt_prog, rt_prefix) = state
+                    .runtime_args
+                    .get(&cid)
+                    .cloned()
+                    .unwrap_or_else(|| ("docker".to_string(), vec![]));
+
+                match spawn_forwarder(
+                    rt_prog,
+                    rt_prefix,
+                    cid.clone(),
+                    detected.port,
+                    detected.port,
+                )
+                .await
+                {
+                    Ok(forwarder) => {
+                        state.forwarders.insert(key.clone(), forwarder);
+                        state.forwarded_ports.insert(key.clone());
+                        // Track OpenBrowserOnce so it won't re-fire after shell exit
+                        if let Some(pfc) = matching_config {
+                            if pfc.action == devc_config::AutoForwardAction::OpenBrowserOnce {
+                                state.opened_ports.insert(key);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to auto-forward port {}: {}", detected.port, e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Spawn a background auto-forwarding task for use during shell sessions.
+/// Returns a handle that yields the state back when the stop signal is sent.
+pub fn spawn_shell_auto_forwarder(
+    mut state: ShellAutoForwardState,
+    mut stop_rx: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<ShellAutoForwardState> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                    poll_detectors_background(&mut state).await;
+                }
+            }
+        }
+        state
+    })
 }

@@ -435,7 +435,7 @@ async fn get_auth_token(
     let (realm, service) = parse_www_authenticate(&www_auth)?;
 
     // Try to get credentials from docker config for private registries
-    let creds = read_docker_credentials(registry);
+    let creds = crate::credentials::host::resolve_credential_for_registry(registry).await;
 
     let scope = format!("repository:{}:pull", repo);
     let mut token_req = client
@@ -496,27 +496,6 @@ fn parse_www_authenticate(header: &str) -> std::result::Result<(String, String),
         .clone();
 
     Ok((realm, service))
-}
-
-/// Read credentials from ~/.docker/config.json for a given registry.
-fn read_docker_credentials(registry: &str) -> Option<(String, String)> {
-    let home = dirs_for_docker_config()?;
-    let config_path = home.join(".docker/config.json");
-
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    let auth_str = config.get("auths")?.get(registry)?.get("auth")?.as_str()?;
-
-    let decoded =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, auth_str).ok()?;
-    let decoded_str = String::from_utf8(decoded).ok()?;
-    let (user, pass) = decoded_str.split_once(':')?;
-    Some((user.to_string(), pass.to_string()))
-}
-
-fn dirs_for_docker_config() -> Option<PathBuf> {
-    directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
 
 fn send_progress(progress: &Option<mpsc::UnboundedSender<String>>, msg: &str) {

@@ -77,6 +77,75 @@ pub fn docker_config_path(home: &Path) -> PathBuf {
     home.join(".docker/config.json")
 }
 
+/// Resolve a Docker credential for a single registry.
+///
+/// Follows the Docker credential priority chain:
+/// 1. Per-registry `credHelpers` entry
+/// 2. Global `credsStore` (or platform-default helper)
+/// 3. Inline `auths` entry (base64-encoded user:pass)
+///
+/// Tries both bare registry and `https://{registry}` forms since credential
+/// helpers often store entries with the URL scheme prefix.
+pub async fn resolve_credential_for_registry(registry: &str) -> Option<(String, String)> {
+    let config = read_docker_cred_config().unwrap_or_default();
+
+    // 1. Check per-registry credHelpers
+    let helper = config
+        .cred_helpers
+        .get(registry)
+        .or_else(|| config.cred_helpers.get(&format!("https://{}", registry)));
+
+    if let Some(helper) = helper {
+        // Try bare registry first, then with https:// prefix
+        if let Some(auth) = resolve_docker_credential_helper(helper, registry).await {
+            return decode_docker_auth(&auth.auth);
+        }
+        if let Some(auth) =
+            resolve_docker_credential_helper(helper, &format!("https://{}", registry)).await
+        {
+            return decode_docker_auth(&auth.auth);
+        }
+    }
+
+    // 2. Try credsStore (or platform default)
+    let creds_store = config
+        .creds_store
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(detect_default_creds_store);
+
+    if let Some(ref store) = creds_store {
+        if let Some(auth) = resolve_docker_credential_helper(store, registry).await {
+            return decode_docker_auth(&auth.auth);
+        }
+        if let Some(auth) =
+            resolve_docker_credential_helper(store, &format!("https://{}", registry)).await
+        {
+            return decode_docker_auth(&auth.auth);
+        }
+    }
+
+    // 3. Fall back to inline auths
+    let auth_str = config
+        .auths
+        .get(registry)
+        .or_else(|| config.auths.get(&format!("https://{}", registry)))
+        .and_then(|e| e.auth.as_deref())
+        .filter(|s| !s.is_empty())?;
+
+    decode_docker_auth(auth_str)
+}
+
+/// Decode a base64-encoded Docker auth string ("user:pass") into (username, password).
+fn decode_docker_auth(auth_b64: &str) -> Option<(String, String)> {
+    let decoded =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, auth_b64).ok()?;
+    let decoded_str = String::from_utf8(decoded).ok()?;
+    let (user, pass) = decoded_str.split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
+}
+
 /// Resolve all Docker credentials from the host.
 ///
 /// Collects credentials from credsStore, credHelpers, and auths entries.

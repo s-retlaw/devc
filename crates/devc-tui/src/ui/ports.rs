@@ -8,6 +8,15 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|c| c.name.as_str())
         .unwrap_or("Unknown");
 
+    let auto_all_on = app
+        .port_state
+        .provider_container_id
+        .as_ref()
+        .map(|cid| app.port_state.auto_forward_all_containers.contains(cid))
+        .unwrap_or(false);
+
+    let title_suffix = if auto_all_on { " [auto-all]" } else { "" };
+
     // Show socat warning if not installed
     let socat_warning = match (
         app.port_state.socat_installed,
@@ -35,7 +44,10 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
             .style(Style::default().fg(Color::DarkGray))
             .block(
                 Block::default()
-                    .title(format!(" Port Forwarding: {} ", container_name))
+                    .title(format!(
+                        " Port Forwarding: {}{} ",
+                        container_name, title_suffix
+                    ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)),
             )
@@ -131,7 +143,10 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .header(header)
         .block(
             Block::default()
-                .title(format!(" Port Forwarding: {} ", container_name))
+                .title(format!(
+                    " Port Forwarding: {}{} ",
+                    container_name, title_suffix
+                ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         )

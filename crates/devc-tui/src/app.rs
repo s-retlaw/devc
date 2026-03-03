@@ -1037,7 +1037,11 @@ impl App {
                     Err(_) => continue,
                 };
                 let auto_fwd = config.auto_forward_config();
-                if !auto_fwd.is_empty() {
+                let has_auto_all = self
+                    .port_state
+                    .auto_forward_all_containers
+                    .contains(provider_cid);
+                if !auto_fwd.is_empty() || has_auto_all {
                     let rt_args = manager
                         .runtime_args_for(&state)
                         .unwrap_or_else(|_| (state.provider.to_string(), vec![]));
@@ -1105,74 +1109,96 @@ impl App {
 
             // Drain all pending updates
             while let Ok(update) = rx.try_recv() {
-                let config = match self.port_state.auto_forward_configs.get(&cid) {
-                    Some(c) => c.clone(),
-                    None => continue,
-                };
+                let is_auto_all = self.port_state.auto_forward_all_containers.contains(&cid);
+                let config = self
+                    .port_state
+                    .auto_forward_configs
+                    .get(&cid)
+                    .cloned()
+                    .unwrap_or_default();
 
                 for detected in &update.ports {
-                    for pfc in &config {
-                        if detected.port != pfc.port {
-                            continue;
-                        }
-                        if pfc.action == devc_config::AutoForwardAction::Ignore {
-                            continue;
-                        }
-                        let key = (cid.clone(), pfc.port);
-                        if self.port_state.auto_forwarded_ports.contains(&key) {
-                            continue;
-                        }
-                        if self.port_state.active_forwarders.contains_key(&key) {
-                            self.port_state.auto_forwarded_ports.insert(key);
-                            continue;
-                        }
+                    let matching_config = config.iter().find(|pfc| pfc.port == detected.port);
 
-                        // Auto-forward this port
-                        let (rt_prog, rt_prefix) = self
-                            .port_state
-                            .auto_runtime_args
-                            .get(&cid)
-                            .cloned()
-                            .unwrap_or_else(|| ("docker".to_string(), vec![]));
-                        match spawn_forwarder(rt_prog, rt_prefix, cid.clone(), pfc.port, pfc.port)
-                            .await
-                        {
-                            Ok(forwarder) => {
-                                self.port_state
-                                    .active_forwarders
-                                    .insert(key.clone(), forwarder);
-                                self.port_state.auto_forwarded_ports.insert(key.clone());
-                                match pfc.action {
-                                    devc_config::AutoForwardAction::Notify => {
-                                        let msg = if let Some(ref label) = pfc.label {
-                                            format!(
-                                                "Auto-forwarded port {} ({}) (localhost:{})",
-                                                pfc.port, label, pfc.port
-                                            )
-                                        } else {
-                                            format!(
-                                                "Auto-forwarded port {} (localhost:{})",
-                                                pfc.port, pfc.port
-                                            )
-                                        };
-                                        self.status_message = Some(msg);
-                                    }
-                                    devc_config::AutoForwardAction::OpenBrowser => {
-                                        let _ = open_in_browser(pfc.port, pfc.protocol.as_deref());
-                                    }
-                                    devc_config::AutoForwardAction::OpenBrowserOnce => {
-                                        if !self.port_state.auto_opened_ports.contains(&key) {
-                                            self.port_state.auto_opened_ports.insert(key);
-                                            let _ =
-                                                open_in_browser(pfc.port, pfc.protocol.as_deref());
-                                        }
-                                    }
-                                    _ => {}
+                    // Determine if we should forward this port
+                    let should_forward = if let Some(pfc) = matching_config {
+                        pfc.action != devc_config::AutoForwardAction::Ignore
+                    } else {
+                        is_auto_all
+                    };
+
+                    if !should_forward {
+                        continue;
+                    }
+
+                    let key = (cid.clone(), detected.port);
+                    if self.port_state.auto_forwarded_ports.contains(&key) {
+                        continue;
+                    }
+                    if self.port_state.active_forwarders.contains_key(&key) {
+                        self.port_state.auto_forwarded_ports.insert(key);
+                        continue;
+                    }
+
+                    // Auto-forward this port
+                    let (rt_prog, rt_prefix) = self
+                        .port_state
+                        .auto_runtime_args
+                        .get(&cid)
+                        .cloned()
+                        .unwrap_or_else(|| ("docker".to_string(), vec![]));
+                    match spawn_forwarder(
+                        rt_prog,
+                        rt_prefix,
+                        cid.clone(),
+                        detected.port,
+                        detected.port,
+                    )
+                    .await
+                    {
+                        Ok(forwarder) => {
+                            self.port_state
+                                .active_forwarders
+                                .insert(key.clone(), forwarder);
+                            self.port_state.auto_forwarded_ports.insert(key.clone());
+                            // Handle action based on config (or Notify for auto-all)
+                            let action = matching_config
+                                .map(|pfc| &pfc.action)
+                                .unwrap_or(&devc_config::AutoForwardAction::Notify);
+                            match action {
+                                devc_config::AutoForwardAction::Notify => {
+                                    let label = matching_config.and_then(|pfc| pfc.label.as_ref());
+                                    let msg = if let Some(label) = label {
+                                        format!(
+                                            "Auto-forwarded port {} ({}) (localhost:{})",
+                                            detected.port, label, detected.port
+                                        )
+                                    } else {
+                                        format!(
+                                            "Auto-forwarded port {} (localhost:{})",
+                                            detected.port, detected.port
+                                        )
+                                    };
+                                    self.status_message = Some(msg);
                                 }
+                                devc_config::AutoForwardAction::OpenBrowser => {
+                                    let protocol =
+                                        matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                                    let _ = open_in_browser(detected.port, protocol);
+                                }
+                                devc_config::AutoForwardAction::OpenBrowserOnce => {
+                                    if !self.port_state.auto_opened_ports.contains(&key) {
+                                        self.port_state.auto_opened_ports.insert(key);
+                                        let protocol =
+                                            matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                                        let _ = open_in_browser(detected.port, protocol);
+                                    }
+                                }
+                                _ => {}
                             }
-                            Err(e) => {
-                                tracing::debug!("Failed to auto-forward port {}: {}", pfc.port, e);
-                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to auto-forward port {}: {}", detected.port, e);
                         }
                     }
                 }
@@ -2485,6 +2511,21 @@ impl App {
                 }
             }
 
+            // Toggle auto-forward all for this container
+            KeyCode::Char('A') => {
+                if let Some(ref cid) = self.port_state.provider_container_id {
+                    if self.port_state.auto_forward_all_containers.contains(cid) {
+                        self.port_state.auto_forward_all_containers.remove(cid);
+                        self.status_message = Some("Auto-forward all: OFF".to_string());
+                    } else {
+                        self.port_state
+                            .auto_forward_all_containers
+                            .insert(cid.clone());
+                        self.status_message = Some("Auto-forward all: ON".to_string());
+                    }
+                }
+            }
+
             // Stop all (none)
             KeyCode::Char('n') => {
                 self.stop_all_forwards_for_container().await;
@@ -3214,6 +3255,12 @@ impl App {
             }
         };
 
+        // 5.5. Start background auto-forwarding during shell relay
+        let (auto_fwd_stop_tx, auto_fwd_stop_rx) = tokio::sync::oneshot::channel();
+        let auto_fwd_state = self.port_state.take_auto_forward_state();
+        let auto_fwd_handle =
+            crate::port_state::spawn_shell_auto_forwarder(auto_fwd_state, auto_fwd_stop_rx);
+
         // 6. Run relay in spawn_blocking (returns PtyShell + reason)
         let relay_result = tokio::task::spawn_blocking(move || {
             let reason = pty.relay(is_reattach);
@@ -3260,6 +3307,13 @@ impl App {
                 self.shell_state.shell_sessions.remove(&container_id);
                 self.status_message = Some(format!("Shell error: {}", e));
             }
+        }
+
+        // 7.5. Stop background auto-forwarding and merge results
+        let _ = auto_fwd_stop_tx.send(());
+        match auto_fwd_handle.await {
+            Ok(state) => self.port_state.restore_auto_forward_state(state),
+            Err(e) => tracing::warn!("Shell auto-forwarder task panicked: {}", e),
         }
 
         // 8. Reset terminal before resuming TUI

@@ -205,10 +205,23 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     .get(app.port_state.selected_port)
                     .map(|p| p.is_forwarded)
                     .unwrap_or(false);
-                if is_forwarded {
-                    "[s]top  [o]pen browser  [n]one  j/k: Navigate  1-3: Switch tab  q/Esc: Back".to_string()
+                let auto_all = app
+                    .port_state
+                    .provider_container_id
+                    .as_ref()
+                    .map(|cid| {
+                        app.port_state.auto_forward_all_containers.contains(cid)
+                    })
+                    .unwrap_or(false);
+                let auto_all_label = if auto_all {
+                    "[A]uto-all:ON"
                 } else {
-                    "[f]orward  [a]ll  j/k: Navigate  1-3: Switch tab  q/Esc: Back".to_string()
+                    "[A]uto-all"
+                };
+                if is_forwarded {
+                    format!("[s]top  [o]pen browser  [n]one  {}  j/k: Navigate  1-3: Switch tab  q/Esc: Back", auto_all_label)
+                } else {
+                    format!("[f]orward  [a]ll  {}  j/k: Navigate  1-3: Switch tab  q/Esc: Back", auto_all_label)
                 }
             }
         }
