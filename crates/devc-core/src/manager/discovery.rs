@@ -264,6 +264,22 @@ impl ContainerManager {
                     }
                 }
 
+                // Credentials setup before lifecycle so commands can access private registries/repos
+                if let Err(e) = crate::credentials::setup_credentials(
+                    provider,
+                    &cid,
+                    &self.global_config,
+                    container.devcontainer.effective_user(),
+                    &container_state.workspace_path,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "Credential forwarding failed during adopt (non-fatal): {}",
+                        e
+                    );
+                }
+
                 // Run first-create lifecycle (non-fatal — adopt succeeds even if lifecycle fails)
                 if let Err(e) = self
                     .run_first_create_lifecycle(
@@ -285,22 +301,6 @@ impl ContainerManager {
                 // Start (runs postStartCommand, SSH daemon)
                 if let Err(e) = self.start(&state_id).await {
                     tracing::warn!("Post-start phase failed during adopt (non-fatal): {}", e);
-                }
-
-                // Credentials setup
-                if let Err(e) = crate::credentials::setup_credentials(
-                    provider,
-                    &cid,
-                    &self.global_config,
-                    container.devcontainer.effective_user(),
-                    &container_state.workspace_path,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        "Credential forwarding failed during adopt (non-fatal): {}",
-                        e
-                    );
                 }
             }
         }

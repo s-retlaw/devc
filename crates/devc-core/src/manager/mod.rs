@@ -1288,6 +1288,28 @@ fi
                 ))
             })?);
 
+        // Start container early so credentials can be injected before lifecycle commands
+        {
+            let details = provider.inspect(&container_id).await?;
+            if details.status != devc_provider::ContainerStatus::Running {
+                provider.start(&container_id).await?;
+            }
+        }
+
+        // Set up credential forwarding before lifecycle commands so they can
+        // access private registries and repos
+        if let Err(e) = crate::credentials::setup_credentials(
+            provider,
+            &container_id,
+            &self.global_config,
+            container.devcontainer.effective_user(),
+            &container_state.workspace_path,
+        )
+        .await
+        {
+            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+        }
+
         // Run first-create lifecycle if this is a newly created container
         if container_state.status == DevcContainerStatus::Created {
             let verbose_output = if stage.is_some() { output } else { None };
@@ -1311,19 +1333,6 @@ fi
         self.start_inner(id, false, progress).await?;
         if run_agent_injection {
             self.maybe_inject_agents_after_start(id, progress).await?;
-        }
-
-        // Set up credential forwarding so it's ready for shell access
-        if let Err(e) = crate::credentials::setup_credentials(
-            provider,
-            &container_id,
-            &self.global_config,
-            container.devcontainer.effective_user(),
-            &container_state.workspace_path,
-        )
-        .await
-        {
-            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
         }
 
         Ok(())
@@ -2992,6 +3001,50 @@ mod tests {
         assert!(
             create_idx < first_exec_overall,
             "Create must come before any Exec"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_up_credentials_before_lifecycle() {
+        let (workspace, _marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        // Use test_manager_with_state (credentials enabled by default)
+        let mgr = test_manager_with_state(mock, state);
+        mgr.up(&id).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+        let execs = exec_commands(&recorded);
+        let cmds: Vec<&str> = execs.iter().map(|cmd| shell_cmd(cmd)).collect();
+
+        // Credential-related exec calls (contain "devc-creds") must appear
+        // before lifecycle exec calls (echo on-create, etc.)
+        let first_cred_idx = cmds
+            .iter()
+            .position(|c| c.contains("devc-creds"))
+            .expect("Expected credential injection exec calls");
+        let first_lifecycle_idx = cmds
+            .iter()
+            .position(|c| *c == "echo on-create")
+            .expect("Expected onCreateCommand exec call");
+
+        assert!(
+            first_cred_idx < first_lifecycle_idx,
+            "Credential injection (index {}) must run before lifecycle commands (index {})\nExec order: {:?}",
+            first_cred_idx,
+            first_lifecycle_idx,
+            cmds
         );
     }
 
