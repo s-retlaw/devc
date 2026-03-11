@@ -29,10 +29,6 @@ struct Cli {
     #[arg(long, global = true, value_parser = ["docker", "podman"])]
     provider: Option<String>,
 
-    /// Demo mode (show TUI without container runtime)
-    #[arg(long)]
-    demo: bool,
-
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -187,8 +183,8 @@ async fn main() {
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Check if we're launching the TUI (no command specified, or demo mode)
-    let is_tui_mode = cli.command.is_none() || cli.demo;
+    // Check if we're launching the TUI (no command specified)
+    let is_tui_mode = cli.command.is_none();
 
     // Initialize logging only for CLI commands, not for TUI
     // The TUI handles its own tracing suppression, but the global subscriber
@@ -217,7 +213,7 @@ async fn run() -> anyhow::Result<()> {
 
     // First-run provider detection - only for CLI commands, not TUI
     // TUI handles provider selection itself with better UI
-    if config.is_first_run() && !cli.demo && cli.provider.is_none() && cli.command.is_some() {
+    if config.is_first_run() && cli.provider.is_none() && cli.command.is_some() {
         if let Some(selected) = detect_and_select_provider(&config).await? {
             config.defaults.provider = match selected {
                 ProviderType::Docker => "docker".to_string(),
@@ -229,12 +225,6 @@ async fn run() -> anyhow::Result<()> {
                 eprintln!("Provider '{}' saved to config", config.defaults.provider);
             }
         }
-    }
-
-    // Demo mode - run TUI without container runtime
-    if cli.demo {
-        devc_tui::run_demo().await?;
-        return Ok(());
     }
 
     // Try to create a provider

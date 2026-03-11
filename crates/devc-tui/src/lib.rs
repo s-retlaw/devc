@@ -5,7 +5,6 @@
 pub mod app;
 mod clipboard;
 pub mod compose_state;
-mod demo;
 mod event;
 pub mod port_state;
 pub mod ports;
@@ -21,7 +20,6 @@ pub use clipboard::copy_to_clipboard;
 pub use app::{
     AgentPanelRow, App, AppResult, ConfirmAction, ContainerOperation, DialogFocus, Tab, View,
 };
-pub use demo::DemoApp;
 pub use event::{Event, EventHandler};
 #[cfg(unix)]
 pub use shell::PtyShell;
@@ -56,31 +54,6 @@ pub async fn run(manager: ContainerManager, workspace_dir: Option<&Path>) -> App
 
     // Create app and run
     let mut app = App::new(manager, workspace_dir).await?;
-    let res = app.run(&mut terminal).await;
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    res
-}
-
-/// Run the TUI in demo mode with mock data
-pub async fn run_demo() -> AppResult<()> {
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Create demo app and run
-    let mut app = DemoApp::new();
     let res = app.run(&mut terminal).await;
 
     // Restore terminal
