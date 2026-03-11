@@ -392,7 +392,7 @@ impl ContainerManager {
         // 5. Create and start container
         let progress_ref = progress.as_ref();
         let stage_ref = stage.as_ref();
-        self.up_with_progress_inner(id, progress_ref, progress_ref, stage_ref, false)
+        self.up_with_progress_inner(id, progress_ref, progress_ref, stage_ref, None, false)
             .await?;
 
         send_stage(stage.as_ref(), BuildStage::AgentSetup);

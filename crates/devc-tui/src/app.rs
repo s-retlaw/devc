@@ -127,6 +127,11 @@ pub enum ConfirmAction {
         id: String,
         name: String,
     },
+    /// Build an Available container (with optional no-cache)
+    Build {
+        id: String,
+        config_path: PathBuf,
+    },
     /// Cancel an in-progress build/operation
     CancelBuild,
     /// Quit the application
@@ -344,6 +349,8 @@ pub struct App {
     pub container_op: Option<ContainerOperation>,
     /// Captured output lines from initializeCommand (shown in spinner popup)
     pub up_output: Vec<String>,
+    /// Whether the Up operation's output is being mirrored to BuildOutput view
+    pub up_output_expanded: bool,
     /// Agent diagnostics popup container id
     pub agent_diagnostics_container_id: Option<String>,
     /// Agent diagnostics popup container name
@@ -439,6 +446,7 @@ impl App {
             shell_state: ShellState::new(),
             container_op: None,
             up_output: Vec::new(),
+            up_output_expanded: false,
             agent_diagnostics_container_id: None,
             agent_diagnostics_container_name: String::new(),
             agent_diagnostics_title: String::new(),
@@ -629,6 +637,7 @@ impl App {
             shell_state: ShellState::new(),
             container_op: None,
             up_output: Vec::new(),
+            up_output_expanded: false,
             agent_diagnostics_container_id: None,
             agent_diagnostics_container_name: String::new(),
             agent_diagnostics_title: String::new(),
@@ -678,100 +687,27 @@ impl App {
         }
     }
 
-    /// Build an Available (unregistered) entry: register it, then run build with log output.
-    async fn build_available(&mut self) -> AppResult<()> {
+    /// Open the build confirmation dialog for an Available (unregistered) entry.
+    fn start_build_dialog(&mut self) {
         if self.containers.is_empty() || !self.is_connected() {
             if !self.is_connected() {
                 self.status_message = Some("Not connected to provider".to_string());
             }
-            return Ok(());
+            return;
         }
 
         let container = &self.containers[self.selected];
         if !container.status.is_available() {
             self.status_message = Some("Already registered — use 'u' or 'R'".to_string());
-            return Ok(());
+            return;
         }
 
-        // Register the Available entry
+        let id = container.id.clone();
         let config_path = container.config_path.clone();
-        let result = self
-            .manager
-            .read()
-            .await
-            .init_from_config(&config_path)
-            .await;
-        let id = match result {
-            Ok(Some(cs)) => cs.id,
-            Ok(None) => {
-                self.status_message = Some("Already registered".to_string());
-                self.refresh_containers().await?;
-                return Ok(());
-            }
-            Err(e) => {
-                self.status_message = Some(format!("Failed to register: {}", e));
-                return Ok(());
-            }
-        };
-
-        // Refresh so the registered entry replaces the ephemeral one
-        self.refresh_containers().await?;
-        if let Some(pos) = self.containers.iter().position(|c| c.id == id) {
-            self.selected = pos;
-            self.containers_table_state.select(Some(pos));
-        }
-
-        // Switch to build output view
-        self.loading = true;
-        self.view = View::BuildOutput;
-        self.build_output.clear();
-        self.build_output_scroll = 0;
-        self.build_auto_scroll = true;
-        self.build_complete = false;
-        self.current_build_stage = None;
-        self.last_stage_marker = None;
-
-        let event_tx = self.async_event_tx.clone();
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-        let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
-        // Forward build progress to unified event channel
-        let fwd_tx = event_tx.clone();
-        tokio::spawn(async move {
-            while let Some(line) = progress_rx.recv().await {
-                if fwd_tx.send(AsyncEvent::BuildProgress(line)).is_err() {
-                    break;
-                }
-            }
-        });
-        let fwd_stage_tx = event_tx.clone();
-        tokio::spawn(async move {
-            while let Some(stage) = stage_rx.recv().await {
-                if fwd_stage_tx.send(AsyncEvent::BuildStage(stage)).is_err() {
-                    break;
-                }
-            }
-        });
-
-        let manager = Arc::clone(&self.manager);
-        let done_tx = event_tx.clone();
-        tokio::spawn(async move {
-            match manager
-                .read()
-                .await
-                .rebuild_with_progress(&id, false, progress_tx.clone(), Some(stage_tx))
-                .await
-            {
-                Ok(()) => {
-                    let _ = done_tx.send(AsyncEvent::BuildFinished { success: true });
-                }
-                Err(e) => {
-                    let _ = progress_tx.send(format!("Error: Build failed: {}", e));
-                    let _ = done_tx.send(AsyncEvent::BuildFinished { success: false });
-                }
-            }
-        });
-
-        Ok(())
+        self.rebuild_no_cache = false;
+        self.dialog_focus = DialogFocus::Cancel;
+        self.confirm_action = Some(ConfirmAction::Build { id, config_path });
+        self.view = View::Confirm;
     }
 
     /// Create a CliProvider for the given provider type.
@@ -868,11 +804,17 @@ impl App {
             }
             AsyncEvent::OperationProgress(msg) => {
                 if let Some(ContainerOperation::Up { progress, .. }) = self.container_op.as_mut() {
-                    *progress = msg;
+                    *progress = msg.clone();
+                    if self.up_output_expanded {
+                        self.build_output.push(msg);
+                    }
                 }
             }
             AsyncEvent::UpOutput(line) => {
-                self.up_output.push(line);
+                self.up_output.push(line.clone());
+                if self.up_output_expanded {
+                    self.build_output.push(line);
+                }
             }
             AsyncEvent::InstallResult(result) => {
                 self.handle_install_result(result);
@@ -1426,6 +1368,26 @@ impl App {
             return Ok(());
         }
 
+        // Expand Up operation output into full-screen BuildOutput view
+        if matches!(&self.container_op, Some(ContainerOperation::Up { .. }))
+            && code == KeyCode::Char('l')
+        {
+            // build_output already has Docker build logs via BuildProgress events.
+            // Append any lifecycle/initializeCommand output that arrived before
+            // the user pressed 'l' so the full picture is visible.
+            for line in &self.up_output {
+                self.build_output.push(line.clone());
+            }
+            self.build_output_scroll = 0;
+            self.build_auto_scroll = true;
+            self.build_complete = false;
+            self.current_build_stage = None;
+            self.last_stage_marker = None;
+            self.up_output_expanded = true;
+            self.view = View::BuildOutput;
+            return Ok(());
+        }
+
         // Cancel install if in progress (before global Ctrl+C handler)
         if self.port_state.socat_installing
             && ((code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
@@ -1445,7 +1407,10 @@ impl App {
 
         // Handle confirmation dialog first
         if self.view == View::Confirm {
-            let has_checkbox = matches!(self.confirm_action, Some(ConfirmAction::Rebuild { .. }));
+            let has_checkbox = matches!(
+                self.confirm_action,
+                Some(ConfirmAction::Rebuild { .. } | ConfirmAction::Build { .. })
+            );
 
             match code {
                 // Tab moves to next focusable element
@@ -1596,13 +1561,16 @@ impl App {
                 self.provider_detail_state.cancel_edit();
                 return Ok(());
             }
-            (View::BuildOutput, KeyCode::Char('q') | KeyCode::Esc) if self.build_complete => {
+            (View::BuildOutput, KeyCode::Char('q') | KeyCode::Esc)
+                if self.build_complete || self.up_output_expanded =>
+            {
                 self.build_output.clear();
                 self.build_output_scroll = 0;
                 self.build_complete = false;
                 self.build_auto_scroll = true;
                 self.current_build_stage = None;
                 self.last_stage_marker = None;
+                self.up_output_expanded = false;
                 self.view = View::Main;
                 return Ok(());
             }
@@ -1612,8 +1580,11 @@ impl App {
         // Global keys (work in any view)
         match code {
             KeyCode::Char('q') => {
-                // Don't close BuildOutput view during active build
-                if self.view == View::BuildOutput && !self.build_complete {
+                // Don't close BuildOutput view during active build (unless expanded from Up)
+                if self.view == View::BuildOutput
+                    && !self.build_complete
+                    && !self.up_output_expanded
+                {
                     return Ok(());
                 }
                 if self.view != View::Main {
@@ -1625,8 +1596,11 @@ impl App {
                 return Ok(());
             }
             KeyCode::Esc => {
-                // Don't close BuildOutput view during active build
-                if self.view == View::BuildOutput && !self.build_complete {
+                // Don't close BuildOutput view during active build (unless expanded from Up)
+                if self.view == View::BuildOutput
+                    && !self.build_complete
+                    && !self.up_output_expanded
+                {
                     return Ok(());
                 }
                 if self.view != View::Main {
@@ -1967,7 +1941,7 @@ impl App {
                     self.status_message = Some("Refreshed".to_string());
                 }
                 KeyCode::Char('b') => {
-                    self.build_available().await?;
+                    self.start_build_dialog();
                 }
                 KeyCode::Char('R') => {
                     self.start_rebuild_dialog();
@@ -2348,7 +2322,7 @@ impl App {
                 self.fetch_logs().await?;
             }
             KeyCode::Char('b') => {
-                self.build_available().await?;
+                self.start_build_dialog();
             }
             KeyCode::Char('R') => {
                 self.start_rebuild_dialog();
@@ -3027,6 +3001,26 @@ impl App {
 
     /// Handle container operation result from background task
     async fn handle_operation_result(&mut self, result: ContainerOpResult) -> AppResult<()> {
+        if self.up_output_expanded {
+            let final_line = match &result {
+                ContainerOpResult::Success(op) => match op {
+                    ContainerOperation::Up { name, .. } => {
+                        format!("Up completed for {}", name)
+                    }
+                    _ => "Operation completed".to_string(),
+                },
+                ContainerOpResult::Failed(op, err) => match op {
+                    ContainerOperation::Up { name, .. } => {
+                        format!("Up failed for {}: {}", name, err)
+                    }
+                    _ => format!("Operation failed: {}", err),
+                },
+            };
+            self.build_output.push(final_line);
+            self.build_complete = true;
+            self.up_output_expanded = false;
+        }
+
         self.container_op = None;
         self.up_output.clear();
 
@@ -3644,10 +3638,29 @@ impl App {
             name: name.clone(),
             progress: format!("Starting up {}...", name),
         };
-        self.spawn_container_op(op, true, |mgr, progress_tx, output_tx| async move {
+
+        // Create a separate channel for Docker build output (shown in BuildOutput
+        // view when the user presses 'l', not in the spinner).
+        let (build_output_tx, mut build_output_rx) = mpsc::unbounded_channel::<String>();
+        let build_fwd = self.async_event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(line) = build_output_rx.recv().await {
+                if build_fwd.send(AsyncEvent::BuildProgress(line)).is_err() {
+                    break;
+                }
+            }
+        });
+        self.build_output.clear();
+
+        self.spawn_container_op(op, true, move |mgr, progress_tx, output_tx| async move {
             mgr.read()
                 .await
-                .up_with_progress(&id, progress_tx.as_ref(), output_tx.as_ref())
+                .up_with_progress(
+                    &id,
+                    progress_tx.as_ref(),
+                    output_tx.as_ref(),
+                    Some(&build_output_tx),
+                )
                 .await?;
             Ok(())
         });
@@ -3864,6 +3877,85 @@ impl App {
                         }
                         Err(e) => {
                             let _ = progress_tx.send(format!("Error: Rebuild failed: {}", e));
+                            let _ = done_tx.send(AsyncEvent::BuildFinished { success: false });
+                        }
+                    }
+                });
+            }
+            ConfirmAction::Build { config_path, .. } => {
+                // Register the Available entry
+                let result = self
+                    .manager
+                    .read()
+                    .await
+                    .init_from_config(&config_path)
+                    .await;
+                let id = match result {
+                    Ok(Some(cs)) => cs.id,
+                    Ok(None) => {
+                        self.status_message = Some("Already registered".to_string());
+                        self.refresh_containers().await?;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to register: {}", e));
+                        return Ok(());
+                    }
+                };
+
+                // Refresh so the registered entry replaces the ephemeral one
+                self.refresh_containers().await?;
+                if let Some(pos) = self.containers.iter().position(|c| c.id == id) {
+                    self.selected = pos;
+                    self.containers_table_state.select(Some(pos));
+                }
+
+                // Switch to build output view
+                self.loading = true;
+                self.view = View::BuildOutput;
+                self.build_output.clear();
+                self.build_output_scroll = 0;
+                self.build_auto_scroll = true;
+                self.build_complete = false;
+                self.current_build_stage = None;
+                self.last_stage_marker = None;
+
+                let event_tx = self.async_event_tx.clone();
+                let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+                let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
+                let fwd_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(line) = progress_rx.recv().await {
+                        if fwd_tx.send(AsyncEvent::BuildProgress(line)).is_err() {
+                            break;
+                        }
+                    }
+                });
+                let fwd_stage_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(stage) = stage_rx.recv().await {
+                        if fwd_stage_tx.send(AsyncEvent::BuildStage(stage)).is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                let manager = Arc::clone(&self.manager);
+                let no_cache = self.rebuild_no_cache;
+                self.rebuild_no_cache = false;
+                let done_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    match manager
+                        .read()
+                        .await
+                        .rebuild_with_progress(&id, no_cache, progress_tx.clone(), Some(stage_tx))
+                        .await
+                    {
+                        Ok(()) => {
+                            let _ = done_tx.send(AsyncEvent::BuildFinished { success: true });
+                        }
+                        Err(e) => {
+                            let _ = progress_tx.send(format!("Error: Build failed: {}", e));
                             let _ = done_tx.send(AsyncEvent::BuildFinished { success: false });
                         }
                     }

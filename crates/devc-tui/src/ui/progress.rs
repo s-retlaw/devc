@@ -97,8 +97,11 @@ pub(super) fn draw_operation_progress(frame: &mut Frame, app: &App, area: Rect) 
         }
     }
 
-    builder
-        .empty_line()
-        .help("Esc to dismiss")
-        .render(frame, area);
+    let help_text = if matches!(op, ContainerOperation::Up { .. }) {
+        "l: Logs  Esc: Dismiss"
+    } else {
+        "Esc to dismiss"
+    };
+
+    builder.empty_line().help(help_text).render(frame, area);
 }

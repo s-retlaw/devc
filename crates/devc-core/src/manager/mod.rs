@@ -1196,7 +1196,7 @@ fi
 
     /// Build, create, and start a container (full lifecycle)
     pub async fn up(&self, id: &str) -> Result<()> {
-        self.up_with_progress_inner(id, None, None, None, true)
+        self.up_with_progress_inner(id, None, None, None, None, true)
             .await
     }
 
@@ -1206,8 +1206,9 @@ fi
         id: &str,
         progress: Option<&mpsc::UnboundedSender<String>>,
         output: Option<&mpsc::UnboundedSender<String>>,
+        build_output: Option<&mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
-        self.up_with_progress_inner(id, progress, output, None, true)
+        self.up_with_progress_inner(id, progress, output, None, build_output, true)
             .await
     }
 
@@ -1217,6 +1218,7 @@ fi
         progress: Option<&mpsc::UnboundedSender<String>>,
         output: Option<&mpsc::UnboundedSender<String>>,
         stage: Option<&mpsc::UnboundedSender<BuildStage>>,
+        build_output: Option<&mpsc::UnboundedSender<String>>,
         run_agent_injection: bool,
     ) -> Result<()> {
         let container_state = {
@@ -1254,7 +1256,8 @@ fi
             }
             send_stage(stage, BuildStage::BuildingImage);
             send_progress(progress, "Building image...");
-            self.build(id).await?;
+            self.build_inner(id, false, build_output.cloned(), stage.cloned())
+                .await?;
         }
 
         // Create if needed

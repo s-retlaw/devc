@@ -62,6 +62,15 @@ pub(super) fn draw_confirm_dialog(frame: &mut Frame, app: &App, area: Rect) {
                 &format!("Forget '{}'? (container will not be deleted)", name),
             );
         }
+        Some(ConfirmAction::Build { id, .. }) => {
+            let name = app
+                .containers
+                .iter()
+                .find(|c| &c.id == id)
+                .map(|c| c.name.as_str())
+                .unwrap_or(id);
+            draw_build_confirm_dialog(frame, app, area, name);
+        }
         Some(ConfirmAction::CancelBuild) => {
             draw_simple_confirm_dialog(frame, app, area, "Cancel build in progress?");
         }
@@ -111,6 +120,27 @@ pub(super) fn draw_set_provider_confirm_dialog(
         .buttons(app.dialog_focus)
         .empty_line()
         .help("Tab: Switch  Enter: Select  Esc: Cancel")
+        .render(frame, area);
+}
+
+/// Draw the build confirmation dialog with no-cache toggle
+pub(super) fn draw_build_confirm_dialog(frame: &mut Frame, app: &App, area: Rect, name: &str) {
+    let message = format!("Build '{}'?", name);
+
+    DialogBuilder::new("Build Container")
+        .width(50)
+        .empty_line()
+        .message(&message)
+        .empty_line()
+        .checkbox(
+            "Force build (no cache)",
+            app.rebuild_no_cache,
+            app.dialog_focus == DialogFocus::Checkbox,
+        )
+        .empty_line()
+        .buttons(app.dialog_focus)
+        .empty_line()
+        .help("Tab: Switch  Enter/Space: Select  Esc: Cancel")
         .render(frame, area);
 }
 
