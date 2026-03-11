@@ -4292,7 +4292,7 @@ mod tests {
         std::fs::create_dir_all(&devcontainer_dir).unwrap();
         std::fs::write(
             devcontainer_dir.join("devcontainer.json"),
-            r#"{"image": "ubuntu:22.04", "postCreateCommand": "echo hello"}"#,
+            r#"{"image": "ubuntu:22.04", "postStartCommand": "echo hello"}"#,
         )
         .unwrap();
 
@@ -4326,7 +4326,7 @@ mod tests {
         std::fs::create_dir_all(&devcontainer_dir).unwrap();
         std::fs::write(
             devcontainer_dir.join("devcontainer.json"),
-            r#"{"image": "ubuntu:22.04", "postCreateCommand": "echo hello"}"#,
+            r#"{"image": "ubuntu:22.04", "postStartCommand": "echo hello"}"#,
         )
         .unwrap();
 
@@ -4365,7 +4365,7 @@ mod tests {
         std::fs::create_dir_all(&devcontainer_dir).unwrap();
         std::fs::write(
             devcontainer_dir.join("devcontainer.json"),
-            r#"{"image": "ubuntu:22.04", "postCreateCommand": "fail"}"#,
+            r#"{"image": "ubuntu:22.04", "postStartCommand": "fail"}"#,
         )
         .unwrap();
 

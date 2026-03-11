@@ -1460,6 +1460,27 @@ impl App {
                         DialogFocus::Cancel => DialogFocus::Confirm,
                     };
                 }
+                // Arrow keys: Right = next element, Left = previous (stop at edges)
+                KeyCode::Right => {
+                    self.dialog_focus = match self.dialog_focus {
+                        DialogFocus::Checkbox => DialogFocus::Confirm,
+                        DialogFocus::Confirm => DialogFocus::Cancel,
+                        DialogFocus::Cancel => DialogFocus::Cancel,
+                    };
+                }
+                KeyCode::Left => {
+                    self.dialog_focus = match self.dialog_focus {
+                        DialogFocus::Checkbox => DialogFocus::Checkbox,
+                        DialogFocus::Confirm => {
+                            if has_checkbox {
+                                DialogFocus::Checkbox
+                            } else {
+                                DialogFocus::Confirm
+                            }
+                        }
+                        DialogFocus::Cancel => DialogFocus::Confirm,
+                    };
+                }
                 // Enter activates the focused element
                 KeyCode::Enter => {
                     match self.dialog_focus {

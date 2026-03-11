@@ -340,6 +340,90 @@ async fn test_rebuild_dialog_checkbox() {
 }
 
 // ---------------------------------------------------------------------------
+// Arrow key navigation in confirm dialogs
+// ---------------------------------------------------------------------------
+
+/// Left/Right arrow keys navigate between Confirm and Cancel in a simple dialog
+#[tokio::test]
+async fn test_confirm_arrow_keys_simple_dialog() {
+    let mut app = app_with_containers();
+    app.selected = 1;
+    app.containers_table_state.select(Some(1));
+    app.send_key(KeyCode::Char('d'), KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.view, View::Confirm);
+    assert_eq!(app.dialog_focus, DialogFocus::Cancel);
+
+    // Left: Cancel -> Confirm
+    app.send_key(KeyCode::Left, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Confirm);
+
+    // Left at Confirm stays at Confirm (no checkbox, stop at edge)
+    app.send_key(KeyCode::Left, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Confirm);
+
+    // Right: Confirm -> Cancel
+    app.send_key(KeyCode::Right, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Cancel);
+
+    // Right at Cancel stays at Cancel (stop at edge)
+    app.send_key(KeyCode::Right, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Cancel);
+}
+
+/// Left/Right arrow keys navigate through Checkbox -> Confirm -> Cancel in rebuild dialog
+#[tokio::test]
+async fn test_confirm_arrow_keys_rebuild_dialog() {
+    let mut app = app_with_containers();
+    let container = &app.containers[app.selected];
+    app.confirm_action = Some(ConfirmAction::Rebuild {
+        id: container.id.clone(),
+        provider_change: None,
+    });
+    app.dialog_focus = DialogFocus::Checkbox;
+    app.view = View::Confirm;
+
+    // Right: Checkbox -> Confirm
+    app.send_key(KeyCode::Right, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Confirm);
+
+    // Right: Confirm -> Cancel
+    app.send_key(KeyCode::Right, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Cancel);
+
+    // Left: Cancel -> Confirm
+    app.send_key(KeyCode::Left, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Confirm);
+
+    // Left: Confirm -> Checkbox (has_checkbox is true for Rebuild)
+    app.send_key(KeyCode::Left, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Checkbox);
+
+    // Left at Checkbox stays at Checkbox (stop at edge)
+    app.send_key(KeyCode::Left, KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.dialog_focus, DialogFocus::Checkbox);
+}
+
+// ---------------------------------------------------------------------------
 // Compose detail service navigation
 // ---------------------------------------------------------------------------
 

@@ -680,16 +680,22 @@ async fn run_single_host_command(
             )));
         }
     } else {
-        let status = std::process::Command::new(program)
+        let result = std::process::Command::new(program)
             .args(args)
             .current_dir(working_dir)
-            .status()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
             .map_err(|e| CoreError::ExecFailed(format!("Failed to run host command: {}", e)))?;
-        if !status.success() {
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            if !stderr.is_empty() {
+                tracing::debug!("Host command '{}' stderr: {}", label, stderr);
+            }
             return Err(CoreError::ExecFailed(format!(
                 "Host command '{}' exited with code {}",
                 label,
-                status.code().unwrap_or(-1)
+                result.status.code().unwrap_or(-1)
             )));
         }
     }
@@ -699,7 +705,8 @@ async fn run_single_host_command(
 /// Run a lifecycle command on the host (for initializeCommand)
 ///
 /// When `output` is `Some`, stdout/stderr are captured and sent line-by-line
-/// through the channel. When `None`, stdio is inherited (preserves CLI behavior).
+/// through the channel. When `None`, stdout/stderr are piped and discarded
+/// (logged at debug level on failure) to prevent corrupting TUI output.
 pub async fn run_host_command(
     command: &devc_config::Command,
     working_dir: &Path,

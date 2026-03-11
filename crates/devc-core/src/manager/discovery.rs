@@ -255,15 +255,6 @@ impl ContainerManager {
             if let Ok(container) = self.load_container(&container_state.config_path) {
                 let cid = ContainerId::new(container_id);
 
-                // initializeCommand runs on host (per spec)
-                if let Some(ref cmd) = container.devcontainer.initialize_command {
-                    if let Err(e) =
-                        crate::run_host_command(cmd, &container_state.workspace_path, None).await
-                    {
-                        tracing::warn!("initializeCommand failed during adopt (non-fatal): {}", e);
-                    }
-                }
-
                 // Credentials setup before lifecycle so commands can access private registries/repos
                 if let Err(e) = crate::credentials::setup_credentials(
                     provider,
@@ -278,24 +269,6 @@ impl ContainerManager {
                         "Credential forwarding failed during adopt (non-fatal): {}",
                         e
                     );
-                }
-
-                // Run first-create lifecycle (non-fatal — adopt succeeds even if lifecycle fails)
-                if let Err(e) = self
-                    .run_first_create_lifecycle(
-                        &state_id,
-                        &container,
-                        provider,
-                        &cid,
-                        crate::manager::lifecycle::LifecycleChannels {
-                            progress: None,
-                            output: None,
-                            stage: None,
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!("Lifecycle commands failed during adopt (non-fatal): {}", e);
                 }
 
                 // Start (runs postStartCommand, SSH daemon)

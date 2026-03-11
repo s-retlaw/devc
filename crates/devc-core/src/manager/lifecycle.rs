@@ -48,7 +48,7 @@ impl ContainerManager {
     /// 7. SSH setup (if enabled)
     /// 8. Dotfiles injection
     ///
-    /// Used by both `up()` for newly created containers and `adopt()` for running containers.
+    /// Used by `up()` for newly created containers.
     pub(crate) async fn run_first_create_lifecycle(
         &self,
         id: &str,
