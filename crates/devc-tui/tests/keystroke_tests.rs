@@ -5,7 +5,9 @@ mod helpers;
 use crossterm::event::{KeyCode, KeyModifiers};
 use devc_core::DevcContainerStatus;
 use devc_provider::{ComposeServiceInfo, ContainerId, ContainerStatus};
-use devc_tui::{App, ConfirmAction, DialogFocus, Tab, View};
+use devc_tui::{
+    App, AsyncEvent, ConfirmAction, ContainerOpResult, ContainerOperation, DialogFocus, Tab, View,
+};
 use ratatui::widgets::TableState;
 
 #[allow(unused_imports)]
@@ -586,4 +588,359 @@ async fn test_agent_diagnostics_view_scroll_keys() {
         .await
         .unwrap();
     assert_eq!(app.agent_diagnostics_selected, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Operation state setup tests (confirm dialog → spinner)
+// ---------------------------------------------------------------------------
+
+/// Confirming Stop sets up the Stopping operation with spinner state
+#[tokio::test]
+async fn test_confirm_stop_sets_operation_state() {
+    let mut app = app_with_containers();
+    // Container 0 is Running — set up Stop confirmation
+    app.confirm_action = Some(ConfirmAction::Stop("test-rust-project".to_string()));
+    app.view = View::Confirm;
+    app.dialog_focus = DialogFocus::Confirm;
+
+    // Press Enter to confirm
+    app.send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(app.container_op, Some(ContainerOperation::Stopping { .. })),
+        "Expected Stopping op, got {:?}",
+        app.container_op
+    );
+    assert!(app.loading);
+    assert_eq!(app.spinner_frame, 0);
+}
+
+/// Confirming Delete sets up the Deleting operation with spinner state
+#[tokio::test]
+async fn test_confirm_delete_sets_operation_state() {
+    let mut app = app_with_containers();
+    // Container 1 is Stopped — set up Delete confirmation
+    app.confirm_action = Some(ConfirmAction::Delete("test-python-api".to_string()));
+    app.view = View::Confirm;
+    app.dialog_focus = DialogFocus::Confirm;
+
+    app.send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(app.container_op, Some(ContainerOperation::Deleting { .. })),
+        "Expected Deleting op, got {:?}",
+        app.container_op
+    );
+    assert!(app.loading);
+    assert_eq!(app.spinner_frame, 0);
+}
+
+/// Confirming Adopt sets up the Adopting operation with spinner state
+#[tokio::test]
+async fn test_confirm_adopt_sets_operation_state() {
+    use devc_provider::{DevcontainerSource, ProviderType};
+
+    let mut app = app_with_containers();
+    app.confirm_action = Some(ConfirmAction::Adopt {
+        container_id: "ext-123".to_string(),
+        container_name: "my-devcontainer".to_string(),
+        workspace_path: Some("/home/user/project".to_string()),
+        source: DevcontainerSource::VsCode,
+        provider: ProviderType::Docker,
+    });
+    app.view = View::Confirm;
+    app.dialog_focus = DialogFocus::Confirm;
+
+    app.send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(app.container_op, Some(ContainerOperation::Adopting { .. })),
+        "Expected Adopting op, got {:?}",
+        app.container_op
+    );
+    assert!(app.loading);
+    assert_eq!(app.spinner_frame, 0);
+}
+
+/// Confirming Forget sets up the Forgetting operation with spinner state
+#[tokio::test]
+async fn test_confirm_forget_sets_operation_state() {
+    let mut app = app_with_containers();
+    app.confirm_action = Some(ConfirmAction::Forget {
+        id: "test-rust-project".to_string(),
+        name: "rust-project".to_string(),
+    });
+    app.view = View::Confirm;
+    app.dialog_focus = DialogFocus::Confirm;
+
+    app.send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            app.container_op,
+            Some(ContainerOperation::Forgetting { .. })
+        ),
+        "Expected Forgetting op, got {:?}",
+        app.container_op
+    );
+    assert!(app.loading);
+    assert_eq!(app.spinner_frame, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Operation result handling tests (via handle_async_event)
+// ---------------------------------------------------------------------------
+
+/// Successful Starting operation clears state and sets status message
+#[tokio::test]
+async fn test_operation_result_starting_success() {
+    let mut app = App::new_for_testing();
+    app.container_op = Some(ContainerOperation::Starting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+        ContainerOperation::Starting {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+        },
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(app.status_message.as_deref(), Some("Started my-app"));
+}
+
+/// Successful Stopping operation clears state and sets status message
+#[tokio::test]
+async fn test_operation_result_stopping_success() {
+    let mut app = App::new_for_testing();
+    app.container_op = Some(ContainerOperation::Stopping {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+        ContainerOperation::Stopping {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+        },
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(app.status_message.as_deref(), Some("Stopped my-app"));
+}
+
+/// Successful Deleting operation clears state and sets status message
+#[tokio::test]
+async fn test_operation_result_deleting_success() {
+    let mut app = App::new_for_testing();
+    app.container_op = Some(ContainerOperation::Deleting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+        ContainerOperation::Deleting {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+        },
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(app.status_message.as_deref(), Some("Deleted my-app"));
+}
+
+/// Successful Up operation clears state and sets status message
+#[tokio::test]
+async fn test_operation_result_up_success() {
+    let mut app = App::new_for_testing();
+    app.container_op = Some(ContainerOperation::Up {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+        progress: String::new(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+        ContainerOperation::Up {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+            progress: String::new(),
+        },
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Up completed for my-app")
+    );
+}
+
+/// Successful Adopting operation clears state, sets message, disables discover mode
+#[tokio::test]
+async fn test_operation_result_adopting_success() {
+    let mut app = App::new_for_testing();
+    app.discover_mode = true;
+    app.container_op = Some(ContainerOperation::Adopting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+        ContainerOperation::Adopting {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+        },
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(app.status_message.as_deref(), Some("Adopted my-app"));
+    assert!(
+        !app.discover_mode,
+        "discover_mode should be false after adopt"
+    );
+}
+
+/// Successful Forgetting operation clears state and sets status message
+#[tokio::test]
+async fn test_operation_result_forgetting_success() {
+    let mut app = App::new_for_testing();
+    app.container_op = Some(ContainerOperation::Forgetting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+        ContainerOperation::Forgetting {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+        },
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Forgot 'my-app' (container still running)")
+    );
+}
+
+/// Failed operation includes error in status message
+#[tokio::test]
+async fn test_operation_result_failure() {
+    let mut app = App::new_for_testing();
+    app.container_op = Some(ContainerOperation::Starting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Failed(
+        ContainerOperation::Starting {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+        },
+        "connection refused".to_string(),
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Start failed for my-app: connection refused")
+    );
+}
+
+/// Failed Adopt includes error in status message
+#[tokio::test]
+async fn test_operation_result_adopt_failure() {
+    let mut app = App::new_for_testing();
+    app.discover_mode = true;
+    app.container_op = Some(ContainerOperation::Adopting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Failed(
+        ContainerOperation::Adopting {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+        },
+        "not a devcontainer".to_string(),
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Adopt failed for my-app: not a devcontainer")
+    );
+    assert!(
+        app.discover_mode,
+        "discover_mode should stay true on failure"
+    );
+}
+
+/// Failed Forget includes error in status message
+#[tokio::test]
+async fn test_operation_result_forget_failure() {
+    let mut app = App::new_for_testing();
+    app.container_op = Some(ContainerOperation::Forgetting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    });
+    app.loading = true;
+
+    app.handle_async_event(AsyncEvent::OperationComplete(ContainerOpResult::Failed(
+        ContainerOperation::Forgetting {
+            id: "c1".to_string(),
+            name: "my-app".to_string(),
+        },
+        "state file locked".to_string(),
+    )))
+    .await
+    .unwrap();
+
+    assert!(app.container_op.is_none());
+    assert!(!app.loading);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Forget failed for my-app: state file locked")
+    );
 }

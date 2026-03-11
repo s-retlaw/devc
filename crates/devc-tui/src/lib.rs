@@ -18,7 +18,8 @@ pub mod widgets;
 pub use clipboard::copy_to_clipboard;
 
 pub use app::{
-    AgentPanelRow, App, AppResult, ConfirmAction, ContainerOperation, DialogFocus, Tab, View,
+    AgentPanelRow, App, AppResult, AsyncEvent, ConfirmAction, ContainerOpResult,
+    ContainerOperation, DialogFocus, Tab, View,
 };
 pub use event::{Event, EventHandler};
 #[cfg(unix)]

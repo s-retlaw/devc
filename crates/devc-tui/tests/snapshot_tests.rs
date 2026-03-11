@@ -343,6 +343,48 @@ fn test_container_operation_spinner() {
     insta::assert_snapshot!(output);
 }
 
+/// Test adopting spinner modal
+#[test]
+fn test_container_operation_spinner_adopting() {
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+    app.view = View::Main;
+    app.discover_mode = true;
+
+    app.container_op = Some(ContainerOperation::Adopting {
+        id: "ext-abc123".to_string(),
+        name: "my-devcontainer".to_string(),
+    });
+    app.spinner_frame = 2;
+
+    let output = render_app(&mut app, 80, 24);
+    insta::assert_snapshot!(output);
+}
+
+/// Test forgetting spinner modal
+#[test]
+fn test_container_operation_spinner_forgetting() {
+    let mut app = App::new_for_testing();
+    app.tab = Tab::Containers;
+    app.view = View::Main;
+
+    app.containers = vec![App::create_test_container(
+        "my-rust-project",
+        DevcContainerStatus::Running,
+    )];
+    app.selected = 0;
+    app.containers_table_state.select(Some(0));
+
+    app.container_op = Some(ContainerOperation::Forgetting {
+        id: "test-my-rust-project".to_string(),
+        name: "my-rust-project".to_string(),
+    });
+    app.spinner_frame = 2;
+
+    let output = render_app(&mut app, 80, 24);
+    insta::assert_snapshot!(output);
+}
+
 /// Test compose container list view with badge
 #[test]
 fn test_compose_container_list_badge() {

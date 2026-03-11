@@ -56,6 +56,8 @@ pub(super) fn draw_operation_progress(frame: &mut Frame, app: &App, area: Rect) 
         ContainerOperation::Stopping { .. } => "Stopping",
         ContainerOperation::Deleting { .. } => "Deleting",
         ContainerOperation::Up { .. } => "Container Up",
+        ContainerOperation::Adopting { .. } => "Adopting",
+        ContainerOperation::Forgetting { .. } => "Forgetting",
     };
 
     let has_output = !app.up_output.is_empty();

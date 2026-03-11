@@ -2,7 +2,7 @@
 
 use devc_core::DevcContainerStatus;
 use devc_provider::ProviderType;
-use devc_tui::{App, ConfirmAction, DialogFocus, Tab, View};
+use devc_tui::{App, ConfirmAction, ContainerOperation, DialogFocus, Tab, View};
 
 /// Test tab navigation cycles forward
 #[test]
@@ -350,6 +350,75 @@ fn test_container_operation_labels() {
         assert_eq!(container.status, status);
     }
     drop(app);
+}
+
+// ---------------------------------------------------------------------------
+// ContainerOperation::label() tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_container_operation_label_starting() {
+    let op = ContainerOperation::Starting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    };
+    assert_eq!(op.label(), "Starting my-app...");
+}
+
+#[test]
+fn test_container_operation_label_stopping() {
+    let op = ContainerOperation::Stopping {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    };
+    assert_eq!(op.label(), "Stopping my-app...");
+}
+
+#[test]
+fn test_container_operation_label_deleting() {
+    let op = ContainerOperation::Deleting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    };
+    assert_eq!(op.label(), "Deleting my-app...");
+}
+
+#[test]
+fn test_container_operation_label_up_with_progress() {
+    let op = ContainerOperation::Up {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+        progress: "Building image...".to_string(),
+    };
+    assert_eq!(op.label(), "Building image...");
+}
+
+#[test]
+fn test_container_operation_label_up_empty_progress() {
+    let op = ContainerOperation::Up {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+        progress: String::new(),
+    };
+    assert_eq!(op.label(), "Starting up my-app...");
+}
+
+#[test]
+fn test_container_operation_label_adopting() {
+    let op = ContainerOperation::Adopting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    };
+    assert_eq!(op.label(), "Adopting my-app...");
+}
+
+#[test]
+fn test_container_operation_label_forgetting() {
+    let op = ContainerOperation::Forgetting {
+        id: "c1".to_string(),
+        name: "my-app".to_string(),
+    };
+    assert_eq!(op.label(), "Forgetting my-app...");
 }
 
 /// Test ports view state cleanup

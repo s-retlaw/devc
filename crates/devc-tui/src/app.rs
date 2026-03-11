@@ -27,6 +27,7 @@ use devc_provider::{
 use ratatui::prelude::*;
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -164,6 +165,14 @@ pub enum ContainerOperation {
         name: String,
         progress: String,
     },
+    Adopting {
+        id: String,
+        name: String,
+    },
+    Forgetting {
+        id: String,
+        name: String,
+    },
 }
 
 impl ContainerOperation {
@@ -179,6 +188,8 @@ impl ContainerOperation {
                     progress.clone()
                 }
             }
+            ContainerOperation::Adopting { name, .. } => format!("Adopting {}...", name),
+            ContainerOperation::Forgetting { name, .. } => format!("Forgetting {}...", name),
         }
     }
 }
@@ -214,6 +225,8 @@ pub enum AsyncEvent {
     UpOutput(String),
     /// socat install result
     InstallResult(InstallResult),
+    /// Provider reconnection completed
+    ReconnectComplete(Result<(ProviderType, Box<dyn ContainerProvider>), String>),
     /// Agent inspect completed for a container
     AgentInspectComplete {
         container_id: String,
@@ -836,7 +849,7 @@ impl App {
     }
 
     /// Handle a unified async event from background tasks
-    async fn handle_async_event(&mut self, event: AsyncEvent) -> AppResult<()> {
+    pub async fn handle_async_event(&mut self, event: AsyncEvent) -> AppResult<()> {
         match event {
             AsyncEvent::BuildProgress(line) => {
                 self.handle_build_progress(line).await?;
@@ -870,6 +883,9 @@ impl App {
                 result,
             } => {
                 self.handle_agent_inspect_complete(container_id, container_name, result);
+            }
+            AsyncEvent::ReconnectComplete(result) => {
+                self.handle_reconnect_complete(result).await?;
             }
             AsyncEvent::AgentSyncComplete {
                 container_id,
@@ -2889,6 +2905,38 @@ impl App {
         });
     }
 
+    /// Handle provider reconnection result from background task
+    async fn handle_reconnect_complete(
+        &mut self,
+        result: Result<(ProviderType, Box<dyn ContainerProvider>), String>,
+    ) -> AppResult<()> {
+        self.loading = false;
+        match result {
+            Ok((provider_type, provider)) => {
+                {
+                    let mut manager = self.manager.write().await;
+                    manager.connect(provider);
+                }
+
+                self.active_provider = Some(provider_type);
+                self.connection_error = None;
+
+                for p in &mut self.providers {
+                    p.connected = p.provider_type == provider_type;
+                    p.is_active = p.provider_type == provider_type;
+                }
+
+                self.containers = self.manager.read().await.list().await?;
+                self.status_message = Some(format!("Connected to {}", provider_type));
+            }
+            Err(e) => {
+                self.connection_error = Some(e.clone());
+                self.status_message = Some(format!("Connection failed: {}", e));
+            }
+        }
+        Ok(())
+    }
+
     /// Handle install result from background task
     fn handle_install_result(&mut self, result: InstallResult) {
         self.port_state.socat_installing = false;
@@ -2908,6 +2956,75 @@ impl App {
         }
     }
 
+    /// Spawn a background container operation with spinner feedback.
+    ///
+    /// Sets up `container_op`/`loading`/`spinner_frame`, optionally creates
+    /// progress+output channels (bridged to the unified AsyncEvent channel),
+    /// and spawns the work closure on a tokio task.
+    fn spawn_container_op<F, Fut>(&mut self, op: ContainerOperation, with_channels: bool, work: F)
+    where
+        F: FnOnce(
+                Arc<RwLock<ContainerManager>>,
+                Option<mpsc::UnboundedSender<String>>,
+                Option<mpsc::UnboundedSender<String>>,
+            ) -> Fut
+            + Send
+            + 'static,
+        Fut: Future<Output = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>>
+            + Send,
+    {
+        self.container_op = Some(op.clone());
+        self.loading = true;
+        self.spinner_frame = 0;
+
+        let tx = self.async_event_tx.clone();
+        let manager = Arc::clone(&self.manager);
+
+        let (progress_tx, output_tx) = if with_channels {
+            self.up_output = Vec::new();
+
+            let (ptx, mut prx) = mpsc::unbounded_channel::<String>();
+            let (otx, mut orx) = mpsc::unbounded_channel::<String>();
+
+            let fwd1 = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = prx.recv().await {
+                    if fwd1.send(AsyncEvent::OperationProgress(msg)).is_err() {
+                        break;
+                    }
+                }
+            });
+            let fwd2 = tx.clone();
+            tokio::spawn(async move {
+                while let Some(line) = orx.recv().await {
+                    if fwd2.send(AsyncEvent::UpOutput(line)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            (Some(ptx), Some(otx))
+        } else {
+            (None, None)
+        };
+
+        tokio::spawn(async move {
+            match work(manager, progress_tx, output_tx).await {
+                Ok(()) => {
+                    let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Success(
+                        op,
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AsyncEvent::OperationComplete(ContainerOpResult::Failed(
+                        op,
+                        e.to_string(),
+                    )));
+                }
+            }
+        });
+    }
+
     /// Handle container operation result from background task
     async fn handle_operation_result(&mut self, result: ContainerOpResult) -> AppResult<()> {
         self.container_op = None;
@@ -2918,19 +3035,28 @@ impl App {
                 ContainerOperation::Starting { id, .. }
                 | ContainerOperation::Stopping { id, .. }
                 | ContainerOperation::Deleting { id, .. }
-                | ContainerOperation::Up { id, .. } => Some(id.clone()),
+                | ContainerOperation::Up { id, .. }
+                | ContainerOperation::Adopting { id, .. }
+                | ContainerOperation::Forgetting { id, .. } => Some(id.clone()),
             },
         };
 
         match result {
-            ContainerOpResult::Success(op) => {
-                let msg = match &op {
+            ContainerOpResult::Success(ref op) => {
+                let msg = match op {
                     ContainerOperation::Starting { name, .. } => format!("Started {}", name),
                     ContainerOperation::Stopping { name, .. } => format!("Stopped {}", name),
                     ContainerOperation::Deleting { name, .. } => format!("Deleted {}", name),
                     ContainerOperation::Up { name, .. } => format!("Up completed for {}", name),
+                    ContainerOperation::Adopting { name, .. } => format!("Adopted {}", name),
+                    ContainerOperation::Forgetting { name, .. } => {
+                        format!("Forgot '{}' (container still running)", name)
+                    }
                 };
                 self.status_message = Some(msg);
+                if matches!(op, ContainerOperation::Adopting { .. }) {
+                    self.discover_mode = false;
+                }
             }
             ContainerOpResult::Failed(op, err) => {
                 let msg = match &op {
@@ -2945,6 +3071,12 @@ impl App {
                     }
                     ContainerOperation::Up { name, .. } => {
                         format!("Up failed for {}: {}", name, err)
+                    }
+                    ContainerOperation::Adopting { name, .. } => {
+                        format!("Adopt failed for {}: {}", name, err)
+                    }
+                    ContainerOperation::Forgetting { name, .. } => {
+                        format!("Forget failed for {}: {}", name, err)
                     }
                 };
                 self.status_message = Some(msg);
@@ -3443,30 +3575,13 @@ impl App {
                 self.view = View::Confirm;
             }
             DevcContainerStatus::Stopped | DevcContainerStatus::Created => {
-                // Start immediately (no confirmation needed)
                 let op = ContainerOperation::Starting {
                     id: id.clone(),
                     name,
                 };
-                self.container_op = Some(op.clone());
-                self.loading = true;
-                self.spinner_frame = 0;
-
-                let tx = self.async_event_tx.clone();
-                let manager = Arc::clone(&self.manager);
-                tokio::spawn(async move {
-                    match manager.read().await.start(&id).await {
-                        Ok(()) => {
-                            let _ = tx.send(AsyncEvent::OperationComplete(
-                                ContainerOpResult::Success(op),
-                            ));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AsyncEvent::OperationComplete(
-                                ContainerOpResult::Failed(op, e.to_string()),
-                            ));
-                        }
-                    }
+                self.spawn_container_op(op, false, |mgr, _, _| async move {
+                    mgr.read().await.start(&id).await?;
+                    Ok(())
                 });
             }
             _ => {
@@ -3529,53 +3644,12 @@ impl App {
             name: name.clone(),
             progress: format!("Starting up {}...", name),
         };
-        self.container_op = Some(op.clone());
-        self.loading = true;
-        self.spinner_frame = 0;
-
-        let event_tx = self.async_event_tx.clone();
-        self.up_output = Vec::new();
-
-        // Create intermediate channels for ContainerManager API, bridged to unified event channel
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<String>();
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<String>();
-
-        let fwd_tx1 = event_tx.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = progress_rx.recv().await {
-                if fwd_tx1.send(AsyncEvent::OperationProgress(msg)).is_err() {
-                    break;
-                }
-            }
-        });
-        let fwd_tx2 = event_tx.clone();
-        tokio::spawn(async move {
-            while let Some(line) = output_rx.recv().await {
-                if fwd_tx2.send(AsyncEvent::UpOutput(line)).is_err() {
-                    break;
-                }
-            }
-        });
-
-        let manager = Arc::clone(&self.manager);
-        tokio::spawn(async move {
-            match manager
-                .read()
+        self.spawn_container_op(op, true, |mgr, progress_tx, output_tx| async move {
+            mgr.read()
                 .await
-                .up_with_progress(&id, Some(&progress_tx), Some(&output_tx))
-                .await
-            {
-                Ok(()) => {
-                    let _ = event_tx.send(AsyncEvent::OperationComplete(
-                        ContainerOpResult::Success(op),
-                    ));
-                }
-                Err(e) => {
-                    let _ = event_tx.send(AsyncEvent::OperationComplete(
-                        ContainerOpResult::Failed(op, e.to_string()),
-                    ));
-                }
-            }
+                .up_with_progress(&id, progress_tx.as_ref(), output_tx.as_ref())
+                .await?;
+            Ok(())
         });
 
         Ok(())
@@ -3711,26 +3785,9 @@ impl App {
                     id: id.clone(),
                     name,
                 };
-                self.container_op = Some(op.clone());
-                self.loading = true;
-                self.spinner_frame = 0;
-
-                let tx = self.async_event_tx.clone();
-
-                let manager = Arc::clone(&self.manager);
-                tokio::spawn(async move {
-                    match manager.read().await.remove(&id, true).await {
-                        Ok(()) => {
-                            let _ = tx.send(AsyncEvent::OperationComplete(
-                                ContainerOpResult::Success(op),
-                            ));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AsyncEvent::OperationComplete(
-                                ContainerOpResult::Failed(op, e.to_string()),
-                            ));
-                        }
-                    }
+                self.spawn_container_op(op, false, |mgr, _, _| async move {
+                    mgr.read().await.remove(&id, true).await?;
+                    Ok(())
                 });
             }
             ConfirmAction::Stop(id) => {
@@ -3751,26 +3808,9 @@ impl App {
                     id: id.clone(),
                     name,
                 };
-                self.container_op = Some(op.clone());
-                self.loading = true;
-                self.spinner_frame = 0;
-
-                let tx = self.async_event_tx.clone();
-
-                let manager = Arc::clone(&self.manager);
-                tokio::spawn(async move {
-                    match manager.read().await.stop(&id).await {
-                        Ok(()) => {
-                            let _ = tx.send(AsyncEvent::OperationComplete(
-                                ContainerOpResult::Success(op),
-                            ));
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AsyncEvent::OperationComplete(
-                                ContainerOpResult::Failed(op, e.to_string()),
-                            ));
-                        }
-                    }
+                self.spawn_container_op(op, false, |mgr, _, _| async move {
+                    mgr.read().await.stop(&id).await?;
+                    Ok(())
                 });
             }
             ConfirmAction::Rebuild { id, .. } => {
@@ -3859,10 +3899,19 @@ impl App {
                         self.config = updated;
                         self.sync_manager_config_from_app().await;
                         self.status_message =
-                            Some(format!("{} set as default provider", provider_name));
+                            Some(format!("{} set as default. Reconnecting...", provider_name));
+                        self.loading = true;
 
-                        // Try to reconnect with the new provider
-                        self.retry_connection().await?;
+                        // Spawn reconnection in background
+                        let tx = self.async_event_tx.clone();
+                        let config = self.config.clone();
+                        tokio::spawn(async move {
+                            let result = match create_provider(new_provider, &config).await {
+                                Ok(provider) => Ok((new_provider, provider)),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = tx.send(AsyncEvent::ReconnectComplete(result));
+                        });
                     }
                 }
             }
@@ -3873,50 +3922,33 @@ impl App {
                 source,
                 provider,
             } => {
-                self.loading = true;
-                self.status_message = Some(format!("Adopting '{}'...", container_name));
-
-                // Use a block to ensure the read guard is dropped before refresh_containers
-                let adopt_result = {
-                    let manager = self.manager.read().await;
-                    manager
-                        .adopt(&container_id, workspace_path.as_deref(), source, provider)
-                        .await
-                };
-
-                match adopt_result {
-                    Ok(state) => {
-                        self.status_message = Some(format!("Adopted '{}'", state.name));
-                        // Switch back to managed view and refresh
-                        self.discover_mode = false;
-                        self.refresh_containers().await?;
-                    }
-                    Err(e) => {
-                        self.status_message = Some(format!("Failed to adopt: {}", e));
-                    }
+                if self.container_op.is_some() {
+                    return Ok(());
                 }
-                self.loading = false;
+                let op = ContainerOperation::Adopting {
+                    id: container_id.clone(),
+                    name: container_name.clone(),
+                };
+                self.spawn_container_op(op, false, move |mgr, _, _| async move {
+                    mgr.read()
+                        .await
+                        .adopt(&container_id, workspace_path.as_deref(), source, provider)
+                        .await?;
+                    Ok(())
+                });
             }
             ConfirmAction::Forget { id, name } => {
-                self.loading = true;
-                self.status_message = Some(format!("Forgetting '{}'...", name));
-
-                let forget_result = {
-                    let manager = self.manager.read().await;
-                    manager.forget(&id).await
-                };
-
-                match forget_result {
-                    Ok(()) => {
-                        self.status_message =
-                            Some(format!("Forgot '{}' (container still running)", name));
-                        self.refresh_containers().await?;
-                    }
-                    Err(e) => {
-                        self.status_message = Some(format!("Failed to forget: {}", e));
-                    }
+                if self.container_op.is_some() {
+                    return Ok(());
                 }
-                self.loading = false;
+                let op = ContainerOperation::Forgetting {
+                    id: id.clone(),
+                    name: name.clone(),
+                };
+                self.spawn_container_op(op, false, |mgr, _, _| async move {
+                    mgr.read().await.forget(&id).await?;
+                    Ok(())
+                });
             }
             ConfirmAction::CancelBuild => {
                 // Cancel the in-progress build and return to main view
