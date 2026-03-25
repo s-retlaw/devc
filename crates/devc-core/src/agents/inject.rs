@@ -51,13 +51,19 @@ async fn discover_container_home(
     )
     .await
     {
-        Ok((0, output)) if !output.trim().is_empty() => output.trim().to_string(),
+        Ok((0, output)) if !output.trim().is_empty() => {
+            let home = output.trim().to_string();
+            tracing::debug!(home = %home, "Resolved container HOME");
+            home
+        }
         _ => {
-            if user == Some("root") {
+            let fallback = if user == Some("root") {
                 "/root".to_string()
             } else {
                 "/home/vscode".to_string()
-            }
+            };
+            tracing::debug!(home = %fallback, "Using fallback container HOME");
+            fallback
         }
     }
 }
@@ -68,8 +74,16 @@ async fn discover_container_user(
     user: Option<&str>,
 ) -> String {
     match exec_script(provider, container_id, "id -un", user, &HashMap::new()).await {
-        Ok((0, output)) if !output.trim().is_empty() => output.trim().to_string(),
-        _ => user.unwrap_or("root").to_string(),
+        Ok((0, output)) if !output.trim().is_empty() => {
+            let resolved = output.trim().to_string();
+            tracing::debug!(user = %resolved, "Resolved container user");
+            resolved
+        }
+        _ => {
+            let fallback = user.unwrap_or("root").to_string();
+            tracing::debug!(user = %fallback, "Using fallback container user");
+            fallback
+        }
     }
 }
 
@@ -222,9 +236,11 @@ async fn run_install_with_fallbacks(
     }
 
     for (idx, cmd) in attempts.iter().enumerate() {
-        match exec_script(provider, container_id, cmd, user, env).await {
+        let full_cmd = with_node_preamble(cmd);
+        tracing::debug!(attempt = idx + 1, command = %cmd, "Running install command");
+        match exec_script(provider, container_id, &full_cmd, user, env).await {
             Ok((0, _)) => {
-                let probe_cmd = probe_script(&cfg.binary_probe);
+                let probe_cmd = with_node_preamble(&probe_script(&cfg.binary_probe));
                 match exec_script(provider, container_id, &probe_cmd, user, env).await {
                     Ok((0, _)) => return Ok(true),
                     Ok((code, _)) => {
@@ -238,14 +254,23 @@ async fn run_install_with_fallbacks(
                 }
             }
             Ok((code, output)) => {
-                let short = output
+                let tail: String = output
                     .trim()
                     .lines()
-                    .last()
-                    .unwrap_or("")
-                    .chars()
-                    .take(180)
-                    .collect::<String>();
+                    .rev()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let short: String = tail.chars().take(500).collect();
+                tracing::warn!(
+                    attempt = idx + 1,
+                    exit_code = code,
+                    output = %short,
+                    "Install command failed"
+                );
                 if idx + 1 == attempts.len() {
                     return Err(format!(
                         "Install attempts exhausted (last exit {}): {}. Hint: check npm, network, and writable install prefix.",
@@ -254,6 +279,7 @@ async fn run_install_with_fallbacks(
                 }
             }
             Err(e) => {
+                tracing::warn!(attempt = idx + 1, error = %e, "Install command runtime error");
                 if idx + 1 == attempts.len() {
                     return Err(format!(
                         "Install attempts exhausted with runtime error: {}. Hint: check npm, network, and writable install prefix.",
@@ -267,22 +293,52 @@ async fn run_install_with_fallbacks(
     Ok(false)
 }
 
+/// Shell preamble that sources common Node version-manager setups.
+///
+/// `/bin/sh -lc` does not read bash/zsh-specific profiles, so nvm, volta, fnm,
+/// and devcontainer-feature installs that configure PATH only in those files are
+/// invisible.  Prepend this to any script that needs node/npm.
+const NODE_PATH_PREAMBLE: &str = r#"
+# Source common Node version-manager setups that /bin/sh may miss
+for f in /usr/local/share/nvm/nvm.sh "$HOME/.nvm/nvm.sh" "$NVM_DIR/nvm.sh"; do
+  [ -s "$f" ] && . "$f" 2>/dev/null && break
+done
+# Volta, fnm, devcontainer feature paths
+for d in "$HOME/.volta/bin" "$HOME/.fnm" /usr/local/share/fnm; do
+  [ -d "$d" ] && PATH="$d:$PATH"
+done
+export PATH
+"#;
+
+fn node_npm_check_script() -> String {
+    format!(
+        "{}\ncommand -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1",
+        NODE_PATH_PREAMBLE
+    )
+}
+
+/// Wrap an install command with the Node PATH preamble so nvm/volta/fnm are visible.
+fn with_node_preamble(cmd: &str) -> String {
+    format!("{}\n{}", NODE_PATH_PREAMBLE, cmd)
+}
+
 async fn node_npm_available(
     provider: &dyn ContainerProvider,
     container_id: &ContainerId,
     user: Option<&str>,
     env: &HashMap<String, String>,
 ) -> Result<bool, String> {
-    exec_script(
-        provider,
-        container_id,
-        "command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1",
-        user,
-        env,
-    )
-    .await
-    .map(|(code, _)| code == 0)
-    .map_err(|e| format!("Failed to check Node/npm prerequisites: {}", e))
+    let result = exec_script(provider, container_id, &node_npm_check_script(), user, env)
+        .await
+        .map(|(code, _)| code == 0)
+        .map_err(|e| format!("Failed to check Node/npm prerequisites: {}", e));
+    match &result {
+        Ok(available) => {
+            tracing::debug!(available = %available, user = ?user, "Node/npm availability check")
+        }
+        Err(e) => tracing::warn!(error = %e, user = ?user, "Node/npm availability check failed"),
+    }
+    result
 }
 
 fn all_sync_entries<'a>(
@@ -449,6 +505,12 @@ async fn sync_single_agent(
     }
 
     for (source_path, target_path) in all_sync_entries(cfg, container_home) {
+        tracing::debug!(
+            agent = %cfg.kind,
+            source = %source_path.display(),
+            target = %target_path,
+            "Copying config entry"
+        );
         if let Err(e) = copy_sync_entry(provider, container_id, source_path, &target_path).await {
             result.warnings.push(e);
         } else {
@@ -509,6 +571,7 @@ async fn sync_single_agent(
     }
 
     let probe_cmd = probe_script(&cfg.binary_probe);
+    tracing::debug!(agent = %cfg.kind, probe = %probe_cmd, "Probing for binary");
     let probe_exit = match exec_script(
         provider,
         container_id,
@@ -518,7 +581,10 @@ async fn sync_single_agent(
     )
     .await
     {
-        Ok((code, _)) => code,
+        Ok((code, _)) => {
+            tracing::debug!(agent = %cfg.kind, exit_code = code, "Binary probe result");
+            code
+        }
         Err(e) => {
             result.warnings.push(format!(
                 "Failed to probe agent binary '{}': {}",
@@ -529,6 +595,7 @@ async fn sync_single_agent(
     };
 
     if probe_exit == 0 {
+        tracing::debug!(agent = %cfg.kind, "Binary already present, skipping install");
         result.installed = false;
         return result;
     }

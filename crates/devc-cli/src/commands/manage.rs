@@ -568,14 +568,74 @@ pub async fn agents_doctor(manager: &ContainerManager, container: Option<String>
 
     if let Some(name) = container {
         let state = find_container(manager, &name).await?;
-        println!("\nContainer context: {}", state.name);
+        println!("\nContainer context: {} ({})", state.name, state.status);
         println!("provider: {}", state.provider);
-        println!("status: {}", state.status);
         if state.status != DevcContainerStatus::Running {
             println!("agent sync action: skipped (container not running)");
         } else {
+            // Inspect container-side agent state
+            match manager.inspect_agents_for_container(&state.id).await {
+                Ok(presences) => {
+                    // Load persisted sync results from metadata
+                    let persisted: Vec<devc_core::agents::AgentSyncResult> = state
+                        .metadata
+                        .get("agent_sync_results")
+                        .and_then(|json| serde_json::from_str(json).ok())
+                        .unwrap_or_default();
+                    let sync_map: std::collections::HashMap<_, _> =
+                        persisted.into_iter().map(|r| (r.agent, r)).collect();
+
+                    for p in &presences {
+                        let status_label =
+                            match (p.container_config_present, p.container_binary_present) {
+                                (true, true) => "on-container",
+                                (true, false) => "partial",
+                                (false, true) => "binary-only",
+                                (false, false) => "absent",
+                            };
+                        let enabled_str = if p.enabled_effective {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        };
+                        let host_str = if p.host_available { "ok" } else { "missing" };
+                        println!(
+                            "- {}: {}, host={}, config={}, binary={}, state={}",
+                            p.agent,
+                            enabled_str,
+                            host_str,
+                            if p.container_config_present {
+                                "yes"
+                            } else {
+                                "no"
+                            },
+                            if p.container_binary_present {
+                                "yes"
+                            } else {
+                                "no"
+                            },
+                            status_label,
+                        );
+                        // Show persisted sync warnings for this agent
+                        if let Some(sync_result) = sync_map.get(&p.agent) {
+                            if !sync_result.warnings.is_empty() {
+                                for w in &sync_result.warnings {
+                                    println!("  last sync: {}", w);
+                                }
+                            }
+                        }
+                        // Show live inspection warnings
+                        for w in &p.warnings {
+                            println!("  warning: {}", w);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to inspect container agents: {}", e);
+                }
+            }
             println!(
-                "agent sync action: ready (run 'devc agents sync {}')",
+                "\nagent sync action: ready (run 'devc agents sync {}')",
                 state.name
             );
         }

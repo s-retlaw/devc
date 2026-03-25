@@ -237,6 +237,8 @@ pub enum AsyncEvent {
         container_id: String,
         container_name: String,
         result: Result<Vec<AgentContainerPresence>, String>,
+        /// Persisted sync results from last `devc up` / agent injection (if any)
+        persisted_sync: Option<Vec<AgentSyncResult>>,
     },
     /// Agent sync completed for a container
     AgentSyncComplete {
@@ -823,8 +825,14 @@ impl App {
                 container_id,
                 container_name,
                 result,
+                persisted_sync,
             } => {
-                self.handle_agent_inspect_complete(container_id, container_name, result);
+                self.handle_agent_inspect_complete(
+                    container_id,
+                    container_name,
+                    result,
+                    persisted_sync,
+                );
             }
             AsyncEvent::ReconnectComplete(result) => {
                 self.handle_reconnect_complete(result).await?;
@@ -847,9 +855,16 @@ impl App {
         container_id: String,
         container_name: String,
         result: Result<Vec<AgentContainerPresence>, String>,
+        persisted_sync: Option<Vec<AgentSyncResult>>,
     ) {
         self.loading = false;
         let previous_selected = self.agent_diagnostics_selected;
+        // Snapshot previous sync results BEFORE clearing rows
+        let previous: HashMap<AgentKind, (Option<AgentSyncResult>, bool)> = self
+            .agent_diagnostics_rows
+            .iter()
+            .map(|r| (r.presence.agent, (r.last_sync.clone(), r.last_sync_forced)))
+            .collect();
         self.agent_diagnostics_container_id = Some(container_id);
         self.agent_diagnostics_container_name = container_name.clone();
         self.agent_diagnostics_title = format!("Agent Diagnostics - {}", container_name);
@@ -858,18 +873,21 @@ impl App {
         self.agent_diagnostics_table_state.select(Some(0));
         match result {
             Ok(presence_rows) => {
-                let previous: HashMap<AgentKind, (Option<AgentSyncResult>, bool)> = self
-                    .agent_diagnostics_rows
-                    .iter()
-                    .map(|r| (r.presence.agent, (r.last_sync.clone(), r.last_sync_forced)))
+                // Build a lookup from persisted sync results (from devc up)
+                let persisted_map: HashMap<AgentKind, AgentSyncResult> = persisted_sync
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| (r.agent, r))
                     .collect();
                 self.agent_diagnostics_rows = presence_rows
                     .into_iter()
                     .map(|presence| {
-                        let (last_sync, last_sync_forced) = previous
-                            .get(&presence.agent)
-                            .cloned()
-                            .unwrap_or((None, false));
+                        let (last_sync, last_sync_forced) =
+                            previous.get(&presence.agent).cloned().unwrap_or_else(|| {
+                                // Fall back to persisted sync results from initial injection
+                                let sync = persisted_map.get(&presence.agent).cloned();
+                                (sync, false)
+                            });
                         AgentPanelRow {
                             presence,
                             last_sync,
@@ -2643,16 +2661,25 @@ impl App {
         let manager = Arc::clone(&self.manager);
         let tx = self.async_event_tx.clone();
         tokio::spawn(async move {
-            let result = manager
-                .read()
-                .await
+            let mgr = manager.read().await;
+            let result = mgr
                 .inspect_agents_for_container(&container_id)
                 .await
                 .map_err(|e| e.to_string());
+            // Load persisted sync results from container state metadata
+            let persisted_sync = mgr
+                .get(&container_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|cs| cs.metadata.get("agent_sync_results").cloned())
+                .and_then(|json| serde_json::from_str::<Vec<AgentSyncResult>>(&json).ok());
+            drop(mgr);
             let _ = tx.send(AsyncEvent::AgentInspectComplete {
                 container_id,
                 container_name,
                 result,
+                persisted_sync,
             });
         });
     }

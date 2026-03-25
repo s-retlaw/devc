@@ -6,6 +6,7 @@ mod inject;
 mod presets;
 
 use devc_config::{AgentConfig, GlobalConfig};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub use host::{
@@ -30,7 +31,7 @@ pub struct EffectiveAgentConfig {
 }
 
 /// Per-agent sync result used by lifecycle logs and CLI diagnostics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSyncResult {
     pub agent: AgentKind,
     pub validated: bool,
@@ -130,12 +131,21 @@ pub fn is_agent_enabled(
 ) -> bool {
     let cfg = agent_config_for_kind(&global_config.agents, kind);
     match cfg.enabled {
-        Some(v) => v,
+        Some(v) => {
+            tracing::debug!(agent = %kind, enabled = v, "Agent explicitly configured");
+            v
+        }
         None => {
             let effective = resolved
                 .cloned()
                 .unwrap_or_else(|| resolve_effective_config(kind, cfg));
-            host::host_config_availability(&effective).0
+            let available = host::host_config_availability(&effective).0;
+            tracing::debug!(
+                agent = %kind,
+                host_available = available,
+                "Agent auto-enable decision (no explicit config)"
+            );
+            available
         }
     }
 }

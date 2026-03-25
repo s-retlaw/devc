@@ -398,6 +398,17 @@ impl ContainerManager {
         send_stage(stage.as_ref(), BuildStage::AgentSetup);
         let results = self.setup_agents_for_container(id).await?;
         let warning_count: usize = results.iter().map(|r| r.warnings.len()).sum();
+
+        // Persist sync results in container state metadata for TUI/CLI diagnostics
+        if let Ok(json) = serde_json::to_string(&results) {
+            let mut state = self.state.write().await;
+            if let Some(cs) = state.get_mut(id) {
+                cs.metadata.insert("agent_sync_results".to_string(), json);
+            }
+            drop(state);
+            let _ = self.save_state().await;
+        }
+
         if warning_count > 0 {
             emit(
                 &progress,
