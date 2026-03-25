@@ -944,3 +944,135 @@ async fn test_operation_result_forget_failure() {
         Some("Forget failed for my-app: state file locked")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Container switch clears stale per-view state
+// ---------------------------------------------------------------------------
+
+/// Switching containers with 'j' clears stale logs, detail, diagnostics, and completed build output
+#[tokio::test]
+async fn test_container_switch_clears_stale_state() {
+    let mut app = app_with_containers();
+
+    // Populate stale per-view state as if the user had opened various views
+    app.logs = vec!["old log line".to_string()];
+    app.logs_scroll = 5;
+    app.container_detail = Some(devc_provider::ContainerDetails {
+        id: ContainerId::new("stale"),
+        name: "stale".to_string(),
+        image: "stale:latest".to_string(),
+        image_id: "sha256:stale".to_string(),
+        status: ContainerStatus::Running,
+        created: 1705320000,
+        started_at: None,
+        finished_at: None,
+        exit_code: None,
+        labels: std::collections::HashMap::new(),
+        env: vec![],
+        mounts: vec![],
+        ports: vec![],
+        network_settings: devc_provider::NetworkSettings {
+            ip_address: None,
+            gateway: None,
+            networks: std::collections::HashMap::new(),
+        },
+    });
+    app.container_detail_scroll = 3;
+    app.agent_diagnostics_container_id = Some("stale-id".to_string());
+    app.agent_diagnostics_container_name = "stale-name".to_string();
+    app.agent_diagnostics_title = "Stale Title".to_string();
+    app.agent_diagnostics_rows = vec![devc_tui::AgentPanelRow {
+        presence: devc_core::agents::AgentContainerPresence {
+            agent: devc_core::agents::AgentKind::Codex,
+            enabled_effective: true,
+            enabled_explicit: Some(true),
+            host_available: true,
+            host_reason: None,
+            container_config_present: true,
+            container_binary_present: true,
+            warnings: vec![],
+        },
+        last_sync: None,
+        last_sync_forced: false,
+    }];
+    app.agent_diagnostics_selected = 1;
+    app.build_output = vec!["Step 1: done".to_string()];
+    app.build_output_scroll = 2;
+    app.build_complete = true;
+
+    // Press 'j' to move to next container
+    app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.selected, 1);
+
+    // Verify all stale state was cleared
+    assert!(app.logs.is_empty(), "logs should be cleared");
+    assert_eq!(app.logs_scroll, 0, "logs_scroll should be reset");
+    assert!(
+        app.container_detail.is_none(),
+        "container_detail should be cleared"
+    );
+    assert_eq!(
+        app.container_detail_scroll, 0,
+        "container_detail_scroll should be reset"
+    );
+    assert!(
+        app.agent_diagnostics_container_id.is_none(),
+        "diagnostics container_id should be cleared"
+    );
+    assert!(
+        app.agent_diagnostics_container_name.is_empty(),
+        "diagnostics container_name should be cleared"
+    );
+    assert!(
+        app.agent_diagnostics_title.is_empty(),
+        "diagnostics title should be cleared"
+    );
+    assert!(
+        app.agent_diagnostics_rows.is_empty(),
+        "diagnostics rows should be cleared"
+    );
+    assert_eq!(
+        app.agent_diagnostics_selected, 0,
+        "diagnostics selected should be reset"
+    );
+    assert!(
+        app.build_output.is_empty(),
+        "completed build output should be cleared"
+    );
+    assert_eq!(
+        app.build_output_scroll, 0,
+        "build_output_scroll should be reset"
+    );
+    assert!(app.build_auto_scroll, "build_auto_scroll should be reset");
+    assert!(!app.build_complete, "build_complete should be reset");
+}
+
+/// Switching containers preserves build output when a build is actively in progress
+#[tokio::test]
+async fn test_container_switch_preserves_active_build() {
+    let mut app = app_with_containers();
+
+    // Simulate an active build (build_complete = false, non-empty output)
+    app.build_output = vec!["Step 1/3: pulling...".to_string()];
+    app.build_output_scroll = 1;
+    app.build_complete = false;
+
+    // Press 'j' to switch containers
+    app.send_key(KeyCode::Char('j'), KeyModifiers::NONE)
+        .await
+        .unwrap();
+    assert_eq!(app.selected, 1);
+
+    // Build output should be preserved since it's actively in progress
+    assert_eq!(
+        app.build_output.len(),
+        1,
+        "active build output should be preserved"
+    );
+    assert_eq!(
+        app.build_output_scroll, 1,
+        "active build scroll should be preserved"
+    );
+}

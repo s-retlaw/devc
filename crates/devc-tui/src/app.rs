@@ -1881,27 +1881,43 @@ impl App {
                 // Navigation
                 KeyCode::Char('j') | KeyCode::Down => {
                     if !self.containers.is_empty() {
+                        let prev = self.selected;
                         self.selected = (self.selected + 1) % self.containers.len();
                         self.containers_table_state.select(Some(self.selected));
+                        if self.selected != prev {
+                            self.on_container_switch();
+                        }
                     }
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     if !self.containers.is_empty() {
+                        let prev = self.selected;
                         self.selected = self
                             .selected
                             .checked_sub(1)
                             .unwrap_or(self.containers.len() - 1);
                         self.containers_table_state.select(Some(self.selected));
+                        if self.selected != prev {
+                            self.on_container_switch();
+                        }
                     }
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
+                    let prev = self.selected;
                     self.selected = 0;
                     self.containers_table_state.select(Some(0));
+                    if self.selected != prev {
+                        self.on_container_switch();
+                    }
                 }
                 KeyCode::Char('G') | KeyCode::End => {
                     if !self.containers.is_empty() {
+                        let prev = self.selected;
                         self.selected = self.containers.len() - 1;
                         self.containers_table_state.select(Some(self.selected));
+                        if self.selected != prev {
+                            self.on_container_switch();
+                        }
                     }
                 }
 
@@ -3493,7 +3509,9 @@ impl App {
         // 8. Reset terminal before resuming TUI
         crate::shell::reset_terminal();
 
-        // 9. Return to main view
+        // 9. Return to main view (preserve per-view state — user is still
+        //    on the same container; stale data is cleared by on_container_switch
+        //    when they navigate to a different container with j/k/g/G)
         self.shell_state.active_shell_container = None;
         self.view = View::Main;
 
@@ -4137,6 +4155,50 @@ impl App {
                 self.agent_diagnostics_table_state.select(Some(0));
             }
             _ => {}
+        }
+    }
+
+    /// Reset all per-view cached state when the user switches containers.
+    /// This prevents stale data (logs, detail, diagnostics, etc.) from
+    /// bleeding across containers.
+    fn on_container_switch(&mut self) {
+        // Logs
+        self.logs.clear();
+        self.logs_scroll = 0;
+
+        // Container detail
+        self.container_detail = None;
+        self.container_detail_scroll = 0;
+
+        // Compose (reset service selection + logs service name)
+        self.compose_state.reset_detail();
+        self.compose_state.reset_logs();
+
+        // Port forwarding (per-view only; persistent forwarders untouched)
+        self.port_state.clear_view_state();
+
+        // Agent diagnostics
+        self.agent_diagnostics_container_id = None;
+        self.agent_diagnostics_container_name.clear();
+        self.agent_diagnostics_title.clear();
+        self.agent_diagnostics_rows.clear();
+        self.agent_diagnostics_selected = 0;
+        self.agent_diagnostics_table_state.select(Some(0));
+
+        // Build output (only if no active build in progress)
+        if self.build_complete || self.build_output.is_empty() {
+            self.build_output.clear();
+            self.build_output_scroll = 0;
+            self.build_auto_scroll = true;
+            self.build_complete = false;
+            self.current_build_stage = None;
+            self.last_stage_marker = None;
+        }
+
+        // Up output (only if no active container operation)
+        if self.container_op.is_none() {
+            self.up_output.clear();
+            self.up_output_expanded = false;
         }
     }
 
