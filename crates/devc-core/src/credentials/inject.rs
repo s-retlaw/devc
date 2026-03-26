@@ -22,6 +22,8 @@ pub struct CredentialStatus {
     pub helpers_injected: bool,
     /// GitHub CLI token resolved from the host, if any
     pub gh_token: Option<String>,
+    /// True if git identity (user.name/email) was injected
+    pub git_identity_injected: bool,
 }
 
 /// Docker credential helper script template.
@@ -150,6 +152,13 @@ pub async fn setup_credentials(
     // Inject helpers (idempotent — skips if already injected)
     let helpers_injected = inject_helpers(provider, container_id, user).await?;
 
+    // Inject git identity (user.name/email) from host (idempotent)
+    let git_identity_injected = if global_config.credentials.git {
+        inject_git_identity(provider, container_id, user).await
+    } else {
+        false
+    };
+
     // Refresh credential cache in tmpfs
     let (docker_registries, git_hosts, gh_token) =
         refresh_credentials(provider, container_id, global_config, workspace_path).await?;
@@ -159,6 +168,7 @@ pub async fn setup_credentials(
         git_hosts,
         helpers_injected,
         gh_token,
+        git_identity_injected,
     })
 }
 
@@ -414,6 +424,67 @@ async fn set_container_git_credential_helper(
 
     exec_script(provider, container_id, script, user).await?;
     Ok(())
+}
+
+/// Inject git identity (user.name and user.email) from the host into the container.
+///
+/// Idempotent: skips if the container already has user.name set.
+/// Returns `true` if identity was newly injected.
+async fn inject_git_identity(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    user: Option<&str>,
+) -> bool {
+    // Check if identity is already set in the container
+    let existing = exec_script_with_output(
+        provider,
+        container_id,
+        "git config --global user.name 2>/dev/null || true",
+        user,
+    )
+    .await;
+
+    if existing
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        tracing::debug!("Git identity already configured in container, skipping");
+        return false;
+    }
+
+    // Resolve identity from the host
+    let identity = match host::resolve_git_identity() {
+        Some(id) => id,
+        None => {
+            tracing::debug!("No git identity found on host, skipping injection");
+            return false;
+        }
+    };
+
+    // Shell-escape the values for safe injection
+    let escaped_name = shell_escape_single_quotes(&identity.name);
+    let escaped_email = shell_escape_single_quotes(&identity.email);
+
+    let script = format!(
+        "git config --global user.name '{}' 2>/dev/null && git config --global user.email '{}' 2>/dev/null || true",
+        escaped_name, escaped_email
+    );
+
+    match exec_script(provider, container_id, &script, user).await {
+        Ok(()) => {
+            tracing::info!(
+                "Injected git identity: {} <{}>",
+                identity.name,
+                identity.email
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!("Failed to inject git identity (non-fatal): {}", e);
+            false
+        }
+    }
 }
 
 /// Write a script to the container using base64 encoding (same pattern as ssh.rs)

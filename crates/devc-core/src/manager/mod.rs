@@ -51,6 +51,8 @@ pub struct ExecEnv {
     pub docker_registries: usize,
     /// Number of Git hosts with forwarded credentials.
     pub git_hosts: usize,
+    /// True if git identity (user.name/email) was injected from host.
+    pub git_identity_injected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,21 +392,27 @@ impl ContainerManager {
             .ok()
             .and_then(|c| c.devcontainer.effective_user().map(|s| s.to_string()));
 
-        let (gh_token, docker_registries, git_hosts) = match crate::credentials::setup_credentials(
-            provider,
-            &live_container_id,
-            &self.global_config,
-            user.as_deref(),
-            &container_state.workspace_path,
-        )
-        .await
-        {
-            Ok(status) => (status.gh_token, status.docker_registries, status.git_hosts),
-            Err(e) => {
-                tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
-                (None, 0, 0)
-            }
-        };
+        let (gh_token, docker_registries, git_hosts, git_identity_injected) =
+            match crate::credentials::setup_credentials(
+                provider,
+                &live_container_id,
+                &self.global_config,
+                user.as_deref(),
+                &container_state.workspace_path,
+            )
+            .await
+            {
+                Ok(status) => (
+                    status.gh_token,
+                    status.docker_registries,
+                    status.git_hosts,
+                    status.git_identity_injected,
+                ),
+                Err(e) => {
+                    tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+                    (None, 0, 0, false)
+                }
+            };
 
         // Touch last-used timestamp
         {
@@ -419,6 +427,7 @@ impl ContainerManager {
             gh_token,
             docker_registries,
             git_hosts,
+            git_identity_injected,
         })
     }
 

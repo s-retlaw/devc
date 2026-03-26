@@ -167,10 +167,15 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
 
 /// Print a one-line credential forwarding status
 fn print_credential_status(exec_env: &devc_core::ExecEnv) {
-    if exec_env.docker_registries > 0 || exec_env.git_hosts > 0 {
+    if exec_env.docker_registries > 0 || exec_env.git_hosts > 0 || exec_env.git_identity_injected {
+        let identity_note = if exec_env.git_identity_injected {
+            " (git identity forwarded)"
+        } else {
+            ""
+        };
         eprintln!(
-            "Forwarding credentials: {} Docker registries, {} Git hosts",
-            exec_env.docker_registries, exec_env.git_hosts
+            "Forwarding credentials: {} Docker registries, {} Git hosts{}",
+            exec_env.docker_registries, exec_env.git_hosts, identity_note
         );
     } else {
         eprintln!("No host credentials found (run 'docker login' to store Docker credentials)");

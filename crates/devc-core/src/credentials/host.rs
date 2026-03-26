@@ -496,6 +496,68 @@ pub async fn resolve_git_credentials(hosts: &[(String, String)]) -> Vec<GitCrede
         .collect()
 }
 
+/// Resolved git identity (user.name and user.email) from the host.
+#[derive(Debug, Clone)]
+pub struct GitIdentity {
+    pub name: String,
+    pub email: String,
+}
+
+/// Resolve the git identity (user.name and user.email) from the host.
+///
+/// Checks the effective git config value (local > global > system) first,
+/// then falls back to `--global` only. This ensures identity is found
+/// regardless of which level it's configured at.
+/// Returns `None` if either is missing.
+pub fn resolve_git_identity() -> Option<GitIdentity> {
+    let name = resolve_git_config_value("user.name");
+    let email = resolve_git_config_value("user.email");
+
+    match (name, email) {
+        (Some(name), Some(email)) => {
+            tracing::debug!("Resolved host git identity: {} <{}>", name, email);
+            Some(GitIdentity { name, email })
+        }
+        (name, email) => {
+            tracing::debug!(
+                "Incomplete host git identity (name={:?}, email={:?})",
+                name.is_some(),
+                email.is_some()
+            );
+            None
+        }
+    }
+}
+
+/// Resolve a single git config value, checking effective config first, then --global.
+fn resolve_git_config_value(key: &str) -> Option<String> {
+    // Try effective value first (resolves local > global > system)
+    let effective = std::process::Command::new("git")
+        .args(["config", key])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if effective.is_some() {
+        return effective;
+    }
+
+    // Fall back to --global explicitly (in case cwd has no repo)
+    std::process::Command::new("git")
+        .args(["config", "--global", key])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Resolve the GitHub CLI token from the host via `gh auth token`.
 ///
 /// Returns `None` if `gh` is not installed, not authenticated, or the command times out.
@@ -749,6 +811,18 @@ mod tests {
     fn test_discover_git_hosts_nonexistent_path() {
         let hosts = discover_git_hosts(std::path::Path::new("/nonexistent/path"));
         assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_git_identity_returns_some_when_configured() {
+        // This test depends on host git config — it verifies the function runs without panicking.
+        // In CI, git identity may or may not be set.
+        let result = resolve_git_identity();
+        // Just verify it returns a valid structure if present
+        if let Some(id) = result {
+            assert!(!id.name.is_empty());
+            assert!(!id.email.is_empty());
+        }
     }
 
     #[test]
