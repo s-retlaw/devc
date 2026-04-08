@@ -383,6 +383,57 @@ async fn inject_cursor_auth_file(
     Ok(())
 }
 
+/// Escape a string for use in a sed substitution pattern (using `|` as delimiter).
+fn sed_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('&', "\\&")
+}
+
+/// Rewrite host home paths to container home paths in Claude config files.
+///
+/// After copying `~/.claude.json` from the host, absolute paths referencing the
+/// host user's home directory (e.g. `/home/walter`) are invalid inside the
+/// container (e.g. `/home/vscode`).  This runs `sed -i` to fix them up.
+async fn rewrite_claude_paths(
+    provider: &dyn ContainerProvider,
+    container_id: &ContainerId,
+    container_home: &str,
+    host_home: &str,
+) -> Result<(), String> {
+    let claude_json = format!(
+        "{}/{}",
+        container_home.trim_end_matches('/'),
+        ".claude.json"
+    );
+    let q_file = shell_escape_single_quotes(&claude_json);
+    let escaped_old = sed_escape(&shell_escape_single_quotes(host_home.trim_end_matches('/')));
+    let escaped_new = sed_escape(&shell_escape_single_quotes(
+        container_home.trim_end_matches('/'),
+    ));
+
+    let script = format!(
+        "if [ -f '{q_file}' ]; then sed -i 's|{escaped_old}|{escaped_new}|g' '{q_file}'; fi"
+    );
+
+    tracing::debug!(
+        host_home = %host_home,
+        container_home = %container_home,
+        "Rewriting Claude config paths"
+    );
+
+    exec_script(
+        provider,
+        container_id,
+        &script,
+        Some("root"),
+        &HashMap::new(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("Failed to rewrite Claude config paths: {}", e))
+}
+
 fn explicit_enabled_override(global_config: &GlobalConfig, kind: AgentKind) -> Option<bool> {
     match kind {
         AgentKind::Codex => global_config.agents.codex.enabled,
@@ -557,6 +608,20 @@ async fn sync_single_agent(
             result
                 .warnings
                 .push("Cursor token resolution unavailable; skipped ~/.config/cursor/auth.json materialization".to_string());
+        }
+    }
+
+    if cfg.kind == AgentKind::Claude {
+        if let Ok(host_home) = std::env::var("HOME") {
+            if host_home.trim_end_matches('/') != container_home.trim_end_matches('/') {
+                if let Err(e) =
+                    rewrite_claude_paths(provider, container_id, container_home, &host_home).await
+                {
+                    result
+                        .warnings
+                        .push(format!("Claude path rewriting: {}", e));
+                }
+            }
         }
     }
 
@@ -1058,5 +1123,93 @@ mod tests {
             "expected cursor auth.json to be copied; got {:?}",
             copy_dests
         );
+    }
+
+    #[tokio::test]
+    async fn test_claude_sync_rewrites_home_paths() {
+        let _guard = HOME_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create host .claude dir and .claude.json
+        let host_claude_dir = tmp.path().join("claude");
+        std::fs::create_dir_all(&host_claude_dir).unwrap();
+        std::fs::write(host_claude_dir.join(".credentials.json"), "{}").unwrap();
+        let host_claude_json = tmp.path().join(".claude.json");
+        std::fs::write(&host_claude_json, "{}").unwrap();
+
+        let mut cfg = GlobalConfig::default();
+        cfg.agents.claude.enabled = Some(true);
+        cfg.agents.codex.enabled = Some(false);
+        cfg.agents.cursor.enabled = Some(false);
+        cfg.agents.gemini.enabled = Some(false);
+        cfg.agents.claude.host_config_path = Some(host_claude_dir.display().to_string());
+        cfg.agents.claude.container_config_path = Some("/tmp/.claude".to_string());
+
+        // Override HOME to a known value that differs from the container home
+        let old_home = std::env::var("HOME").ok();
+        // SAFETY: test-local HOME override; restored before test exits.
+        unsafe { std::env::set_var("HOME", "/home/testhost") };
+
+        let mock = MockProvider::new(ProviderType::Docker);
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "/home/vscode".to_string())); // HOME probe -> container home
+        mock.exec_responses
+            .lock()
+            .unwrap()
+            .push((0, "vscode".to_string())); // user probe
+                                              // Primary .claude dir sync
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
+                                                                      // Extra .claude.json sync
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // mkdir
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chown
+        mock.exec_responses.lock().unwrap().push((0, String::new())); // chmod
+                                                                      // Claude path rewriting (sed)
+        mock.exec_responses.lock().unwrap().push((0, String::new()));
+        // PATH bootstrap
+        mock.exec_responses.lock().unwrap().push((0, String::new()));
+        // binary probe (already installed)
+        mock.exec_responses.lock().unwrap().push((0, String::new()));
+
+        let results = setup_agents(&mock, &ContainerId::new("cid"), &cfg, Some("vscode")).await;
+
+        // Restore HOME
+        if let Some(old) = old_home {
+            // SAFETY: restore HOME after test.
+            unsafe { std::env::set_var("HOME", old) };
+        } else {
+            // SAFETY: restore HOME to unset state after test.
+            unsafe { std::env::remove_var("HOME") };
+        }
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].validated);
+        assert!(results[0].copied);
+
+        // Verify that a sed command was issued to rewrite paths
+        let calls = mock.get_calls();
+        let exec_cmds: Vec<String> = calls
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::Exec { cmd, .. } => Some(cmd.join(" ")),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            exec_cmds.iter().any(|c| c.contains("sed")),
+            "expected a sed command for path rewriting; got exec calls: {:?}",
+            exec_cmds
+        );
+    }
+
+    #[test]
+    fn test_sed_escape() {
+        assert_eq!(sed_escape("/home/user"), "/home/user");
+        assert_eq!(sed_escape("a|b"), "a\\|b");
+        assert_eq!(sed_escape("a&b"), "a\\&b");
+        assert_eq!(sed_escape("a\\b"), "a\\\\b");
     }
 }
