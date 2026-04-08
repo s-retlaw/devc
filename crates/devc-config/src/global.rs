@@ -57,6 +57,8 @@ pub struct CredentialsConfig {
     pub git: bool,
     /// Forward GitHub CLI (`gh`) token into containers (default: true)
     pub gh: bool,
+    /// Forward SSH agent socket into containers (default: true)
+    pub ssh_agent: bool,
 }
 
 impl Default for CredentialsConfig {
@@ -65,6 +67,7 @@ impl Default for CredentialsConfig {
             docker: true,
             git: true,
             gh: true,
+            ssh_agent: true,
         }
     }
 }

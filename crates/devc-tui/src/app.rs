@@ -3190,6 +3190,9 @@ impl App {
         if let Some(token) = exec_env.gh_token {
             shell_env.insert("GH_TOKEN".to_string(), token);
         }
+        if let Some(sock) = exec_env.ssh_auth_sock {
+            shell_env.insert("SSH_AUTH_SOCK".to_string(), sock);
+        }
 
         // Resolve effective user and working dir: metadata > devcontainer.json
         let parsed = Container::from_config(&container.config_path).ok();

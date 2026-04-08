@@ -7,5 +7,7 @@
 pub mod host;
 pub mod inject;
 
-pub use host::discover_git_hosts;
+pub use host::{
+    discover_git_hosts, resolve_ssh_agent_socket, SshAgentSocket, SSH_AGENT_CONTAINER_PATH,
+};
 pub use inject::{setup_credentials, CredentialStatus};

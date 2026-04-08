@@ -167,15 +167,24 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
 
 /// Print a one-line credential forwarding status
 fn print_credential_status(exec_env: &devc_core::ExecEnv) {
-    if exec_env.docker_registries > 0 || exec_env.git_hosts > 0 || exec_env.git_identity_injected {
+    if exec_env.docker_registries > 0
+        || exec_env.git_hosts > 0
+        || exec_env.git_identity_injected
+        || exec_env.ssh_auth_sock.is_some()
+    {
         let identity_note = if exec_env.git_identity_injected {
             " (git identity forwarded)"
         } else {
             ""
         };
+        let ssh_note = if exec_env.ssh_auth_sock.is_some() {
+            " + SSH agent"
+        } else {
+            ""
+        };
         eprintln!(
-            "Forwarding credentials: {} Docker registries, {} Git hosts{}",
-            exec_env.docker_registries, exec_env.git_hosts, identity_note
+            "Forwarding credentials: {} Docker registries, {} Git hosts{}{}",
+            exec_env.docker_registries, exec_env.git_hosts, identity_note, ssh_note
         );
     } else {
         eprintln!("No host credentials found (run 'docker login' to store Docker credentials)");
@@ -192,6 +201,9 @@ fn build_shell_extra_env(
     }
     if let Some(ref token) = exec_env.gh_token {
         env.insert("GH_TOKEN".to_string(), token.clone());
+    }
+    if let Some(ref sock) = exec_env.ssh_auth_sock {
+        env.insert("SSH_AUTH_SOCK".to_string(), sock.clone());
     }
     env
 }

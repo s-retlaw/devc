@@ -640,6 +640,73 @@ pub fn build_docker_config_json(auths: &HashMap<String, DockerAuth>) -> String {
     serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Resolved SSH agent socket paths for bind-mounting into a container.
+#[derive(Debug, Clone)]
+pub struct SshAgentSocket {
+    /// Source path on the host (for the bind mount source).
+    pub host_source: String,
+    /// Target path inside the container (for the bind mount target + SSH_AUTH_SOCK env var).
+    pub container_target: String,
+}
+
+/// Fixed container-side path for the forwarded SSH agent socket.
+pub const SSH_AGENT_CONTAINER_PATH: &str = "/run/host-ssh-agent.sock";
+
+/// Docker Desktop magic path that tunnels to the host SSH agent.
+#[cfg(target_os = "macos")]
+const DOCKER_DESKTOP_SSH_SOCKET: &str = "/run/host-services/ssh-auth.sock";
+
+/// Detect the host SSH agent socket and return mount configuration.
+///
+/// Returns `None` if `$SSH_AUTH_SOCK` is not set, the socket doesn't exist,
+/// or the platform/provider combination is unsupported.
+pub fn resolve_ssh_agent_socket(
+    provider_type: devc_provider::ProviderType,
+) -> Option<SshAgentSocket> {
+    // macOS + Docker Desktop: use the magic path (Docker tunnels automatically)
+    #[cfg(target_os = "macos")]
+    {
+        if provider_type == devc_provider::ProviderType::Docker {
+            if std::env::var("SSH_AUTH_SOCK")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .is_some()
+            {
+                tracing::debug!("macOS Docker Desktop: using magic SSH agent socket");
+                return Some(SshAgentSocket {
+                    host_source: DOCKER_DESKTOP_SSH_SOCKET.to_string(),
+                    container_target: DOCKER_DESKTOP_SSH_SOCKET.to_string(),
+                });
+            }
+            return None;
+        }
+        tracing::debug!("SSH agent forwarding not supported for Podman on macOS");
+        return None;
+    }
+
+    // Linux: bind-mount the actual socket
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = provider_type;
+        let sock_path = std::env::var("SSH_AUTH_SOCK")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let path = std::path::Path::new(&sock_path);
+        if !path.exists() {
+            tracing::debug!(
+                path = %sock_path,
+                "SSH_AUTH_SOCK set but socket doesn't exist, skipping"
+            );
+            return None;
+        }
+        tracing::debug!(path = %sock_path, "Detected host SSH agent socket");
+        Some(SshAgentSocket {
+            host_source: sock_path,
+            container_target: SSH_AGENT_CONTAINER_PATH.to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,5 +902,86 @@ mod tests {
         assert!(!is_valid_helper_name("foo;rm -rf /"));
         assert!(!is_valid_helper_name("../../evil"));
         assert!(!is_valid_helper_name("helper name"));
+    }
+
+    #[test]
+    fn test_ssh_agent_container_path_is_absolute() {
+        assert!(SSH_AGENT_CONTAINER_PATH.starts_with('/'));
+    }
+
+    #[test]
+    fn test_resolve_ssh_agent_no_env() {
+        let original = std::env::var("SSH_AUTH_SOCK").ok();
+        // SAFETY: test-local env override; restored before test exits.
+        unsafe { std::env::remove_var("SSH_AUTH_SOCK") };
+        let result = resolve_ssh_agent_socket(devc_provider::ProviderType::Docker);
+        if let Some(v) = original {
+            // SAFETY: restore after test.
+            unsafe { std::env::set_var("SSH_AUTH_SOCK", v) };
+        }
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_ssh_agent_empty_env() {
+        let original = std::env::var("SSH_AUTH_SOCK").ok();
+        // SAFETY: test-local env override; restored before test exits.
+        unsafe { std::env::set_var("SSH_AUTH_SOCK", "") };
+        let result = resolve_ssh_agent_socket(devc_provider::ProviderType::Docker);
+        if let Some(v) = original {
+            // SAFETY: restore after test.
+            unsafe { std::env::set_var("SSH_AUTH_SOCK", v) };
+        } else {
+            // SAFETY: restore to unset state.
+            unsafe { std::env::remove_var("SSH_AUTH_SOCK") };
+        }
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_ssh_agent_nonexistent_socket() {
+        let original = std::env::var("SSH_AUTH_SOCK").ok();
+        // SAFETY: test-local env override; restored before test exits.
+        unsafe { std::env::set_var("SSH_AUTH_SOCK", "/tmp/devc-test-nonexistent-ssh-agent.sock") };
+        let result = resolve_ssh_agent_socket(devc_provider::ProviderType::Docker);
+        if let Some(v) = original {
+            // SAFETY: restore after test.
+            unsafe { std::env::set_var("SSH_AUTH_SOCK", v) };
+        } else {
+            // SAFETY: restore to unset state.
+            unsafe { std::env::remove_var("SSH_AUTH_SOCK") };
+        }
+        // On Linux: socket doesn't exist, should return None
+        // On macOS + Docker: uses magic path regardless, so may return Some
+        #[cfg(not(target_os = "macos"))]
+        assert!(result.is_none());
+        #[cfg(target_os = "macos")]
+        let _ = result; // macOS Docker Desktop path doesn't check existence
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn test_resolve_ssh_agent_real_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock_path = tmp.path().join("agent.sock");
+        // Create a Unix socket to simulate an SSH agent
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+
+        let original = std::env::var("SSH_AUTH_SOCK").ok();
+        // SAFETY: test-local env override; restored before test exits.
+        unsafe { std::env::set_var("SSH_AUTH_SOCK", sock_path.to_str().unwrap()) };
+        let result = resolve_ssh_agent_socket(devc_provider::ProviderType::Docker);
+        if let Some(v) = original {
+            // SAFETY: restore after test.
+            unsafe { std::env::set_var("SSH_AUTH_SOCK", v) };
+        } else {
+            // SAFETY: restore to unset state.
+            unsafe { std::env::remove_var("SSH_AUTH_SOCK") };
+        }
+        drop(listener);
+
+        let resolved = result.expect("should resolve when socket exists");
+        assert_eq!(resolved.host_source, sock_path.to_str().unwrap());
+        assert_eq!(resolved.container_target, SSH_AGENT_CONTAINER_PATH);
     }
 }

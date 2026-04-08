@@ -53,6 +53,8 @@ pub struct ExecEnv {
     pub git_hosts: usize,
     /// True if git identity (user.name/email) was injected from host.
     pub git_identity_injected: bool,
+    /// SSH_AUTH_SOCK container-side path, if SSH agent forwarding is active.
+    pub ssh_auth_sock: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +416,13 @@ impl ContainerManager {
                 }
             };
 
+        let ssh_auth_sock = if self.global_config.credentials.ssh_agent {
+            crate::credentials::resolve_ssh_agent_socket(container_state.provider)
+                .map(|s| s.container_target)
+        } else {
+            None
+        };
+
         // Touch last-used timestamp
         {
             let mut state = self.state.write().await;
@@ -428,6 +437,7 @@ impl ContainerManager {
             docker_registries,
             git_hosts,
             git_identity_injected,
+            ssh_auth_sock,
         })
     }
 
@@ -723,6 +733,24 @@ impl ContainerManager {
                 target: crate::credentials::inject::CREDS_TMPFS_PATH.to_string(),
                 read_only: false,
             });
+        }
+
+        // Add SSH agent socket bind mount if available and enabled
+        if self.global_config.credentials.ssh_agent {
+            if let Some(ssh_agent) =
+                crate::credentials::resolve_ssh_agent_socket(container_state.provider)
+            {
+                create_config.mounts.push(devc_provider::MountConfig {
+                    mount_type: devc_provider::MountType::Bind,
+                    source: ssh_agent.host_source,
+                    target: ssh_agent.container_target.clone(),
+                    read_only: false,
+                });
+                create_config
+                    .env
+                    .insert("SSH_AUTH_SOCK".to_string(), ssh_agent.container_target);
+                tracing::info!("SSH agent socket will be forwarded into container");
+            }
         }
 
         // Clean up any orphaned container with the same name before creating
