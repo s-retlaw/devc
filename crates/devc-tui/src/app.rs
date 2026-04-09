@@ -2943,7 +2943,7 @@ impl App {
                     p.is_active = p.provider_type == provider_type;
                 }
 
-                self.containers = self.manager.read().await.list().await?;
+                self.refresh_containers().await?;
                 self.status_message = Some(format!("Connected to {}", provider_type));
             }
             Err(e) => {
@@ -3556,14 +3556,7 @@ impl App {
             }
         }
 
-        // Ensure selected index is valid
-        if !self.containers.is_empty() && self.selected >= self.containers.len() {
-            self.selected = self.containers.len() - 1;
-        }
-        // Sync table state
-        if !self.containers.is_empty() {
-            self.containers_table_state.select(Some(self.selected));
-        }
+        self.sort_and_preserve_selection();
 
         // Invalidate stale compose_services entries for containers that no longer exist
         let container_ids: HashSet<String> = self.containers.iter().map(|c| c.id.clone()).collect();
@@ -3572,6 +3565,45 @@ impl App {
             .retain(|id, _| container_ids.contains(id));
 
         Ok(())
+    }
+
+    /// Sort container list by status/name and preserve the selected container by ID.
+    ///
+    /// Called after any operation that may change container order (refresh, reconnect, etc.)
+    fn sort_and_preserve_selection(&mut self) {
+        let prev_selected_id = self.containers.get(self.selected).map(|c| c.id.clone());
+
+        self.containers.sort_by(|a, b| {
+            let status_ord = |s: DevcContainerStatus| -> u8 {
+                match s {
+                    DevcContainerStatus::Running => 0,
+                    DevcContainerStatus::Building => 1,
+                    DevcContainerStatus::Built => 2,
+                    DevcContainerStatus::Created => 3,
+                    DevcContainerStatus::Stopped => 4,
+                    DevcContainerStatus::Configured => 5,
+                    DevcContainerStatus::Failed => 6,
+                    DevcContainerStatus::Available => 7,
+                }
+            };
+            status_ord(a.status)
+                .cmp(&status_ord(b.status))
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        if let Some(prev_id) = prev_selected_id {
+            if let Some(pos) = self.containers.iter().position(|c| c.id == prev_id) {
+                self.selected = pos;
+            }
+        }
+
+        if !self.containers.is_empty() && self.selected >= self.containers.len() {
+            self.selected = self.containers.len() - 1;
+        }
+        if !self.containers.is_empty() {
+            self.containers_table_state.select(Some(self.selected));
+        }
     }
 
     /// Refresh discovered containers list
@@ -4247,7 +4279,7 @@ impl App {
                 }
 
                 // Refresh container list
-                self.containers = self.manager.read().await.list().await?;
+                self.refresh_containers().await?;
 
                 self.status_message = Some(format!("Connected to {}", provider_type));
             }
@@ -4417,5 +4449,127 @@ mod tests {
         let manager = app.manager.read().await;
         assert_eq!(manager.global_config().agents.cursor.enabled, Some(false));
         assert!(!manager.global_config().credentials.git);
+    }
+
+    #[test]
+    fn test_sort_and_preserve_selection_stable_order() {
+        let mut app = App::new_for_testing();
+        // Add containers in unsorted order: stopped, running, configured
+        app.containers.push(App::create_test_container(
+            "beta",
+            DevcContainerStatus::Stopped,
+        ));
+        app.containers.push(App::create_test_container(
+            "alpha",
+            DevcContainerStatus::Running,
+        ));
+        app.containers.push(App::create_test_container(
+            "gamma",
+            DevcContainerStatus::Configured,
+        ));
+        app.selected = 0; // beta (Stopped)
+
+        app.sort_and_preserve_selection();
+
+        // Running first, then Stopped, then Configured
+        assert_eq!(app.containers[0].name, "alpha"); // Running
+        assert_eq!(app.containers[1].name, "beta"); // Stopped
+        assert_eq!(app.containers[2].name, "gamma"); // Configured
+                                                     // Selection should follow beta to its new position (index 1)
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.containers_table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_sort_and_preserve_selection_after_status_change() {
+        let mut app = App::new_for_testing();
+        // Two running containers
+        app.containers.push(App::create_test_container(
+            "alpha",
+            DevcContainerStatus::Running,
+        ));
+        app.containers.push(App::create_test_container(
+            "beta",
+            DevcContainerStatus::Running,
+        ));
+        app.selected = 1; // beta selected
+
+        app.sort_and_preserve_selection();
+        assert_eq!(app.selected, 1); // beta is still index 1 (alpha < beta)
+
+        // Now beta stops — simulate a status change
+        app.containers[1].status = DevcContainerStatus::Stopped;
+
+        app.sort_and_preserve_selection();
+
+        // alpha (Running) should be first, beta (Stopped) second
+        assert_eq!(app.containers[0].name, "alpha");
+        assert_eq!(app.containers[1].name, "beta");
+        // Selection should follow beta to index 1
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn test_sort_and_preserve_selection_container_removed() {
+        let mut app = App::new_for_testing();
+        app.containers.push(App::create_test_container(
+            "alpha",
+            DevcContainerStatus::Running,
+        ));
+        app.containers.push(App::create_test_container(
+            "beta",
+            DevcContainerStatus::Running,
+        ));
+        app.containers.push(App::create_test_container(
+            "gamma",
+            DevcContainerStatus::Stopped,
+        ));
+        app.selected = 2; // gamma selected
+
+        // Remove gamma (simulating a delete)
+        app.containers.retain(|c| c.name != "gamma");
+
+        app.sort_and_preserve_selection();
+
+        // gamma is gone, selected should clamp to last valid index
+        assert_eq!(app.containers.len(), 2);
+        assert!(app.selected < app.containers.len());
+    }
+
+    #[test]
+    fn test_sort_and_preserve_selection_empty_list() {
+        let mut app = App::new_for_testing();
+        app.selected = 0;
+
+        // Should not panic on empty list
+        app.sort_and_preserve_selection();
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn test_sort_deterministic_same_status() {
+        let mut app = App::new_for_testing();
+        // Three containers with same status — should sort by name
+        app.containers.push(App::create_test_container(
+            "charlie",
+            DevcContainerStatus::Running,
+        ));
+        app.containers.push(App::create_test_container(
+            "alpha",
+            DevcContainerStatus::Running,
+        ));
+        app.containers.push(App::create_test_container(
+            "bravo",
+            DevcContainerStatus::Running,
+        ));
+        app.selected = 0; // charlie
+
+        app.sort_and_preserve_selection();
+
+        assert_eq!(app.containers[0].name, "alpha");
+        assert_eq!(app.containers[1].name, "bravo");
+        assert_eq!(app.containers[2].name, "charlie");
+        // charlie moved from 0 to 2
+        assert_eq!(app.selected, 2);
     }
 }
