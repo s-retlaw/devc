@@ -3532,6 +3532,10 @@ impl App {
 
     /// Refresh container list
     async fn refresh_containers(&mut self) -> AppResult<()> {
+        // Capture the selected container's ID BEFORE replacing the list,
+        // since self.selected is an index into the current (sorted) list.
+        let prev_selected_id = self.containers.get(self.selected).map(|c| c.id.clone());
+
         self.containers = self.manager.read().await.list().await?;
 
         // Sync status for all registered containers
@@ -3556,7 +3560,7 @@ impl App {
             }
         }
 
-        self.sort_and_preserve_selection();
+        self.sort_and_preserve_selection(prev_selected_id);
 
         // Invalidate stale compose_services entries for containers that no longer exist
         let container_ids: HashSet<String> = self.containers.iter().map(|c| c.id.clone()).collect();
@@ -3570,8 +3574,9 @@ impl App {
     /// Sort container list by status/name and preserve the selected container by ID.
     ///
     /// Called after any operation that may change container order (refresh, reconnect, etc.)
-    fn sort_and_preserve_selection(&mut self) {
-        let prev_selected_id = self.containers.get(self.selected).map(|c| c.id.clone());
+    fn sort_and_preserve_selection(&mut self, prev_selected_id: Option<String>) {
+        let prev_selected_id =
+            prev_selected_id.or_else(|| self.containers.get(self.selected).map(|c| c.id.clone()));
 
         self.containers.sort_by(|a, b| {
             let status_ord = |s: DevcContainerStatus| -> u8 {
@@ -4469,7 +4474,7 @@ mod tests {
         ));
         app.selected = 0; // beta (Stopped)
 
-        app.sort_and_preserve_selection();
+        app.sort_and_preserve_selection(None);
 
         // Running first, then Stopped, then Configured
         assert_eq!(app.containers[0].name, "alpha"); // Running
@@ -4494,13 +4499,13 @@ mod tests {
         ));
         app.selected = 1; // beta selected
 
-        app.sort_and_preserve_selection();
+        app.sort_and_preserve_selection(None);
         assert_eq!(app.selected, 1); // beta is still index 1 (alpha < beta)
 
         // Now beta stops — simulate a status change
         app.containers[1].status = DevcContainerStatus::Stopped;
 
-        app.sort_and_preserve_selection();
+        app.sort_and_preserve_selection(None);
 
         // alpha (Running) should be first, beta (Stopped) second
         assert_eq!(app.containers[0].name, "alpha");
@@ -4529,7 +4534,7 @@ mod tests {
         // Remove gamma (simulating a delete)
         app.containers.retain(|c| c.name != "gamma");
 
-        app.sort_and_preserve_selection();
+        app.sort_and_preserve_selection(None);
 
         // gamma is gone, selected should clamp to last valid index
         assert_eq!(app.containers.len(), 2);
@@ -4542,7 +4547,7 @@ mod tests {
         app.selected = 0;
 
         // Should not panic on empty list
-        app.sort_and_preserve_selection();
+        app.sort_and_preserve_selection(None);
         assert_eq!(app.selected, 0);
     }
 
@@ -4564,12 +4569,51 @@ mod tests {
         ));
         app.selected = 0; // charlie
 
-        app.sort_and_preserve_selection();
+        app.sort_and_preserve_selection(None);
 
         assert_eq!(app.containers[0].name, "alpha");
         assert_eq!(app.containers[1].name, "bravo");
         assert_eq!(app.containers[2].name, "charlie");
         // charlie moved from 0 to 2
         assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn test_sort_and_preserve_selection_after_list_replacement() {
+        let mut app = App::new_for_testing();
+        // Start with sorted containers: alpha at 0, beta at 1
+        app.containers.push(App::create_test_container(
+            "alpha",
+            DevcContainerStatus::Running,
+        ));
+        app.containers.push(App::create_test_container(
+            "beta",
+            DevcContainerStatus::Running,
+        ));
+        app.sort_and_preserve_selection(None);
+        assert_eq!(app.containers[0].name, "alpha");
+        assert_eq!(app.containers[1].name, "beta");
+
+        // User selects beta (index 1)
+        app.selected = 1;
+
+        // Simulate refresh_containers: capture ID BEFORE replacing the list
+        let prev_id = app.containers.get(app.selected).map(|c| c.id.clone());
+
+        // Replace with reversed order (simulating HashMap non-determinism)
+        app.containers = vec![
+            App::create_test_container("beta", DevcContainerStatus::Running),
+            App::create_test_container("alpha", DevcContainerStatus::Running),
+        ];
+
+        // Sort with the correctly captured prev_id
+        app.sort_and_preserve_selection(prev_id);
+
+        // After sort: alpha at 0, beta at 1
+        assert_eq!(app.containers[0].name, "alpha");
+        assert_eq!(app.containers[1].name, "beta");
+        // Selection should still point to beta
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.containers[app.selected].name, "beta");
     }
 }
