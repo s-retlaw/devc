@@ -104,3 +104,13 @@ fn test_up_help() {
         .success()
         .stdout(predicate::str::contains("Build, create, and start"));
 }
+
+#[test]
+fn test_exec_root_flag_in_help() {
+    Command::cargo_bin("devc")
+        .unwrap()
+        .args(["exec", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--root"));
+}

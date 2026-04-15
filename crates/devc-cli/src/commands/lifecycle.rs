@@ -7,7 +7,12 @@ use devc_core::{Container, ContainerManager, ContainerState, DevcContainerStatus
 use super::{find_container, find_container_in_cwd};
 
 /// Execute a command in a container (raw docker/podman exec)
-pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>) -> Result<()> {
+pub async fn exec(
+    manager: &ContainerManager,
+    container: &str,
+    cmd: Vec<String>,
+    root: bool,
+) -> Result<()> {
     let state = find_container(manager, container).await?;
 
     if state.status != DevcContainerStatus::Running {
@@ -52,6 +57,11 @@ pub async fn exec(manager: &ContainerManager, container: &str, cmd: Vec<String>)
             }
         }
     };
+
+    // Override user to root if --root flag was passed
+    if root {
+        exec_config.user = Some("root".to_string());
+    }
 
     // Inject GH_TOKEN if resolved from host
     if let Some(ref token) = exec_env.gh_token {

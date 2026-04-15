@@ -39,6 +39,9 @@ enum Commands {
     Exec {
         /// Container name or ID (interactive selection if not specified)
         container: Option<String>,
+        /// Execute as root user instead of the default container user
+        #[arg(long)]
+        root: bool,
         /// Command to execute
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
@@ -257,7 +260,11 @@ async fn run() -> anyhow::Result<()> {
             let get_containers = || async { manager.list().await };
 
             match cmd {
-                Commands::Exec { container, cmd } => {
+                Commands::Exec {
+                    container,
+                    root,
+                    cmd,
+                } => {
                     let name = match container {
                         Some(name) => name,
                         None => {
@@ -277,7 +284,7 @@ async fn run() -> anyhow::Result<()> {
                     } else {
                         cmd
                     };
-                    commands::exec(&manager, &name, cmd).await?;
+                    commands::exec(&manager, &name, cmd, root).await?;
                 }
                 Commands::Shell { container, cmd } => {
                     let name = match container {

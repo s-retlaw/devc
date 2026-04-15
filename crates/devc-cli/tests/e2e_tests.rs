@@ -81,9 +81,57 @@ fn test_build_and_up() {
 #[test]
 #[ignore]
 fn test_exec_in_running_container() {
-    // Placeholder — depends on a running container from test_build_and_up.
-    // nextest runs tests in isolation so we can't depend on ordering.
-    eprintln!("Skipped: requires running container from prior test");
+    let xdg = create_test_devc_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let devcontainer_dir = tmp.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).unwrap();
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        r#"{"image": "ubuntu:22.04", "remoteUser": "ubuntu"}"#,
+    )
+    .unwrap();
+
+    // Bring up the container
+    let mut up = Command::cargo_bin("devc").unwrap();
+    apply_devc_env(&mut up, &xdg);
+    up.args(["up"]).current_dir(tmp.path()).assert().success();
+
+    // Get the container name from list output
+    let mut list = Command::cargo_bin("devc").unwrap();
+    apply_devc_env(&mut list, &xdg);
+    let list_out = list.args(["list"]).output().unwrap();
+    let list_str = String::from_utf8_lossy(&list_out.stdout);
+    // Extract container name from the list output (first running container)
+    let container_name = list_str
+        .lines()
+        .find(|l| l.contains("running"))
+        .and_then(|l| l.split_whitespace().next())
+        .expect("should have a running container");
+
+    // exec without --root should run as the remoteUser (ubuntu)
+    let mut exec_default = Command::cargo_bin("devc").unwrap();
+    apply_devc_env(&mut exec_default, &xdg);
+    exec_default
+        .args(["exec", container_name, "whoami"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ubuntu"));
+
+    // exec with --root should run as root
+    let mut exec_root = Command::cargo_bin("devc").unwrap();
+    apply_devc_env(&mut exec_root, &xdg);
+    exec_root
+        .args(["exec", container_name, "--root", "whoami"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("root"));
+
+    // Clean up
+    let mut rm = Command::cargo_bin("devc").unwrap();
+    apply_devc_env(&mut rm, &xdg);
+    rm.args(["rm", container_name, "--force"])
+        .assert()
+        .success();
 }
 
 #[test]
