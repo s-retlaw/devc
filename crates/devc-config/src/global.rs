@@ -92,6 +92,8 @@ pub struct DefaultsConfig {
     pub ssh_enabled: Option<bool>,
     /// Path to SSH private key for container authentication
     pub ssh_key_path: Option<String>,
+    /// Forward URL open requests from container to host browser (default: true)
+    pub url_forwarding: Option<bool>,
 }
 
 impl Default for DefaultsConfig {
@@ -106,6 +108,7 @@ impl Default for DefaultsConfig {
             // and adds complexity to the build. Users who need terminal resize can enable it.
             ssh_enabled: Some(false),
             ssh_key_path: None,
+            url_forwarding: Some(true),
         }
     }
 }

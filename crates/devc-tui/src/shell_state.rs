@@ -17,6 +17,8 @@ pub struct ShellSession {
     pub working_dir: Option<String>,
     /// Extra environment variables to inject into the shell (e.g. GH_TOKEN)
     pub env: HashMap<String, String>,
+    /// Host-side workspace path (for browser URL queue file)
+    pub host_workspace_path: Option<String>,
     #[cfg(unix)]
     pub pty: Option<PtyShell>,
 }

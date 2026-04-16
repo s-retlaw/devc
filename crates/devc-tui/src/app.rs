@@ -3193,9 +3193,49 @@ impl App {
         if let Some(sock) = exec_env.ssh_auth_sock {
             shell_env.insert("SSH_AUTH_SOCK".to_string(), sock);
         }
+        // Parse devcontainer.json once for workspace_folder, user, and working dir
+        let parsed = Container::from_config(&container.config_path).ok();
+
+        // Browser URL forwarding: set BROWSER and DEVC_BROWSER_QUEUE env vars
+        let host_workspace_path = if self.config.defaults.url_forwarding != Some(false) {
+            shell_env.insert("BROWSER".to_string(), "/usr/local/bin/xdg-open".to_string());
+            let container_workspace = container
+                .metadata
+                .get("workspace_folder")
+                .cloned()
+                .or_else(|| {
+                    parsed
+                        .as_ref()
+                        .and_then(|c| c.devcontainer.workspace_folder.clone())
+                })
+                .or_else(|| {
+                    container
+                        .workspace_path
+                        .file_name()
+                        .map(|name| format!("/workspaces/{}", name.to_string_lossy()))
+                });
+            if let Some(ref ws) = container_workspace {
+                shell_env.insert(
+                    "DEVC_BROWSER_QUEUE".to_string(),
+                    format!(
+                        "{}/{}",
+                        ws,
+                        devc_core::browser_forward::BROWSER_QUEUE_FILENAME
+                    ),
+                );
+            }
+            Some(
+                container
+                    .workspace_path
+                    .join(devc_core::browser_forward::BROWSER_QUEUE_FILENAME)
+                    .to_string_lossy()
+                    .to_string(),
+            )
+        } else {
+            None
+        };
 
         // Resolve effective user and working dir: metadata > devcontainer.json
-        let parsed = Container::from_config(&container.config_path).ok();
         let effective_user = if self.config.defaults.user.is_some() {
             self.config.defaults.user.clone()
         } else if let Some(user) = container.metadata.get("remote_user") {
@@ -3228,6 +3268,7 @@ impl App {
                 user: effective_user,
                 working_dir: effective_working_dir,
                 env: shell_env,
+                host_workspace_path,
                 pty: None,
             },
         );
@@ -3260,6 +3301,7 @@ impl App {
         user: Option<String>,
         working_dir: Option<String>,
         env: std::collections::HashMap<String, String>,
+        browser_queue_path: Option<String>,
     ) -> ShellConfig {
         ShellConfig {
             runtime_program,
@@ -3269,6 +3311,7 @@ impl App {
             user,
             working_dir,
             env,
+            browser_queue_path,
         }
     }
 
@@ -3323,6 +3366,7 @@ impl App {
             user,
             working_dir,
             env,
+            browser_queue_path,
             has_pty,
         ) = {
             match self.shell_state.shell_sessions.get(&container_id) {
@@ -3334,6 +3378,7 @@ impl App {
                     s.user.clone(),
                     s.working_dir.clone(),
                     s.env.clone(),
+                    s.host_workspace_path.clone(),
                     s.pty.is_some(),
                 ),
                 None => {
@@ -3385,6 +3430,7 @@ impl App {
                         user.clone(),
                         working_dir.clone(),
                         env.clone(),
+                        browser_queue_path.clone(),
                     );
                     config.shell = Self::detect_shell(
                         &runtime_program,
@@ -3424,6 +3470,7 @@ impl App {
                     user.clone(),
                     working_dir.clone(),
                     env.clone(),
+                    browser_queue_path.clone(),
                 );
                 config.shell = Self::detect_shell(
                     &runtime_program,

@@ -8,6 +8,122 @@ use std::io::{self, Write};
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 
+/// OSC escape sequence scanner for URL open requests from the container.
+///
+/// Filters the PTY output byte stream, intercepting custom OSC sequences
+/// of the form `\x1b]devc;open-url;<URL>\x07` and extracting the URLs.
+/// Handles sequences split across read boundaries via carry-over state.
+pub struct OscUrlScanner {
+    state: ScanState,
+    /// Bytes accumulated while matching a potential OSC prefix or URL
+    partial: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanState {
+    /// Normal output passthrough
+    Normal,
+    /// Saw \x1b, waiting for ]
+    EscSeen,
+    /// Matching the "devc;open-url;" prefix byte by byte
+    MatchingPrefix { matched: usize },
+    /// Accumulating URL bytes until \x07
+    AccumulatingUrl,
+}
+
+impl Default for OscUrlScanner {
+    fn default() -> Self {
+        Self {
+            state: ScanState::Normal,
+            partial: Vec::new(),
+        }
+    }
+}
+
+impl OscUrlScanner {
+    const PREFIX: &[u8] = b"devc;open-url;";
+    const MAX_URL_LEN: usize = 8192;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Filter a chunk of PTY output, stripping any devc URL OSC sequences.
+    /// Returns the filtered output to write to the terminal and any extracted URLs.
+    pub fn filter(&mut self, data: &[u8]) -> (Vec<u8>, Vec<String>) {
+        let mut output = Vec::with_capacity(data.len());
+        let mut urls = Vec::new();
+
+        for &byte in data {
+            match self.state {
+                ScanState::Normal => {
+                    if byte == 0x1b {
+                        self.state = ScanState::EscSeen;
+                        self.partial.clear();
+                        self.partial.push(byte);
+                    } else {
+                        output.push(byte);
+                    }
+                }
+                ScanState::EscSeen => {
+                    if byte == b']' {
+                        self.partial.push(byte);
+                        self.state = ScanState::MatchingPrefix { matched: 0 };
+                    } else {
+                        // Not an OSC — flush buffered \x1b and this byte
+                        output.extend_from_slice(&self.partial);
+                        output.push(byte);
+                        self.partial.clear();
+                        self.state = ScanState::Normal;
+                    }
+                }
+                ScanState::MatchingPrefix { matched } => {
+                    if byte == Self::PREFIX[matched] {
+                        self.partial.push(byte);
+                        let next = matched + 1;
+                        if next == Self::PREFIX.len() {
+                            // Full prefix matched, now accumulate URL
+                            self.partial.clear();
+                            self.state = ScanState::AccumulatingUrl;
+                        } else {
+                            self.state = ScanState::MatchingPrefix { matched: next };
+                        }
+                    } else {
+                        // Prefix diverged — flush accumulated bytes as normal output
+                        output.extend_from_slice(&self.partial);
+                        output.push(byte);
+                        self.partial.clear();
+                        self.state = ScanState::Normal;
+                    }
+                }
+                ScanState::AccumulatingUrl => {
+                    if byte == 0x07 {
+                        // OSC terminator — extract URL
+                        if let Ok(url) = String::from_utf8(self.partial.clone()) {
+                            urls.push(url);
+                        }
+                        self.partial.clear();
+                        self.state = ScanState::Normal;
+                    } else if self.partial.len() >= Self::MAX_URL_LEN {
+                        // Overflow — flush as false positive
+                        // Reconstruct the original prefix bytes for output
+                        output.extend_from_slice(b"\x1b]");
+                        output.extend_from_slice(Self::PREFIX);
+                        output.extend_from_slice(&self.partial);
+                        output.push(byte);
+                        self.partial.clear();
+                        self.state = ScanState::Normal;
+                    } else {
+                        self.partial.push(byte);
+                    }
+                }
+            }
+        }
+
+        (output, urls)
+    }
+}
+
 /// Reset terminal to sane state using stty
 #[cfg(unix)]
 pub fn reset_terminal() {
@@ -35,6 +151,8 @@ pub struct ShellConfig {
     pub working_dir: Option<String>,
     /// Extra environment variables to inject (e.g. GH_TOKEN)
     pub env: std::collections::HashMap<String, String>,
+    /// Host-side path to the browser URL queue file
+    pub browser_queue_path: Option<String>,
 }
 
 /// Why the relay loop stopped
@@ -67,6 +185,9 @@ mod pty {
         master_fd: OwnedFd,
         child: std::process::Child,
         in_alternate_screen: bool,
+        url_scanner: OscUrlScanner,
+        /// Host-side path to browser URL queue file (shared via workspace bind mount)
+        browser_queue_path: Option<std::path::PathBuf>,
     }
 
     // SIGWINCH flag: set by signal handler, checked in poll loop
@@ -131,6 +252,11 @@ mod pty {
                 master_fd,
                 child,
                 in_alternate_screen: false,
+                url_scanner: OscUrlScanner::new(),
+                browser_queue_path: config
+                    .browser_queue_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
             })
         }
 
@@ -221,7 +347,11 @@ mod pty {
                 let mut fds = [stdin_pollfd, master_pollfd];
 
                 match nix::poll::poll(&mut fds, PollTimeout::from(200u16)) {
-                    Ok(0) => continue, // timeout, loop to check SIGWINCH
+                    Ok(0) => {
+                        // Timeout — check for browser URL queue file
+                        self.check_browser_queue();
+                        continue;
+                    }
                     Err(nix::errno::Errno::EINTR) => continue,
                     Err(e) => {
                         return ShellExitReason::Error(io::Error::other(e));
@@ -237,8 +367,13 @@ mod pty {
                             Ok(0) | Err(_) => return ShellExitReason::Exited,
                             Ok(n) => {
                                 self.scan_alternate_screen(&buf[..n]);
+                                // OSC scanner: fallback for containers without queue file
+                                let (filtered, urls) = self.url_scanner.filter(&buf[..n]);
+                                for url in &urls {
+                                    let _ = crate::tunnel::open_url(url);
+                                }
                                 let mut stdout = io::stdout().lock();
-                                if stdout.write_all(&buf[..n]).is_err() {
+                                if stdout.write_all(&filtered).is_err() {
                                     return ShellExitReason::Exited;
                                 }
                                 let _ = stdout.flush();
@@ -290,6 +425,32 @@ mod pty {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        /// Check the browser URL queue file on the host filesystem.
+        /// The wrapper script inside the container writes URLs to a file in the
+        /// shared workspace mount. We read them here and open on the host.
+        fn check_browser_queue(&mut self) {
+            let path = match &self.browser_queue_path {
+                Some(p) => p,
+                None => return,
+            };
+            // Read and remove atomically-ish
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) if !c.is_empty() => c,
+                _ => return,
+            };
+            let _ = std::fs::remove_file(path);
+
+            for line in content.lines() {
+                let url = line.trim();
+                if url.starts_with("http://")
+                    || url.starts_with("https://")
+                    || url.starts_with("ftp://")
+                {
+                    let _ = crate::tunnel::open_url(url);
                 }
             }
         }
@@ -374,6 +535,7 @@ mod tests {
             user: None,
             working_dir: None,
             env: std::collections::HashMap::new(),
+            browser_queue_path: None,
         };
         assert_eq!(config.container_id, "abc123");
         assert_eq!(config.shell, "/bin/bash");
@@ -389,6 +551,7 @@ mod tests {
             user: Some("root".to_string()),
             working_dir: Some("/workspace".to_string()),
             env: std::collections::HashMap::new(),
+            browser_queue_path: None,
         };
         assert_eq!(config.user, Some("root".to_string()));
         assert_eq!(config.working_dir, Some("/workspace".to_string()));
@@ -404,6 +567,7 @@ mod tests {
             user: None,
             working_dir: None,
             env: std::collections::HashMap::new(),
+            browser_queue_path: None,
         };
         assert_eq!(config.runtime_program, "flatpak-spawn");
         assert_eq!(config.runtime_prefix, vec!["--host", "podman"]);
@@ -415,5 +579,124 @@ mod tests {
         let _d = ShellExitReason::Detached;
         let _e = ShellExitReason::Exited;
         let _err = ShellExitReason::Error(io::Error::new(io::ErrorKind::Other, "test"));
+    }
+
+    #[test]
+    fn test_osc_scanner_complete_sequence() {
+        let mut scanner = OscUrlScanner::new();
+        let input = b"\x1b]devc;open-url;https://example.com\x07";
+        let (output, urls) = scanner.filter(input);
+        assert!(output.is_empty());
+        assert_eq!(urls, vec!["https://example.com"]);
+    }
+
+    #[test]
+    fn test_osc_scanner_with_surrounding_text() {
+        let mut scanner = OscUrlScanner::new();
+        let input = b"hello \x1b]devc;open-url;https://example.com\x07 world";
+        let (output, urls) = scanner.filter(input);
+        assert_eq!(output, b"hello  world");
+        assert_eq!(urls, vec!["https://example.com"]);
+    }
+
+    #[test]
+    fn test_osc_scanner_split_across_reads() {
+        let mut scanner = OscUrlScanner::new();
+
+        // Split in the middle of the prefix
+        let (out1, urls1) = scanner.filter(b"before\x1b]dev");
+        assert_eq!(out1, b"before");
+        assert!(urls1.is_empty());
+
+        let (out2, urls2) = scanner.filter(b"c;open-url;https://example.com\x07after");
+        assert_eq!(out2, b"after");
+        assert_eq!(urls2, vec!["https://example.com"]);
+    }
+
+    #[test]
+    fn test_osc_scanner_split_at_esc() {
+        let mut scanner = OscUrlScanner::new();
+
+        let (out1, urls1) = scanner.filter(b"text\x1b");
+        assert_eq!(out1, b"text");
+        assert!(urls1.is_empty());
+
+        let (out2, urls2) = scanner.filter(b"]devc;open-url;https://test.dev\x07done");
+        assert_eq!(out2, b"done");
+        assert_eq!(urls2, vec!["https://test.dev"]);
+    }
+
+    #[test]
+    fn test_osc_scanner_split_in_url() {
+        let mut scanner = OscUrlScanner::new();
+
+        let (out1, urls1) = scanner.filter(b"\x1b]devc;open-url;https://exa");
+        assert!(out1.is_empty());
+        assert!(urls1.is_empty());
+
+        let (out2, urls2) = scanner.filter(b"mple.com/path\x07");
+        assert!(out2.is_empty());
+        assert_eq!(urls2, vec!["https://example.com/path"]);
+    }
+
+    #[test]
+    fn test_osc_scanner_multiple_urls() {
+        let mut scanner = OscUrlScanner::new();
+        let input = b"\x1b]devc;open-url;https://a.com\x07mid\x1b]devc;open-url;https://b.com\x07";
+        let (output, urls) = scanner.filter(input);
+        assert_eq!(output, b"mid");
+        assert_eq!(urls, vec!["https://a.com", "https://b.com"]);
+    }
+
+    #[test]
+    fn test_osc_scanner_false_esc_passthrough() {
+        let mut scanner = OscUrlScanner::new();
+        // Alternate screen sequence should pass through
+        let input = b"\x1b[?1049h";
+        let (output, urls) = scanner.filter(input);
+        assert_eq!(output, b"\x1b[?1049h");
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn test_osc_scanner_other_osc_passthrough() {
+        let mut scanner = OscUrlScanner::new();
+        // Other OSC sequences (e.g. set title) should pass through
+        let input = b"\x1b]0;my title\x07";
+        let (output, urls) = scanner.filter(input);
+        assert_eq!(output, b"\x1b]0;my title\x07");
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn test_osc_scanner_overflow_protection() {
+        let mut scanner = OscUrlScanner::new();
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x1b]devc;open-url;");
+        // Add more than MAX_URL_LEN bytes without terminator
+        input.extend(std::iter::repeat(b'x').take(OscUrlScanner::MAX_URL_LEN + 1));
+        let (output, urls) = scanner.filter(&input);
+        assert!(urls.is_empty());
+        assert!(!output.is_empty()); // Flushed as normal output
+    }
+
+    #[test]
+    fn test_osc_scanner_prefix_diverges() {
+        let mut scanner = OscUrlScanner::new();
+        // Starts like our prefix but diverges
+        let input = b"\x1b]devc;other-cmd;data\x07rest";
+        let (output, urls) = scanner.filter(input);
+        assert!(urls.is_empty());
+        // All bytes should pass through
+        assert_eq!(output, b"\x1b]devc;other-cmd;data\x07rest");
+    }
+
+    #[test]
+    fn test_osc_scanner_normal_text_passthrough() {
+        let mut scanner = OscUrlScanner::new();
+        let input = b"just normal terminal output\r\n";
+        let (output, urls) = scanner.filter(input);
+        assert_eq!(output, input.as_slice());
+        assert!(urls.is_empty());
     }
 }

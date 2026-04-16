@@ -283,6 +283,50 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Spawn the platform-specific browser command for a URL.
+fn spawn_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    result.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Open a full URL in the default browser on the host.
+/// Validates that the URL scheme is http, https, or ftp before opening.
+pub fn open_url(url: &str) -> Result<(), String> {
+    let valid =
+        url.starts_with("http://") || url.starts_with("https://") || url.starts_with("ftp://");
+    if !valid {
+        return Err(format!(
+            "Refusing to open URL with unsupported scheme: {}",
+            url
+        ));
+    }
+    spawn_browser(url)
+}
+
 /// Open a URL in the default browser
 pub fn open_in_browser(port: u16, protocol: Option<&str>) -> Result<(), String> {
     let scheme = if protocol == Some("https") {
@@ -291,33 +335,7 @@ pub fn open_in_browser(port: u16, protocol: Option<&str>) -> Result<(), String> 
         "http"
     };
     let url = format!("{}://localhost:{}", scheme, port);
-
-    #[cfg(target_os = "linux")]
-    let result = std::process::Command::new("xdg-open")
-        .arg(&url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open")
-        .arg(&url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-
-    #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("cmd")
-        .args(["/C", "start", &url])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-
-    result.map_err(|e| e.to_string())?;
-    Ok(())
+    spawn_browser(&url)
 }
 
 #[cfg(test)]

@@ -416,6 +416,15 @@ impl ContainerManager {
                 }
             };
 
+        // Inject browser URL forwarder (non-fatal)
+        if self.global_config.defaults.url_forwarding != Some(false) {
+            if let Err(e) =
+                crate::browser_forward::inject_browser_forwarder(provider, &live_container_id).await
+            {
+                tracing::warn!("Browser forwarder injection failed (non-fatal): {}", e);
+            }
+        }
+
         let ssh_auth_sock = if self.global_config.credentials.ssh_agent {
             crate::credentials::resolve_ssh_agent_socket(container_state.provider)
                 .map(|s| s.container_target)

@@ -9,6 +9,7 @@
 //! - Enhanced builds with devc requirements (dropbear) injected
 
 pub mod agents;
+pub mod browser_forward;
 mod build;
 mod container;
 pub mod credentials;
