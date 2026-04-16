@@ -148,7 +148,7 @@ fn inspect_container_field(provider: &CliProvider, cid: &ContainerId, format: &s
     let args = ["container", "inspect", "--format", format, &cid.0];
 
     // Try direct command first.
-    if let Ok(output) = std::process::Command::new(&runtime).args(&args).output() {
+    if let Ok(output) = std::process::Command::new(&runtime).args(args).output() {
         let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !s.is_empty() {
             return s;
@@ -159,7 +159,7 @@ fn inspect_container_field(provider: &CliProvider, cid: &ContainerId, format: &s
     if let Ok(output) = std::process::Command::new("flatpak-spawn")
         .arg("--host")
         .arg(&runtime)
-        .args(&args)
+        .args(args)
         .output()
     {
         let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -348,7 +348,7 @@ async fn test_e2e_multiple_features_install() {
         "Should pass remote user to features"
     );
 
-    let image_tag = format!("devc/test-features-e2e:latest");
+    let image_tag = "devc/test-features-e2e:latest".to_string();
     let build_config = BuildConfig {
         context: enhanced_ctx.context_path().to_path_buf(),
         dockerfile: enhanced_ctx.dockerfile_name().to_string(),

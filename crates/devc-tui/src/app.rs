@@ -3270,6 +3270,7 @@ impl App {
             working_dir,
             env,
             browser_queue_path,
+            auto_forward_enabled: self.config.defaults.auto_forward_ports != Some(false),
         }
     }
 

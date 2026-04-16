@@ -673,9 +673,9 @@ mod tests {
         buf.extend_from_slice(data);
         // Pad data to 512-byte boundary
         let padding = (512 - (data.len() % 512)) % 512;
-        buf.extend(std::iter::repeat(0u8).take(padding));
+        buf.extend(std::iter::repeat_n(0u8, padding));
         // Two 512-byte zero blocks as end-of-archive marker
-        buf.extend(std::iter::repeat(0u8).take(1024));
+        buf.extend(std::iter::repeat_n(0u8, 1024));
         buf
     }
 

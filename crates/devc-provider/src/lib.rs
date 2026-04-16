@@ -293,18 +293,6 @@ pub async fn create_default_provider(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_should_try_toolbox_shortcut_respects_configured_docker() {
-        assert!(!should_try_toolbox_shortcut(Some(ProviderType::Docker)));
-        assert!(should_try_toolbox_shortcut(Some(ProviderType::Podman)));
-        assert!(should_try_toolbox_shortcut(None));
-    }
-}
-
 /// Format a helpful connection error message with actionable instructions
 fn format_connection_error(provider: ProviderType, underlying: &ProviderError) -> String {
     let provider_name = match provider {
@@ -336,4 +324,16 @@ fn format_connection_error(provider: ProviderType, underlying: &ProviderError) -
     }
 
     msg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_try_toolbox_shortcut_respects_configured_docker() {
+        assert!(!should_try_toolbox_shortcut(Some(ProviderType::Docker)));
+        assert!(should_try_toolbox_shortcut(Some(ProviderType::Podman)));
+        assert!(should_try_toolbox_shortcut(None));
+    }
 }

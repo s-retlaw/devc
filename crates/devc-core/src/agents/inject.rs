@@ -864,6 +864,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // HOME_ENV_LOCK serializes test access to global HOME env var
     async fn test_setup_agents_claude_copies_primary_and_extra_paths() {
         let _guard = HOME_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -1044,6 +1045,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // HOME_ENV_LOCK serializes test access to global HOME env var
     async fn test_setup_agents_cursor_materializes_config_auth_json() {
         let _guard = HOME_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -1126,6 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // HOME_ENV_LOCK serializes test access to global HOME env var
     async fn test_claude_sync_rewrites_home_paths() {
         let _guard = HOME_ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();

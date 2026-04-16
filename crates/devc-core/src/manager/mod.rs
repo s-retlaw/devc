@@ -2249,11 +2249,13 @@ mod tests {
         mgr.down(&id).await.unwrap();
 
         // Should have called stop + remove on provider
-        let recorded = calls.lock().unwrap();
-        assert!(recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
-        assert!(recorded
-            .iter()
-            .any(|c| matches!(c, MockCall::Remove { force: true, .. })));
+        {
+            let recorded = calls.lock().unwrap();
+            assert!(recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
+            assert!(recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Remove { force: true, .. })));
+        }
 
         // State should still exist but container_id cleared
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2547,13 +2549,15 @@ mod tests {
         mgr.up(&id).await.unwrap();
 
         // Verify compose_up was called
-        let recorded = calls.lock().unwrap();
-        assert!(recorded
-            .iter()
-            .any(|c| matches!(c, MockCall::ComposeUp { .. })));
-        assert!(recorded
-            .iter()
-            .any(|c| matches!(c, MockCall::ComposeResolveServiceId { .. })));
+        {
+            let recorded = calls.lock().unwrap();
+            assert!(recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::ComposeUp { .. })));
+            assert!(recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::ComposeResolveServiceId { .. })));
+        }
 
         // Verify state was updated with compose metadata
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2597,15 +2601,17 @@ mod tests {
         mgr.down(&id).await.unwrap();
 
         // Verify compose_down was called
-        let recorded = calls.lock().unwrap();
-        assert!(recorded
-            .iter()
-            .any(|c| matches!(c, MockCall::ComposeDown { .. })));
-        // Should NOT call individual stop/remove
-        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
-        assert!(!recorded
-            .iter()
-            .any(|c| matches!(c, MockCall::Remove { .. })));
+        {
+            let recorded = calls.lock().unwrap();
+            assert!(recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::ComposeDown { .. })));
+            // Should NOT call individual stop/remove
+            assert!(!recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
+            assert!(!recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::Remove { .. })));
+        }
 
         // State should be cleaned up
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2686,13 +2692,15 @@ mod tests {
         mgr.start(&id).await.unwrap();
 
         // Verify compose_up and compose service resolution were called
-        let recorded = calls.lock().unwrap();
-        assert!(recorded
-            .iter()
-            .any(|c| matches!(c, MockCall::ComposeUp { .. })));
-        assert!(recorded
-            .iter()
-            .any(|c| matches!(c, MockCall::ComposeResolveServiceId { .. })));
+        {
+            let recorded = calls.lock().unwrap();
+            assert!(recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::ComposeUp { .. })));
+            assert!(recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::ComposeResolveServiceId { .. })));
+        }
 
         // Verify container_id was set from the matched service
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -2748,11 +2756,13 @@ mod tests {
         mgr.stop(&id).await.unwrap();
 
         // Should call compose_down, NOT individual stop
-        let recorded = calls.lock().unwrap();
-        assert!(recorded
-            .iter()
-            .any(|c| matches!(c, MockCall::ComposeDown { .. })));
-        assert!(!recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
+        {
+            let recorded = calls.lock().unwrap();
+            assert!(recorded
+                .iter()
+                .any(|c| matches!(c, MockCall::ComposeDown { .. })));
+            assert!(!recorded.iter().any(|c| matches!(c, MockCall::Stop { .. })));
+        }
 
         // container_id should be cleared
         let cs = mgr.get(&id).await.unwrap().unwrap();
@@ -3048,7 +3058,7 @@ mod tests {
 
         // postAttachCommand must NOT run during up
         assert!(
-            !lifecycle_cmds.iter().any(|&c| c == "echo post-attach"),
+            !lifecycle_cmds.contains(&"echo post-attach"),
             "postAttachCommand should NOT run during up"
         );
 
@@ -3295,7 +3305,7 @@ mod tests {
 
         // postAttachCommand must NOT run during rebuild
         assert!(
-            !lifecycle_cmds.iter().any(|&c| c == "echo post-attach"),
+            !lifecycle_cmds.contains(&"echo post-attach"),
             "postAttachCommand should NOT run during rebuild"
         );
 
@@ -4220,7 +4230,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            state.metadata.get("remote_user").is_none(),
+            !state.metadata.contains_key("remote_user"),
             "Should not have remote_user when devcontainer.json doesn't specify one"
         );
     }
@@ -4337,7 +4347,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            state.metadata.get("workspace_folder").is_none(),
+            !state.metadata.contains_key("workspace_folder"),
             "Should not have workspace_folder when neither config nor mounts provide one"
         );
     }
@@ -4471,14 +4481,16 @@ mod tests {
         let mgr = test_manager_with_state(mock, state);
         mgr.remove(&id, true).await.unwrap();
 
-        let recorded = calls.lock().unwrap();
-        assert!(
-            !recorded
-                .iter()
-                .any(|c| matches!(c, MockCall::Remove { .. })),
-            "Should NOT call provider.remove() for adopted container, got: {:?}",
-            *recorded,
-        );
+        {
+            let recorded = calls.lock().unwrap();
+            assert!(
+                !recorded
+                    .iter()
+                    .any(|c| matches!(c, MockCall::Remove { .. })),
+                "Should NOT call provider.remove() for adopted container, got: {:?}",
+                *recorded,
+            );
+        }
 
         // Verify removed from state
         let state = mgr.state.read().await;

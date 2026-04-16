@@ -109,6 +109,5 @@ mod tests {
     fn test_clipboard_commands_defined() {
         // Just verify the module compiles correctly
         // Actual clipboard testing would require mocking or real clipboard tools
-        assert!(true);
     }
 }

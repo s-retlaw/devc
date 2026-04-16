@@ -2190,7 +2190,7 @@ mod tests {
         assert!(details.mounts[1].read_only);
 
         // Ports
-        assert!(details.ports.len() >= 1);
+        assert!(!details.ports.is_empty());
         let tcp_3000 = details
             .ports
             .iter()

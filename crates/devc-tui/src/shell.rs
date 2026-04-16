@@ -153,6 +153,8 @@ pub struct ShellConfig {
     pub env: std::collections::HashMap<String, String>,
     /// Host-side path to the browser URL queue file
     pub browser_queue_path: Option<String>,
+    /// Whether auto-forwarding is enabled (global setting)
+    pub auto_forward_enabled: bool,
 }
 
 /// Why the relay loop stopped
@@ -188,6 +190,13 @@ mod pty {
         url_scanner: OscUrlScanner,
         /// Host-side path to browser URL queue file (shared via workspace bind mount)
         browser_queue_path: Option<std::path::PathBuf>,
+        /// Runtime info for on-demand port forwarding
+        runtime_program: String,
+        runtime_prefix: Vec<String>,
+        container_id: String,
+        auto_forward_enabled: bool,
+        /// Forwarders spawned on-demand for browser URL requests
+        on_demand_forwarders: Vec<crate::tunnel::PortForwarder>,
     }
 
     // SIGWINCH flag: set by signal handler, checked in poll loop
@@ -257,6 +266,11 @@ mod pty {
                     .browser_queue_path
                     .as_ref()
                     .map(std::path::PathBuf::from),
+                runtime_program: config.runtime_program.clone(),
+                runtime_prefix: config.runtime_prefix.clone(),
+                container_id: config.container_id.clone(),
+                auto_forward_enabled: config.auto_forward_enabled,
+                on_demand_forwarders: Vec::new(),
             })
         }
 
@@ -370,7 +384,7 @@ mod pty {
                                 // OSC scanner: fallback for containers without queue file
                                 let (filtered, urls) = self.url_scanner.filter(&buf[..n]);
                                 for url in &urls {
-                                    let _ = crate::tunnel::open_url(url);
+                                    self.open_url_ensuring_forwarded(url);
                                 }
                                 let mut stdout = io::stdout().lock();
                                 if stdout.write_all(&filtered).is_err() {
@@ -429,6 +443,28 @@ mod pty {
             }
         }
 
+        /// Open a URL, ensuring the target port is forwarded first if applicable.
+        /// If the URL targets localhost:PORT and auto-forwarding is enabled,
+        /// tries to set up port forwarding before opening the browser.
+        fn open_url_ensuring_forwarded(&mut self, url: &str) {
+            if self.auto_forward_enabled {
+                if let Some(port) = crate::tunnel::extract_localhost_port(url) {
+                    let rt = tokio::runtime::Handle::current();
+                    if let Ok(forwarder) = rt.block_on(crate::tunnel::spawn_forwarder(
+                        self.runtime_program.clone(),
+                        self.runtime_prefix.clone(),
+                        self.container_id.clone(),
+                        port,
+                        port,
+                    )) {
+                        self.on_demand_forwarders.push(forwarder);
+                    }
+                    // If spawn failed (bind error), auto-forwarder already has it
+                }
+            }
+            let _ = crate::tunnel::open_url(url);
+        }
+
         /// Check the browser URL queue file on the host filesystem.
         /// The wrapper script inside the container writes URLs to a file in the
         /// shared workspace mount. We read them here and open on the host.
@@ -450,7 +486,7 @@ mod pty {
                     || url.starts_with("https://")
                     || url.starts_with("ftp://")
                 {
-                    let _ = crate::tunnel::open_url(url);
+                    self.open_url_ensuring_forwarded(url);
                 }
             }
         }
@@ -536,6 +572,7 @@ mod tests {
             working_dir: None,
             env: std::collections::HashMap::new(),
             browser_queue_path: None,
+            auto_forward_enabled: false,
         };
         assert_eq!(config.container_id, "abc123");
         assert_eq!(config.shell, "/bin/bash");
@@ -552,6 +589,7 @@ mod tests {
             working_dir: Some("/workspace".to_string()),
             env: std::collections::HashMap::new(),
             browser_queue_path: None,
+            auto_forward_enabled: false,
         };
         assert_eq!(config.user, Some("root".to_string()));
         assert_eq!(config.working_dir, Some("/workspace".to_string()));
@@ -568,6 +606,7 @@ mod tests {
             working_dir: None,
             env: std::collections::HashMap::new(),
             browser_queue_path: None,
+            auto_forward_enabled: false,
         };
         assert_eq!(config.runtime_program, "flatpak-spawn");
         assert_eq!(config.runtime_prefix, vec!["--host", "podman"]);
@@ -578,7 +617,7 @@ mod tests {
         // Just verify the enum can be constructed
         let _d = ShellExitReason::Detached;
         let _e = ShellExitReason::Exited;
-        let _err = ShellExitReason::Error(io::Error::new(io::ErrorKind::Other, "test"));
+        let _err = ShellExitReason::Error(io::Error::other("test"));
     }
 
     #[test]
@@ -674,7 +713,7 @@ mod tests {
         let mut input = Vec::new();
         input.extend_from_slice(b"\x1b]devc;open-url;");
         // Add more than MAX_URL_LEN bytes without terminator
-        input.extend(std::iter::repeat(b'x').take(OscUrlScanner::MAX_URL_LEN + 1));
+        input.extend(std::iter::repeat_n(b'x', OscUrlScanner::MAX_URL_LEN + 1));
         let (output, urls) = scanner.filter(&input);
         assert!(urls.is_empty());
         assert!(!output.is_empty()); // Flushed as normal output

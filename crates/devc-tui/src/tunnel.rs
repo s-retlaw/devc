@@ -338,6 +338,34 @@ pub fn open_in_browser(port: u16, protocol: Option<&str>) -> Result<(), String> 
     spawn_browser(&url)
 }
 
+/// Extract the port from a localhost URL.
+/// Returns `Some(port)` if the URL targets localhost, 127.0.0.1, [::1], or 0.0.0.0.
+/// Returns `None` for non-localhost URLs or URLs without an explicit port.
+pub fn extract_localhost_port(url: &str) -> Option<u16> {
+    let after_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .or_else(|| url.strip_prefix("ftp://"))?;
+
+    // Extract host:port portion (before any path/query/fragment)
+    let authority = after_scheme.split(&['/', '?', '#'][..]).next()?;
+
+    // Handle [::1]:port (IPv6 localhost)
+    if let Some(rest) = authority.strip_prefix("[::1]") {
+        return rest.strip_prefix(':')?.parse::<u16>().ok();
+    }
+
+    let (host, port_str) = authority.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+
+    let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0";
+    if is_localhost {
+        Some(port)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,5 +609,39 @@ mod tests {
                 install_cmd
             );
         }
+    }
+
+    #[test]
+    fn test_extract_localhost_port() {
+        assert_eq!(extract_localhost_port("http://localhost:3000"), Some(3000));
+        assert_eq!(
+            extract_localhost_port("http://localhost:3000/path"),
+            Some(3000)
+        );
+        assert_eq!(
+            extract_localhost_port("http://localhost:3000?q=1"),
+            Some(3000)
+        );
+        assert_eq!(extract_localhost_port("https://localhost:8443"), Some(8443));
+        assert_eq!(extract_localhost_port("http://127.0.0.1:8080"), Some(8080));
+        assert_eq!(
+            extract_localhost_port("https://127.0.0.1:443/foo"),
+            Some(443)
+        );
+        assert_eq!(extract_localhost_port("http://[::1]:3000"), Some(3000));
+        assert_eq!(extract_localhost_port("http://0.0.0.0:5000"), Some(5000));
+    }
+
+    #[test]
+    fn test_extract_localhost_port_non_localhost() {
+        assert_eq!(extract_localhost_port("http://example.com:3000"), None);
+        assert_eq!(extract_localhost_port("http://192.168.1.1:80"), None);
+    }
+
+    #[test]
+    fn test_extract_localhost_port_no_port() {
+        assert_eq!(extract_localhost_port("http://localhost"), None);
+        assert_eq!(extract_localhost_port("http://localhost/path"), None);
+        assert_eq!(extract_localhost_port("not-a-url"), None);
     }
 }
