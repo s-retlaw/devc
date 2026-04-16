@@ -1162,13 +1162,13 @@ impl App {
                                         matching_config.and_then(|pfc| pfc.protocol.as_deref());
                                     let _ = open_in_browser(detected.port, protocol);
                                 }
-                                devc_config::AutoForwardAction::OpenBrowserOnce => {
-                                    if !self.port_state.auto_opened_ports.contains(&key) {
-                                        self.port_state.auto_opened_ports.insert(key);
-                                        let protocol =
-                                            matching_config.and_then(|pfc| pfc.protocol.as_deref());
-                                        let _ = open_in_browser(detected.port, protocol);
-                                    }
+                                devc_config::AutoForwardAction::OpenBrowserOnce
+                                    if !self.port_state.auto_opened_ports.contains(&key) =>
+                                {
+                                    self.port_state.auto_opened_ports.insert(key);
+                                    let protocol =
+                                        matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                                    let _ = open_in_browser(detected.port, protocol);
                                 }
                                 _ => {}
                             }
@@ -1708,34 +1708,28 @@ impl App {
                 _ => {}
             },
             View::AgentDiagnostics => match code {
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.agent_diagnostics_rows.is_empty() {
-                        self.agent_diagnostics_selected = (self.agent_diagnostics_selected + 1)
-                            % self.agent_diagnostics_rows.len();
-                        self.agent_diagnostics_table_state
-                            .select(Some(self.agent_diagnostics_selected));
-                    }
+                KeyCode::Char('j') | KeyCode::Down if !self.agent_diagnostics_rows.is_empty() => {
+                    self.agent_diagnostics_selected =
+                        (self.agent_diagnostics_selected + 1) % self.agent_diagnostics_rows.len();
+                    self.agent_diagnostics_table_state
+                        .select(Some(self.agent_diagnostics_selected));
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.agent_diagnostics_rows.is_empty() {
-                        self.agent_diagnostics_selected = self
-                            .agent_diagnostics_selected
-                            .checked_sub(1)
-                            .unwrap_or(self.agent_diagnostics_rows.len() - 1);
-                        self.agent_diagnostics_table_state
-                            .select(Some(self.agent_diagnostics_selected));
-                    }
+                KeyCode::Char('k') | KeyCode::Up if !self.agent_diagnostics_rows.is_empty() => {
+                    self.agent_diagnostics_selected = self
+                        .agent_diagnostics_selected
+                        .checked_sub(1)
+                        .unwrap_or(self.agent_diagnostics_rows.len() - 1);
+                    self.agent_diagnostics_table_state
+                        .select(Some(self.agent_diagnostics_selected));
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
                     self.agent_diagnostics_selected = 0;
                     self.agent_diagnostics_table_state.select(Some(0));
                 }
-                KeyCode::Char('G') | KeyCode::End => {
-                    if !self.agent_diagnostics_rows.is_empty() {
-                        self.agent_diagnostics_selected = self.agent_diagnostics_rows.len() - 1;
-                        self.agent_diagnostics_table_state
-                            .select(Some(self.agent_diagnostics_selected));
-                    }
+                KeyCode::Char('G') | KeyCode::End if !self.agent_diagnostics_rows.is_empty() => {
+                    self.agent_diagnostics_selected = self.agent_diagnostics_rows.len() - 1;
+                    self.agent_diagnostics_table_state
+                        .select(Some(self.agent_diagnostics_selected));
                 }
                 KeyCode::Char('r') => {
                     if let Some(container_id) = self.agent_diagnostics_container_id.clone() {
@@ -1791,80 +1785,67 @@ impl App {
             // Discover mode key handling
             match code {
                 // Navigation
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.discovered_containers.is_empty() {
-                        self.selected_discovered =
-                            (self.selected_discovered + 1) % self.discovered_containers.len();
-                        self.discovered_table_state
-                            .select(Some(self.selected_discovered));
-                    }
+                KeyCode::Char('j') | KeyCode::Down if !self.discovered_containers.is_empty() => {
+                    self.selected_discovered =
+                        (self.selected_discovered + 1) % self.discovered_containers.len();
+                    self.discovered_table_state
+                        .select(Some(self.selected_discovered));
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.discovered_containers.is_empty() {
-                        self.selected_discovered = self
-                            .selected_discovered
-                            .checked_sub(1)
-                            .unwrap_or(self.discovered_containers.len() - 1);
-                        self.discovered_table_state
-                            .select(Some(self.selected_discovered));
-                    }
+                KeyCode::Char('k') | KeyCode::Up if !self.discovered_containers.is_empty() => {
+                    self.selected_discovered = self
+                        .selected_discovered
+                        .checked_sub(1)
+                        .unwrap_or(self.discovered_containers.len() - 1);
+                    self.discovered_table_state
+                        .select(Some(self.selected_discovered));
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
                     self.selected_discovered = 0;
                     self.discovered_table_state.select(Some(0));
                 }
-                KeyCode::Char('G') | KeyCode::End => {
-                    if !self.discovered_containers.is_empty() {
-                        self.selected_discovered = self.discovered_containers.len() - 1;
-                        self.discovered_table_state
-                            .select(Some(self.selected_discovered));
-                    }
+                KeyCode::Char('G') | KeyCode::End if !self.discovered_containers.is_empty() => {
+                    self.selected_discovered = self.discovered_containers.len() - 1;
+                    self.discovered_table_state
+                        .select(Some(self.selected_discovered));
                 }
                 // Adopt selected container
-                KeyCode::Char('a') => {
-                    if !self.discovered_containers.is_empty() {
-                        let container = &self.discovered_containers[self.selected_discovered];
-                        if container.source != DevcontainerSource::Devc {
-                            self.dialog_focus = DialogFocus::Cancel;
-                            self.confirm_action = Some(ConfirmAction::Adopt {
-                                container_id: container.id.0.clone(),
-                                container_name: container.name.clone(),
-                                workspace_path: container.workspace_path.clone(),
-                                source: container.source.clone(),
-                                provider: container.provider,
-                            });
-                            self.view = View::Confirm;
-                        } else {
-                            self.status_message =
-                                Some("Container is already managed by devc".to_string());
-                        }
+                KeyCode::Char('a') if !self.discovered_containers.is_empty() => {
+                    let container = &self.discovered_containers[self.selected_discovered];
+                    if container.source != DevcontainerSource::Devc {
+                        self.dialog_focus = DialogFocus::Cancel;
+                        self.confirm_action = Some(ConfirmAction::Adopt {
+                            container_id: container.id.0.clone(),
+                            container_name: container.name.clone(),
+                            workspace_path: container.workspace_path.clone(),
+                            source: container.source.clone(),
+                            provider: container.provider,
+                        });
+                        self.view = View::Confirm;
+                    } else {
+                        self.status_message =
+                            Some("Container is already managed by devc".to_string());
                     }
                 }
                 // Inspect selected container
-                KeyCode::Enter => {
-                    if !self.discovered_containers.is_empty() {
-                        let container = &self.discovered_containers[self.selected_discovered];
-                        let provider_type = container.provider;
-                        let container_id = container.id.clone();
-                        match create_provider(
-                            provider_type,
-                            self.manager.read().await.global_config(),
-                        )
+                KeyCode::Enter if !self.discovered_containers.is_empty() => {
+                    let container = &self.discovered_containers[self.selected_discovered];
+                    let provider_type = container.provider;
+                    let container_id = container.id.clone();
+                    match create_provider(provider_type, self.manager.read().await.global_config())
                         .await
-                        {
-                            Ok(provider) => match provider.inspect(&container_id).await {
-                                Ok(details) => {
-                                    self.discover_detail = Some(details);
-                                    self.discover_detail_scroll = 0;
-                                    self.view = View::DiscoverDetail;
-                                }
-                                Err(e) => {
-                                    self.status_message = Some(format!("Inspect failed: {}", e));
-                                }
-                            },
-                            Err(e) => {
-                                self.status_message = Some(format!("Provider error: {}", e));
+                    {
+                        Ok(provider) => match provider.inspect(&container_id).await {
+                            Ok(details) => {
+                                self.discover_detail = Some(details);
+                                self.discover_detail_scroll = 0;
+                                self.view = View::DiscoverDetail;
                             }
+                            Err(e) => {
+                                self.status_message = Some(format!("Inspect failed: {}", e));
+                            }
+                        },
+                        Err(e) => {
+                            self.status_message = Some(format!("Provider error: {}", e));
                         }
                     }
                 }
@@ -1879,27 +1860,23 @@ impl App {
             // Normal (managed) mode key handling
             match code {
                 // Navigation
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if !self.containers.is_empty() {
-                        let prev = self.selected;
-                        self.selected = (self.selected + 1) % self.containers.len();
-                        self.containers_table_state.select(Some(self.selected));
-                        if self.selected != prev {
-                            self.on_container_switch();
-                        }
+                KeyCode::Char('j') | KeyCode::Down if !self.containers.is_empty() => {
+                    let prev = self.selected;
+                    self.selected = (self.selected + 1) % self.containers.len();
+                    self.containers_table_state.select(Some(self.selected));
+                    if self.selected != prev {
+                        self.on_container_switch();
                     }
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if !self.containers.is_empty() {
-                        let prev = self.selected;
-                        self.selected = self
-                            .selected
-                            .checked_sub(1)
-                            .unwrap_or(self.containers.len() - 1);
-                        self.containers_table_state.select(Some(self.selected));
-                        if self.selected != prev {
-                            self.on_container_switch();
-                        }
+                KeyCode::Char('k') | KeyCode::Up if !self.containers.is_empty() => {
+                    let prev = self.selected;
+                    self.selected = self
+                        .selected
+                        .checked_sub(1)
+                        .unwrap_or(self.containers.len() - 1);
+                    self.containers_table_state.select(Some(self.selected));
+                    if self.selected != prev {
+                        self.on_container_switch();
                     }
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
@@ -1910,28 +1887,24 @@ impl App {
                         self.on_container_switch();
                     }
                 }
-                KeyCode::Char('G') | KeyCode::End => {
-                    if !self.containers.is_empty() {
-                        let prev = self.selected;
-                        self.selected = self.containers.len() - 1;
-                        self.containers_table_state.select(Some(self.selected));
-                        if self.selected != prev {
-                            self.on_container_switch();
-                        }
+                KeyCode::Char('G') | KeyCode::End if !self.containers.is_empty() => {
+                    let prev = self.selected;
+                    self.selected = self.containers.len() - 1;
+                    self.containers_table_state.select(Some(self.selected));
+                    if self.selected != prev {
+                        self.on_container_switch();
                     }
                 }
 
                 // Actions
-                KeyCode::Enter => {
-                    if !self.containers.is_empty() {
-                        self.view = View::ContainerDetail;
-                        self.container_detail = None;
-                        self.container_detail_scroll = 0;
-                        self.compose_state.selected_service = 0;
-                        self.compose_state.services_table_state.select(Some(0));
-                        self.fetch_compose_services().await;
-                        self.fetch_container_detail().await;
-                    }
+                KeyCode::Enter if !self.containers.is_empty() => {
+                    self.view = View::ContainerDetail;
+                    self.container_detail = None;
+                    self.container_detail_scroll = 0;
+                    self.compose_state.selected_service = 0;
+                    self.compose_state.services_table_state.select(Some(0));
+                    self.fetch_compose_services().await;
+                    self.fetch_container_detail().await;
                 }
                 KeyCode::Char('s') => {
                     self.toggle_selected().await?;
@@ -1939,35 +1912,31 @@ impl App {
                 KeyCode::Char('u') => {
                     self.up_selected().await?;
                 }
-                KeyCode::Char('d') | KeyCode::Delete => {
-                    if !self.containers.is_empty() {
-                        let container = &self.containers[self.selected];
-                        if container.status.is_available() {
-                            self.status_message =
-                                Some("Not registered — nothing to remove".to_string());
-                        } else {
-                            self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
-                            self.dialog_focus = DialogFocus::Cancel;
-                            self.view = View::Confirm;
-                        }
+                KeyCode::Char('d') | KeyCode::Delete if !self.containers.is_empty() => {
+                    let container = &self.containers[self.selected];
+                    if container.status.is_available() {
+                        self.status_message =
+                            Some("Not registered — nothing to remove".to_string());
+                    } else {
+                        self.confirm_action = Some(ConfirmAction::Delete(container.id.clone()));
+                        self.dialog_focus = DialogFocus::Cancel;
+                        self.view = View::Confirm;
                     }
                 }
-                KeyCode::Char('f') => {
-                    if !self.containers.is_empty() {
-                        let container = &self.containers[self.selected];
-                        if container.source != DevcontainerSource::Devc
-                            && !container.status.is_available()
-                        {
-                            self.confirm_action = Some(ConfirmAction::Forget {
-                                id: container.id.clone(),
-                                name: container.name.clone(),
-                            });
-                            self.dialog_focus = DialogFocus::Cancel;
-                            self.view = View::Confirm;
-                        } else if container.source == DevcontainerSource::Devc {
-                            self.status_message =
-                                Some("Cannot forget devc-created containers".to_string());
-                        }
+                KeyCode::Char('f') if !self.containers.is_empty() => {
+                    let container = &self.containers[self.selected];
+                    if container.source != DevcontainerSource::Devc
+                        && !container.status.is_available()
+                    {
+                        self.confirm_action = Some(ConfirmAction::Forget {
+                            id: container.id.clone(),
+                            name: container.name.clone(),
+                        });
+                        self.dialog_focus = DialogFocus::Cancel;
+                        self.view = View::Confirm;
+                    } else if container.source == DevcontainerSource::Devc {
+                        self.status_message =
+                            Some("Cannot forget devc-created containers".to_string());
                     }
                 }
                 KeyCode::Char('r') | KeyCode::F(5) => {
@@ -1980,30 +1949,22 @@ impl App {
                 KeyCode::Char('R') => {
                     self.start_rebuild_dialog();
                 }
-                KeyCode::Char('p') => {
+                KeyCode::Char('p') if !self.containers.is_empty() => {
                     // Enter port forwarding view for selected container
-                    if !self.containers.is_empty() {
-                        let container = self.containers[self.selected].clone();
-                        self.enter_ports_view(&container).await?;
-                    }
+                    let container = self.containers[self.selected].clone();
+                    self.enter_ports_view(&container).await?;
                 }
                 KeyCode::Char('a') => {
                     self.open_agent_manager_for_selected_container().await;
                 }
+                #[cfg(unix)]
+                KeyCode::Char('S') if !self.containers.is_empty() => {
+                    let container = self.containers[self.selected].clone();
+                    self.enter_shell_mode(&container).await?;
+                }
+                #[cfg(not(unix))]
                 KeyCode::Char('S') => {
-                    #[cfg(unix)]
-                    {
-                        // Enter shell mode for selected container
-                        if !self.containers.is_empty() {
-                            let container = self.containers[self.selected].clone();
-                            self.enter_shell_mode(&container).await?;
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        self.status_message =
-                            Some("Shell not supported on this platform".to_string());
-                    }
+                    self.status_message = Some("Shell not supported on this platform".to_string());
                 }
 
                 _ => {}
@@ -2020,43 +1981,35 @@ impl App {
     ) -> AppResult<()> {
         match code {
             // Navigation
-            KeyCode::Char('j') | KeyCode::Down => {
-                if !self.providers.is_empty() {
-                    self.selected_provider = (self.selected_provider + 1) % self.providers.len();
-                    self.providers_table_state
-                        .select(Some(self.selected_provider));
-                }
+            KeyCode::Char('j') | KeyCode::Down if !self.providers.is_empty() => {
+                self.selected_provider = (self.selected_provider + 1) % self.providers.len();
+                self.providers_table_state
+                    .select(Some(self.selected_provider));
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if !self.providers.is_empty() {
-                    self.selected_provider = self
-                        .selected_provider
-                        .checked_sub(1)
-                        .unwrap_or(self.providers.len() - 1);
-                    self.providers_table_state
-                        .select(Some(self.selected_provider));
-                }
+            KeyCode::Char('k') | KeyCode::Up if !self.providers.is_empty() => {
+                self.selected_provider = self
+                    .selected_provider
+                    .checked_sub(1)
+                    .unwrap_or(self.providers.len() - 1);
+                self.providers_table_state
+                    .select(Some(self.selected_provider));
             }
 
             // Open provider detail/configuration
-            KeyCode::Enter => {
-                if !self.providers.is_empty() {
-                    // Reset provider detail state and enter detail view
-                    self.provider_detail_state = ProviderDetailState::new();
-                    self.view = View::ProviderDetail;
-                }
+            KeyCode::Enter if !self.providers.is_empty() => {
+                // Reset provider detail state and enter detail view
+                self.provider_detail_state = ProviderDetailState::new();
+                self.view = View::ProviderDetail;
             }
 
             // Set as active provider - show confirmation dialog
-            KeyCode::Char(' ') | KeyCode::Char('a') => {
-                if !self.providers.is_empty() {
-                    let new_provider = self.providers[self.selected_provider].provider_type;
-                    // Only show confirmation if it's a different provider
-                    if self.active_provider != Some(new_provider) {
-                        self.dialog_focus = DialogFocus::Cancel;
-                        self.confirm_action = Some(ConfirmAction::SetDefaultProvider(new_provider));
-                        self.view = View::Confirm;
-                    }
+            KeyCode::Char(' ') | KeyCode::Char('a') if !self.providers.is_empty() => {
+                let new_provider = self.providers[self.selected_provider].provider_type;
+                // Only show confirmation if it's a different provider
+                if self.active_provider != Some(new_provider) {
+                    self.dialog_focus = DialogFocus::Cancel;
+                    self.confirm_action = Some(ConfirmAction::SetDefaultProvider(new_provider));
+                    self.view = View::Confirm;
                 }
             }
 
@@ -2080,10 +2033,8 @@ impl App {
             }
 
             // Retry connection
-            KeyCode::Char('c') => {
-                if !self.is_connected() {
-                    self.retry_connection().await?;
-                }
+            KeyCode::Char('c') if !self.is_connected() => {
+                self.retry_connection().await?;
             }
 
             _ => {}
@@ -2361,19 +2312,14 @@ impl App {
             KeyCode::Char('R') => {
                 self.start_rebuild_dialog();
             }
+            #[cfg(unix)]
+            KeyCode::Char('S') if !self.containers.is_empty() => {
+                let container = self.containers[self.selected].clone();
+                self.enter_shell_mode(&container).await?;
+            }
+            #[cfg(not(unix))]
             KeyCode::Char('S') => {
-                #[cfg(unix)]
-                {
-                    // Enter shell mode for current container
-                    if !self.containers.is_empty() {
-                        let container = self.containers[self.selected].clone();
-                        self.enter_shell_mode(&container).await?;
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    self.status_message = Some("Shell not supported on this platform".to_string());
-                }
+                self.status_message = Some("Shell not supported on this platform".to_string());
             }
             _ => {}
         }
@@ -2383,17 +2329,15 @@ impl App {
     /// Handle build output view keys
     async fn handle_build_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> AppResult<()> {
         match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.build_output_scroll < self.build_output.len().saturating_sub(1) {
-                    self.build_output_scroll += 1;
-                    self.build_auto_scroll = false; // User took control
-                }
+            KeyCode::Char('j') | KeyCode::Down
+                if self.build_output_scroll < self.build_output.len().saturating_sub(1) =>
+            {
+                self.build_output_scroll += 1;
+                self.build_auto_scroll = false; // User took control
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.build_output_scroll > 0 {
-                    self.build_output_scroll -= 1;
-                    self.build_auto_scroll = false;
-                }
+            KeyCode::Char('k') | KeyCode::Up if self.build_output_scroll > 0 => {
+                self.build_output_scroll -= 1;
+                self.build_auto_scroll = false;
             }
             KeyCode::Char('G') | KeyCode::End => {
                 self.build_output_scroll = self.build_output.len().saturating_sub(1);
@@ -2415,13 +2359,13 @@ impl App {
                     ));
                 }
             }
-            KeyCode::Char('q') | KeyCode::Esc => {
+            KeyCode::Char('q') | KeyCode::Esc
                 // Build complete case handled by view-specific exit above global keys.
                 // Here we only handle the in-progress cancellation case.
-                if !self.build_complete {
-                    self.confirm_action = Some(ConfirmAction::CancelBuild);
-                    self.view = View::Confirm;
-                }
+                if !self.build_complete =>
+            {
+                self.confirm_action = Some(ConfirmAction::CancelBuild);
+                self.view = View::Confirm;
             }
             _ => {}
         }
@@ -2433,10 +2377,10 @@ impl App {
         let page_size = 20;
 
         match code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.logs_scroll < self.logs.len().saturating_sub(1) {
-                    self.logs_scroll += 1;
-                }
+            KeyCode::Char('j') | KeyCode::Down
+                if self.logs_scroll < self.logs.len().saturating_sub(1) =>
+            {
+                self.logs_scroll += 1;
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.logs_scroll = self.logs_scroll.saturating_sub(1);
@@ -2577,12 +2521,11 @@ impl App {
             }
 
             // Install socat
-            KeyCode::Char('i') => {
+            KeyCode::Char('i')
                 if self.port_state.socat_installed == Some(false)
-                    && !self.port_state.socat_installing
-                {
-                    self.install_socat_in_container();
-                }
+                    && !self.port_state.socat_installing =>
+            {
+                self.install_socat_in_container();
             }
 
             _ => {}
@@ -3293,6 +3236,7 @@ impl App {
     }
 
     #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
     fn make_shell_config(
         &self,
         runtime_program: String,
