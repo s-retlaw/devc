@@ -14,6 +14,7 @@ pub enum SettingsSection {
     ContainerDefaults,
     Dotfiles,
     Ssh,
+    PortForwarding,
     Credentials,
     Agents,
 }
@@ -24,6 +25,7 @@ impl SettingsSection {
             SettingsSection::ContainerDefaults,
             SettingsSection::Dotfiles,
             SettingsSection::Ssh,
+            SettingsSection::PortForwarding,
             SettingsSection::Credentials,
             SettingsSection::Agents,
         ]
@@ -34,6 +36,7 @@ impl SettingsSection {
             Self::ContainerDefaults => "CONTAINER DEFAULTS",
             Self::Dotfiles => "DOTFILES",
             Self::Ssh => "SSH / CONNECTION",
+            Self::PortForwarding => "PORT FORWARDING",
             Self::Credentials => "CREDENTIALS",
             Self::Agents => "AGENTS",
         }
@@ -44,6 +47,10 @@ impl SettingsSection {
             Self::ContainerDefaults => &[SettingsField::DefaultShell, SettingsField::DefaultUser],
             Self::Dotfiles => &[SettingsField::DotfilesRepo, SettingsField::DotfilesLocal],
             Self::Ssh => &[SettingsField::SshEnabled, SettingsField::SshKeyPath],
+            Self::PortForwarding => &[
+                SettingsField::AutoForwardPorts,
+                SettingsField::AutoOpenBrowser,
+            ],
             Self::Credentials => &[
                 SettingsField::CredentialsDocker,
                 SettingsField::CredentialsGit,
@@ -70,6 +77,9 @@ pub enum SettingsField {
     // SSH
     SshEnabled,
     SshKeyPath,
+    // Port Forwarding
+    AutoForwardPorts,
+    AutoOpenBrowser,
     // Credentials
     CredentialsDocker,
     CredentialsGit,
@@ -92,6 +102,9 @@ impl SettingsField {
             // SSH
             SettingsField::SshEnabled,
             SettingsField::SshKeyPath,
+            // Port Forwarding
+            SettingsField::AutoForwardPorts,
+            SettingsField::AutoOpenBrowser,
             // Credentials
             SettingsField::CredentialsDocker,
             SettingsField::CredentialsGit,
@@ -111,6 +124,8 @@ impl SettingsField {
             Self::DotfilesLocal => "Local Path",
             Self::SshEnabled => "SSH Enabled",
             Self::SshKeyPath => "SSH Key Path",
+            Self::AutoForwardPorts => "Auto-Forward Ports",
+            Self::AutoOpenBrowser => "Auto-Open Browser",
             Self::CredentialsDocker => "Docker Credentials",
             Self::CredentialsGit => "Git Credentials",
             Self::AgentCodexEnabled => "Codex",
@@ -125,6 +140,7 @@ impl SettingsField {
             Self::DefaultShell | Self::DefaultUser => SettingsSection::ContainerDefaults,
             Self::DotfilesRepo | Self::DotfilesLocal => SettingsSection::Dotfiles,
             Self::SshEnabled | Self::SshKeyPath => SettingsSection::Ssh,
+            Self::AutoForwardPorts | Self::AutoOpenBrowser => SettingsSection::PortForwarding,
             Self::CredentialsDocker | Self::CredentialsGit => SettingsSection::Credentials,
             Self::AgentCodexEnabled
             | Self::AgentClaudeEnabled
@@ -137,6 +153,8 @@ impl SettingsField {
         !matches!(
             self,
             Self::SshEnabled
+                | Self::AutoForwardPorts
+                | Self::AutoOpenBrowser
                 | Self::CredentialsDocker
                 | Self::CredentialsGit
                 | Self::AgentCodexEnabled
@@ -150,6 +168,8 @@ impl SettingsField {
         matches!(
             self,
             Self::SshEnabled
+                | Self::AutoForwardPorts
+                | Self::AutoOpenBrowser
                 | Self::CredentialsDocker
                 | Self::CredentialsGit
                 | Self::AgentCodexEnabled
@@ -167,6 +187,8 @@ impl SettingsField {
             Self::DotfilesLocal => "Local directory path for dotfiles",
             Self::SshEnabled => "Enable SSH for better TTY support",
             Self::SshKeyPath => "Path to SSH private key",
+            Self::AutoForwardPorts => "Automatically forward all detected ports",
+            Self::AutoOpenBrowser => "Open browser for newly forwarded ports",
             Self::CredentialsDocker => "Forward Docker registry credentials into containers",
             Self::CredentialsGit => "Forward Git credentials into containers",
             Self::AgentCodexEnabled => {
@@ -242,6 +264,9 @@ pub struct SettingsDraft {
     // SSH
     pub ssh_enabled: bool,
     pub ssh_key_path: Option<String>,
+    // Port Forwarding
+    pub auto_forward_ports: bool,
+    pub auto_open_browser: bool,
     // Credentials
     pub credentials_docker: bool,
     pub credentials_git: bool,
@@ -309,6 +334,12 @@ impl SettingsState {
         match field {
             SettingsField::SshEnabled => {
                 self.draft.ssh_enabled = !self.draft.ssh_enabled;
+            }
+            SettingsField::AutoForwardPorts => {
+                self.draft.auto_forward_ports = !self.draft.auto_forward_ports;
+            }
+            SettingsField::AutoOpenBrowser => {
+                self.draft.auto_open_browser = !self.draft.auto_open_browser;
             }
             SettingsField::CredentialsDocker => {
                 self.draft.credentials_docker = !self.draft.credentials_docker;
@@ -378,6 +409,9 @@ impl SettingsState {
         // SSH
         config.defaults.ssh_enabled = Some(self.draft.ssh_enabled);
         config.defaults.ssh_key_path = self.draft.ssh_key_path.clone();
+        // Port Forwarding
+        config.defaults.auto_forward_ports = Some(self.draft.auto_forward_ports);
+        config.defaults.auto_open_browser = Some(self.draft.auto_open_browser);
         // Credentials
         config.credentials.docker = self.draft.credentials_docker;
         config.credentials.git = self.draft.credentials_git;
@@ -499,6 +533,8 @@ impl SettingsDraft {
             dotfiles_local: config.defaults.dotfiles_local.clone(),
             ssh_enabled: config.defaults.ssh_enabled.unwrap_or(true),
             ssh_key_path: config.defaults.ssh_key_path.clone(),
+            auto_forward_ports: config.defaults.auto_forward_ports.unwrap_or(true),
+            auto_open_browser: config.defaults.auto_open_browser.unwrap_or(true),
             credentials_docker: config.credentials.docker,
             credentials_git: config.credentials.git,
             agent_codex_enabled: config.agents.codex.enabled.unwrap_or(false),
@@ -518,6 +554,18 @@ impl SettingsDraft {
                 if self.ssh_enabled { "true" } else { "false" }.to_string()
             }
             SettingsField::SshKeyPath => self.ssh_key_path.clone().unwrap_or_default(),
+            SettingsField::AutoForwardPorts => if self.auto_forward_ports {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+            SettingsField::AutoOpenBrowser => if self.auto_open_browser {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
             SettingsField::CredentialsDocker => if self.credentials_docker {
                 "true"
             } else {
@@ -573,6 +621,12 @@ impl SettingsDraft {
                 self.ssh_enabled = value == "true" || value == "1" || value == "yes";
             }
             SettingsField::SshKeyPath => self.ssh_key_path = value_opt,
+            SettingsField::AutoForwardPorts => {
+                self.auto_forward_ports = value == "true" || value == "1" || value == "yes";
+            }
+            SettingsField::AutoOpenBrowser => {
+                self.auto_open_browser = value == "true" || value == "1" || value == "yes";
+            }
             SettingsField::CredentialsDocker => {
                 self.credentials_docker = value == "true" || value == "1" || value == "yes";
             }

@@ -205,7 +205,7 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     .get(app.port_state.selected_port)
                     .map(|p| p.is_forwarded)
                     .unwrap_or(false);
-                let auto_all = app
+                let per_container_auto_all = app
                     .port_state
                     .provider_container_id
                     .as_ref()
@@ -213,6 +213,9 @@ pub(super) fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                         app.port_state.auto_forward_all_containers.contains(cid)
                     })
                     .unwrap_or(false);
+                let global_auto_forward =
+                    app.config.defaults.auto_forward_ports != Some(false);
+                let auto_all = per_container_auto_all || global_auto_forward;
                 let auto_all_label = if auto_all {
                     "[A]uto-all:ON"
                 } else {

@@ -977,9 +977,14 @@ impl App {
             .filter(|cid| !running_container_ids.contains_key(*cid))
             .cloned()
             .collect();
-        for cid in to_remove {
-            self.port_state.auto_port_detectors.remove(&cid);
-            self.port_state.auto_forward_configs.remove(&cid);
+        for cid in &to_remove {
+            self.port_state.auto_port_detectors.remove(cid);
+            self.port_state.auto_forward_configs.remove(cid);
+            self.port_state.auto_runtime_args.remove(cid);
+            self.port_state
+                .auto_forwarded_ports
+                .retain(|(c, _)| c != cid);
+            self.port_state.auto_opened_ports.retain(|(c, _)| c != cid);
         }
 
         // Collect containers that need a new detector
@@ -1017,7 +1022,8 @@ impl App {
                     .port_state
                     .auto_forward_all_containers
                     .contains(provider_cid);
-                if !auto_fwd.is_empty() || has_auto_all {
+                let global_auto_forward = self.config.defaults.auto_forward_ports != Some(false);
+                if !auto_fwd.is_empty() || has_auto_all || global_auto_forward {
                     let rt_args = manager
                         .runtime_args_for(&state)
                         .unwrap_or_else(|_| (state.provider.to_string(), vec![]));
@@ -1071,6 +1077,8 @@ impl App {
     /// matches an auto-forward config entry (and action != Ignore, and not already
     /// forwarded), spawns a forwarder.
     async fn poll_auto_port_detectors(&mut self) {
+        let global_auto_forward = self.config.defaults.auto_forward_ports != Some(false);
+        let global_auto_open = self.config.defaults.auto_open_browser != Some(false);
         let cids: Vec<String> = self
             .port_state
             .auto_port_detectors
@@ -1083,7 +1091,6 @@ impl App {
                 None => continue,
             };
 
-            // Drain all pending updates
             while let Ok(update) = rx.try_recv() {
                 let is_auto_all = self.port_state.auto_forward_all_containers.contains(&cid);
                 let config = self
@@ -1096,11 +1103,10 @@ impl App {
                 for detected in &update.ports {
                     let matching_config = config.iter().find(|pfc| pfc.port == detected.port);
 
-                    // Determine if we should forward this port
                     let should_forward = if let Some(pfc) = matching_config {
                         pfc.action != devc_config::AutoForwardAction::Ignore
                     } else {
-                        is_auto_all
+                        is_auto_all || global_auto_forward
                     };
 
                     if !should_forward {
@@ -1137,10 +1143,14 @@ impl App {
                                 .active_forwarders
                                 .insert(key.clone(), forwarder);
                             self.port_state.auto_forwarded_ports.insert(key.clone());
-                            // Handle action based on config (or Notify for auto-all)
+                            let default_action = if global_auto_open {
+                                devc_config::AutoForwardAction::OpenBrowserOnce
+                            } else {
+                                devc_config::AutoForwardAction::Notify
+                            };
                             let action = matching_config
                                 .map(|pfc| &pfc.action)
-                                .unwrap_or(&devc_config::AutoForwardAction::Notify);
+                                .unwrap_or(&default_action);
                             match action {
                                 devc_config::AutoForwardAction::Notify => {
                                     let label = matching_config.and_then(|pfc| pfc.label.as_ref());
@@ -2503,7 +2513,11 @@ impl App {
             // Toggle auto-forward all for this container
             KeyCode::Char('A') => {
                 if let Some(ref cid) = self.port_state.provider_container_id {
-                    if self.port_state.auto_forward_all_containers.contains(cid) {
+                    let global_on = self.config.defaults.auto_forward_ports != Some(false);
+                    if global_on {
+                        self.status_message =
+                            Some("Auto-forward all is enabled globally in Settings".to_string());
+                    } else if self.port_state.auto_forward_all_containers.contains(cid) {
                         self.port_state.auto_forward_all_containers.remove(cid);
                         self.status_message = Some("Auto-forward all: OFF".to_string());
                     } else {
@@ -3441,7 +3455,10 @@ impl App {
 
         // 5.5. Start background auto-forwarding during shell relay
         let (auto_fwd_stop_tx, auto_fwd_stop_rx) = tokio::sync::oneshot::channel();
-        let auto_fwd_state = self.port_state.take_auto_forward_state();
+        let auto_fwd_state = self.port_state.take_auto_forward_state(
+            self.config.defaults.auto_forward_ports != Some(false),
+            self.config.defaults.auto_open_browser != Some(false),
+        );
         let auto_fwd_handle =
             crate::port_state::spawn_shell_auto_forwarder(auto_fwd_state, auto_fwd_stop_rx);
 

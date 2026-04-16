@@ -94,6 +94,10 @@ pub struct DefaultsConfig {
     pub ssh_key_path: Option<String>,
     /// Forward URL open requests from container to host browser (default: true)
     pub url_forwarding: Option<bool>,
+    /// Automatically forward all detected ports in containers (default: true)
+    pub auto_forward_ports: Option<bool>,
+    /// Automatically open browser for forwarded ports (default: true)
+    pub auto_open_browser: Option<bool>,
 }
 
 impl Default for DefaultsConfig {
@@ -109,6 +113,8 @@ impl Default for DefaultsConfig {
             ssh_enabled: Some(false),
             ssh_key_path: None,
             url_forwarding: Some(true),
+            auto_forward_ports: Some(true),
+            auto_open_browser: Some(true),
         }
     }
 }

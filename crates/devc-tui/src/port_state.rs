@@ -180,7 +180,11 @@ impl PortForwardingState {
 
     /// Extract auto-forwarding state for a background task (used during shell sessions).
     /// After this call, the auto-forwarding fields on self are empty.
-    pub fn take_auto_forward_state(&mut self) -> ShellAutoForwardState {
+    pub fn take_auto_forward_state(
+        &mut self,
+        auto_forward_global: bool,
+        auto_open_browser_global: bool,
+    ) -> ShellAutoForwardState {
         ShellAutoForwardState {
             detectors: std::mem::take(&mut self.auto_port_detectors),
             configs: std::mem::take(&mut self.auto_forward_configs),
@@ -189,6 +193,8 @@ impl PortForwardingState {
             opened_ports: std::mem::take(&mut self.auto_opened_ports),
             forwarders: std::mem::take(&mut self.active_forwarders),
             auto_forward_all: self.auto_forward_all_containers.clone(),
+            auto_forward_all_global: auto_forward_global,
+            auto_open_browser_global,
         }
     }
 
@@ -219,6 +225,8 @@ pub struct ShellAutoForwardState {
     pub opened_ports: HashSet<(String, u16)>,
     pub forwarders: HashMap<(String, u16), PortForwarder>,
     pub auto_forward_all: HashSet<String>,
+    pub auto_forward_all_global: bool,
+    pub auto_open_browser_global: bool,
 }
 
 /// Poll auto port detectors in background mode (no TUI actions).
@@ -243,7 +251,7 @@ async fn poll_detectors_background(state: &mut ShellAutoForwardState) {
                 let should_forward = if let Some(pfc) = matching_config {
                     pfc.action != devc_config::AutoForwardAction::Ignore
                 } else {
-                    is_auto_all
+                    is_auto_all || state.auto_forward_all_global
                 };
 
                 if !should_forward {
@@ -277,11 +285,29 @@ async fn poll_detectors_background(state: &mut ShellAutoForwardState) {
                     Ok(forwarder) => {
                         state.forwarders.insert(key.clone(), forwarder);
                         state.forwarded_ports.insert(key.clone());
-                        // Track OpenBrowserOnce so it won't re-fire after shell exit
-                        if let Some(pfc) = matching_config {
-                            if pfc.action == devc_config::AutoForwardAction::OpenBrowserOnce {
-                                state.opened_ports.insert(key);
+                        let default_action = if state.auto_open_browser_global {
+                            devc_config::AutoForwardAction::OpenBrowserOnce
+                        } else {
+                            devc_config::AutoForwardAction::Silent
+                        };
+                        let action = matching_config
+                            .map(|pfc| &pfc.action)
+                            .unwrap_or(&default_action);
+                        match action {
+                            devc_config::AutoForwardAction::OpenBrowser => {
+                                let protocol =
+                                    matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                                let _ = crate::tunnel::open_in_browser(detected.port, protocol);
                             }
+                            devc_config::AutoForwardAction::OpenBrowserOnce
+                                if !state.opened_ports.contains(&key) =>
+                            {
+                                state.opened_ports.insert(key);
+                                let protocol =
+                                    matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                                let _ = crate::tunnel::open_in_browser(detected.port, protocol);
+                            }
+                            _ => {}
                         }
                     }
                     Err(e) => {

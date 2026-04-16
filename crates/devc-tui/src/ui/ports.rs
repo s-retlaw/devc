@@ -8,12 +8,14 @@ pub(super) fn draw_ports(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|c| c.name.as_str())
         .unwrap_or("Unknown");
 
-    let auto_all_on = app
+    let per_container_auto_all = app
         .port_state
         .provider_container_id
         .as_ref()
         .map(|cid| app.port_state.auto_forward_all_containers.contains(cid))
         .unwrap_or(false);
+    let global_auto_forward = app.config.defaults.auto_forward_ports != Some(false);
+    let auto_all_on = per_container_auto_all || global_auto_forward;
 
     let title_suffix = if auto_all_on { " [auto-all]" } else { "" };
 
