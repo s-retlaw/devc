@@ -1,8 +1,9 @@
 //! Docker Compose orchestration for ContainerManager
 
 use crate::{
-    features, run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, CoreError,
-    DevcContainerStatus, Result, SshManager,
+    features, run_feature_lifecycle_commands_with_output,
+    run_lifecycle_command_with_env_and_output, Container, CoreError, DevcContainerStatus, Result,
+    SshManager,
 };
 use devc_provider::{ContainerId, ContainerProvider};
 use std::path::Path;
@@ -189,80 +190,72 @@ impl ContainerManager {
         );
         let remote_env = merged_env.as_ref();
 
+        let opts = |tag: &'static str| {
+            Self::lifecycle_exec_opts(user, workspace_folder, remote_env, output, Some(tag))
+        };
+
         if !feature_props.on_create_commands.is_empty() {
             send_progress(progress, "Running feature onCreateCommand(s)...");
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 &container_id,
                 &feature_props.on_create_commands,
-                user,
-                workspace_folder,
-                remote_env,
+                opts("feature:onCreate"),
             )
             .await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.on_create_command {
             send_progress(progress, "Running onCreate command...");
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 &container_id,
                 cmd,
-                user,
-                workspace_folder,
-                remote_env,
+                opts("onCreate"),
             )
             .await?;
         }
 
         if !feature_props.update_content_commands.is_empty() {
             send_progress(progress, "Running feature updateContentCommand(s)...");
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 &container_id,
                 &feature_props.update_content_commands,
-                user,
-                workspace_folder,
-                remote_env,
+                opts("feature:updateContent"),
             )
             .await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.update_content_command {
             send_progress(progress, "Running updateContentCommand...");
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 &container_id,
                 cmd,
-                user,
-                workspace_folder,
-                remote_env,
+                opts("updateContent"),
             )
             .await?;
         }
 
         if !feature_props.post_create_commands.is_empty() {
             send_progress(progress, "Running feature postCreateCommand(s)...");
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 &container_id,
                 &feature_props.post_create_commands,
-                user,
-                workspace_folder,
-                remote_env,
+                opts("feature:postCreate"),
             )
             .await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.post_create_command {
             send_progress(progress, "Running postCreateCommand...");
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 &container_id,
                 cmd,
-                user,
-                workspace_folder,
-                remote_env,
+                opts("postCreate"),
             )
             .await?;
         }
@@ -307,26 +300,22 @@ impl ContainerManager {
 
         if !feature_props.post_start_commands.is_empty() {
             send_progress(progress, "Running feature postStartCommand(s)...");
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 &container_id,
                 &feature_props.post_start_commands,
-                user,
-                workspace_folder,
-                remote_env,
+                opts("feature:postStart"),
             )
             .await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.post_start_command {
             send_progress(progress, "Running postStartCommand...");
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 &container_id,
                 cmd,
-                user,
-                workspace_folder,
-                remote_env,
+                opts("postStart"),
             )
             .await?;
         }

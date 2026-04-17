@@ -313,12 +313,15 @@ fn spawn_browser(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `url` starts with a scheme we'll hand off to the host browser.
+pub fn is_browser_openable_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://") || url.starts_with("ftp://")
+}
+
 /// Open a full URL in the default browser on the host.
 /// Validates that the URL scheme is http, https, or ftp before opening.
 pub fn open_url(url: &str) -> Result<(), String> {
-    let valid =
-        url.starts_with("http://") || url.starts_with("https://") || url.starts_with("ftp://");
-    if !valid {
+    if !is_browser_openable_url(url) {
         return Err(format!(
             "Refusing to open URL with unsupported scheme: {}",
             url

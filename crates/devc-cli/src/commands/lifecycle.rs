@@ -3,8 +3,28 @@
 use anyhow::{anyhow, bail, Context, Result};
 use devc_config::GlobalConfig;
 use devc_core::{Container, ContainerManager, ContainerState, DevcContainerStatus};
+use tokio::sync::mpsc;
 
 use super::{find_container, find_container_in_cwd};
+
+/// Run `f` with a fresh output channel whose lines are printed to stdout.
+/// Drops the sender and awaits the reader task before returning, so the caller
+/// sees `f`'s return value only after all streamed lines have been printed.
+async fn with_stdout_stream<F, Fut, T>(f: F) -> T
+where
+    F: FnOnce(mpsc::UnboundedSender<String>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let reader = tokio::spawn(async move {
+        while let Some(line) = rx.recv().await {
+            println!("{}", line);
+        }
+    });
+    let result = f(tx).await;
+    let _ = reader.await;
+    result
+}
 
 /// Execute a command in a container (raw docker/podman exec)
 pub async fn exec(
@@ -115,46 +135,45 @@ pub async fn exec(
     Ok(())
 }
 
-/// Open a shell in a container, optionally running a command
-pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>) -> Result<()> {
+/// Resolved state needed to attach a shell: fresh state, runtime args, exec env, extra env.
+#[doc(hidden)]
+pub struct ShellPrepared {
+    pub state: ContainerState,
+    pub program: String,
+    pub prefix: Vec<String>,
+    pub exec_env: devc_core::ExecEnv,
+    pub extra_env: std::collections::HashMap<String, String>,
+}
+
+/// Everything the `shell` command does up to (but not including) actually attaching:
+/// start the container if needed, prepare exec context, run postAttachCommand.
+/// Extracted for testability — `ssh_to_container` spawns a real subprocess and
+/// is not mockable. Public only so integration tests in `tests/` can call it.
+#[doc(hidden)]
+pub async fn shell_prepare(manager: &ContainerManager, container: &str) -> Result<ShellPrepared> {
     let state = find_container(manager, container).await?;
 
     if state.status != DevcContainerStatus::Running {
-        // Try to start it first
-        if state.status == DevcContainerStatus::Stopped
-            || state.status == DevcContainerStatus::Created
+        if !(state.status == DevcContainerStatus::Stopped
+            || state.status == DevcContainerStatus::Created)
         {
-            println!("Starting container '{}'...", state.name);
-            manager.start(&state.id).await?;
-            // Re-fetch state after starting — prepare_exec_context handles credentials + feature env
-            let state = find_container(manager, container).await?;
-            let (program, prefix) = manager
-                .runtime_args_for(&state)
-                .map_err(|e| anyhow!("{}", e))?;
-            let exec_env = manager
-                .prepare_exec_context(&state.id)
-                .await
-                .map_err(|e| anyhow!("{}", e))?;
-            print_credential_status(&exec_env);
-            let extra_env = build_shell_extra_env(&exec_env);
-            return ssh_to_container(
-                &state,
-                &exec_env.container_id,
-                &cmd,
-                &program,
-                &prefix,
-                &extra_env,
-            )
-            .await;
-        } else {
             bail!(
                 "Container '{}' is not running (status: {})",
                 state.name,
                 state.status
             );
         }
+        println!("Starting container '{}'...", state.name);
+        with_stdout_stream(|tx| async move {
+            manager
+                .start_with_channels(&state.id, None, Some(&tx))
+                .await
+        })
+        .await?;
     }
 
+    // Re-fetch state after (optionally) starting — prepare_exec_context handles credentials + feature env
+    let state = find_container(manager, container).await?;
     let (program, prefix) = manager
         .runtime_args_for(&state)
         .map_err(|e| anyhow!("{}", e))?;
@@ -164,13 +183,38 @@ pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>
         .map_err(|e| anyhow!("{}", e))?;
     print_credential_status(&exec_env);
     let extra_env = build_shell_extra_env(&exec_env);
+
+    // Log-not-fail: a failing postAttach shouldn't block the user's shell.
+    let state_id = state.id.clone();
+    if let Err(e) = with_stdout_stream(|tx| async move {
+        manager
+            .run_post_attach_command_with_output(&state_id, Some(&tx))
+            .await
+    })
+    .await
+    {
+        eprintln!("warning: postAttachCommand failed: {}", e);
+    }
+
+    Ok(ShellPrepared {
+        state,
+        program,
+        prefix,
+        exec_env,
+        extra_env,
+    })
+}
+
+/// Open a shell in a container, optionally running a command
+pub async fn shell(manager: &ContainerManager, container: &str, cmd: Vec<String>) -> Result<()> {
+    let prepared = shell_prepare(manager, container).await?;
     ssh_to_container(
-        &state,
-        &exec_env.container_id,
+        &prepared.state,
+        &prepared.exec_env.container_id,
         &cmd,
-        &program,
-        &prefix,
-        &extra_env,
+        &prepared.program,
+        &prepared.prefix,
+        &prepared.extra_env,
     )
     .await
 }
@@ -556,7 +600,12 @@ pub async fn start(manager: &ContainerManager, container: &str) -> Result<()> {
     }
 
     println!("Starting '{}'...", state.name);
-    manager.start(&state.id).await?;
+    with_stdout_stream(|tx| async move {
+        manager
+            .start_with_channels(&state.id, None, Some(&tx))
+            .await
+    })
+    .await?;
     println!("Started '{}'", state.name);
 
     Ok(())
@@ -596,7 +645,12 @@ pub async fn up(manager: &ContainerManager, container: Option<String>) -> Result
 
     println!("Starting '{}'...", state.name);
 
-    manager.up(&state.id).await?;
+    with_stdout_stream(|tx| async move {
+        manager
+            .up_with_progress(&state.id, None, Some(&tx), None)
+            .await
+    })
+    .await?;
 
     println!("Container '{}' is running", state.name);
     println!("\nConnect with: devc shell {}", state.name);

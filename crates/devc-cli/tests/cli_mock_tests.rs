@@ -40,6 +40,22 @@ fn test_manager(mock: MockProvider, store: StateStore) -> devc_core::ContainerMa
     devc_core::ContainerManager::new_for_testing(Box::new(mock), GlobalConfig::default(), store)
 }
 
+/// Like `test_manager` but disables all credential forwarding and agent injection,
+/// so tests that exercise `start`/`shell` flows don't pick up a mess of unrelated
+/// exec calls from the surrounding test environment.
+fn test_manager_minimal(mock: MockProvider, store: StateStore) -> devc_core::ContainerManager {
+    let mut cfg = GlobalConfig::default();
+    cfg.credentials.docker = false;
+    cfg.credentials.git = false;
+    cfg.credentials.gh = false;
+    cfg.credentials.ssh_agent = false;
+    cfg.agents.codex.enabled = Some(false);
+    cfg.agents.claude.enabled = Some(false);
+    cfg.agents.cursor.enabled = Some(false);
+    cfg.agents.gemini.enabled = Some(false);
+    devc_core::ContainerManager::new_for_testing(Box::new(mock), cfg, store)
+}
+
 /// Build a StateStore containing the given containers.
 fn store_with(containers: Vec<ContainerState>) -> StateStore {
     let mut store = StateStore::new();
@@ -261,5 +277,97 @@ async fn test_find_container_not_found() {
     assert!(
         result.unwrap_err().to_string().contains("not found"),
         "Expected 'not found' error",
+    );
+}
+
+/// Helper: write a devcontainer.json with a postAttachCommand into `workspace`.
+fn write_devcontainer_with_post_attach(workspace: &std::path::Path) {
+    let devcontainer_dir = workspace.join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).unwrap();
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        r#"{"image": "ubuntu:22.04", "postAttachCommand": "echo post-attach"}"#,
+    )
+    .unwrap();
+}
+
+/// Drive `shell_prepare` against a Running container and assert the MockProvider
+/// recorded an Exec call for the postAttachCommand shell.
+#[tokio::test]
+async fn test_shell_runs_post_attach_on_running_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_devcontainer_with_post_attach(tmp.path());
+
+    let cs = make_container(
+        "myapp",
+        DevcContainerStatus::Running,
+        Some("cid123"),
+        tmp.path(),
+    );
+    let name = cs.name.clone();
+    let store = store_with(vec![cs]);
+
+    let mock = MockProvider::new(ProviderType::Docker);
+    let calls = mock.calls.clone();
+    let manager = test_manager_minimal(mock, store);
+
+    commands::shell_prepare(&manager, &name)
+        .await
+        .expect("shell_prepare");
+
+    let recorded = calls.lock().unwrap();
+    let ran_post_attach = recorded.iter().any(|c| {
+        matches!(
+            c,
+            devc_core::test_support::MockCall::Exec { cmd, .. }
+                if cmd == &["/bin/sh".to_string(), "-c".to_string(), "echo post-attach".to_string()]
+        )
+    });
+    assert!(
+        ran_post_attach,
+        "Expected postAttachCommand (`echo post-attach`) to be executed; got: {:?}",
+        *recorded
+    );
+}
+
+/// Drive `shell_prepare` against a Stopped container — it should start the
+/// container, then run postAttachCommand.
+#[tokio::test]
+async fn test_shell_runs_post_attach_after_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_devcontainer_with_post_attach(tmp.path());
+
+    let cs = make_container(
+        "myapp",
+        DevcContainerStatus::Stopped,
+        Some("cid123"),
+        tmp.path(),
+    );
+    let name = cs.name.clone();
+    let store = store_with(vec![cs]);
+
+    let mock = MockProvider::new(ProviderType::Docker);
+    let calls = mock.calls.clone();
+    let manager = test_manager_minimal(mock, store);
+
+    commands::shell_prepare(&manager, &name)
+        .await
+        .expect("shell_prepare");
+
+    let recorded = calls.lock().unwrap();
+    // The start path runs first (invokes start_inner which may skip provider.start()
+    // if the inspect mock claims the container is already running). What we care
+    // about is that postAttachCommand fires regardless of the starting status.
+    let ran_post_attach = recorded.iter().any(|c| {
+        matches!(
+            c,
+            devc_core::test_support::MockCall::Exec { cmd, .. }
+                if cmd == &["/bin/sh".to_string(), "-c".to_string(), "echo post-attach".to_string()]
+        )
+    });
+    assert!(
+        ran_post_attach,
+        "Expected postAttachCommand (`echo post-attach`) to be executed; got: {:?}",
+        *recorded
     );
 }

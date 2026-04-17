@@ -3230,18 +3230,31 @@ impl App {
             },
         );
 
-        // Fire-and-forget postAttachCommand for new sessions
+        // Fire-and-forget postAttachCommand for new sessions. Stream its output
+        // into the Build logs view so the user can review it after detaching.
         let manager = Arc::clone(&self.manager);
         let state_id = container.id.clone();
+        let event_tx = self.async_event_tx.clone();
         tokio::spawn(async move {
+            let (otx, mut orx) = mpsc::unbounded_channel::<String>();
+            let forward_tx = event_tx.clone();
+            let forwarder = tokio::spawn(async move {
+                while let Some(line) = orx.recv().await {
+                    if forward_tx.send(AsyncEvent::UpOutput(line)).is_err() {
+                        break;
+                    }
+                }
+            });
             if let Err(e) = manager
                 .read()
                 .await
-                .run_post_attach_command(&state_id)
+                .run_post_attach_command_with_output(&state_id, Some(&otx))
                 .await
             {
                 tracing::warn!("postAttachCommand failed: {}", e);
             }
+            drop(otx);
+            let _ = forwarder.await;
         });
 
         self.shell_state.active_shell_container = Some(container_id);

@@ -7,8 +7,9 @@ mod lifecycle;
 
 use crate::features;
 use crate::{
-    run_feature_lifecycle_commands, run_lifecycle_command_with_env, Container, ContainerState,
-    CoreError, DevcContainerStatus, Result, StateStore,
+    run_feature_lifecycle_commands_with_output, run_lifecycle_command_with_env_and_output,
+    Container, ContainerState, CoreError, DevcContainerStatus, LifecycleExecOpts, Result,
+    StateStore,
 };
 use devc_config::GlobalConfig;
 use devc_provider::{
@@ -842,7 +843,17 @@ impl ContainerManager {
 
     /// Start a container
     pub async fn start(&self, id: &str) -> Result<()> {
-        self.start_inner(id, true, None).await
+        self.start_inner(id, true, None, None).await
+    }
+
+    /// Start a container, streaming progress and lifecycle-command output to the given channels.
+    pub async fn start_with_channels(
+        &self,
+        id: &str,
+        progress: Option<&mpsc::UnboundedSender<String>>,
+        output: Option<&mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
+        self.start_inner(id, true, progress, output).await
     }
 
     pub(crate) async fn start_inner(
@@ -850,6 +861,7 @@ impl ContainerManager {
         id: &str,
         run_agent_injection: bool,
         progress: Option<&mpsc::UnboundedSender<String>>,
+        output: Option<&mpsc::UnboundedSender<String>>,
     ) -> Result<()> {
         let container_state = {
             let state = self.state.read().await;
@@ -932,24 +944,32 @@ impl ContainerManager {
                     &feature_props.remote_env,
                 );
                 if !feature_props.post_start_commands.is_empty() {
-                    run_feature_lifecycle_commands(
+                    run_feature_lifecycle_commands_with_output(
                         provider,
                         &cid,
                         &feature_props.post_start_commands,
-                        container.devcontainer.effective_user(),
-                        container.devcontainer.workspace_folder.as_deref(),
-                        merged_env.as_ref(),
+                        LifecycleExecOpts {
+                            user: container.devcontainer.effective_user(),
+                            working_dir: container.devcontainer.workspace_folder.as_deref(),
+                            env: merged_env.as_ref(),
+                            output,
+                            tag: Some("feature:postStart"),
+                        },
                     )
                     .await?;
                 }
                 if let Some(ref cmd) = container.devcontainer.post_start_command {
-                    run_lifecycle_command_with_env(
+                    run_lifecycle_command_with_env_and_output(
                         provider,
                         &cid,
                         cmd,
-                        container.devcontainer.effective_user(),
-                        container.devcontainer.workspace_folder.as_deref(),
-                        merged_env.as_ref(),
+                        LifecycleExecOpts {
+                            user: container.devcontainer.effective_user(),
+                            working_dir: container.devcontainer.workspace_folder.as_deref(),
+                            env: merged_env.as_ref(),
+                            output,
+                            tag: Some("postStart"),
+                        },
                     )
                     .await?;
                 }
@@ -995,24 +1015,32 @@ impl ContainerManager {
         );
         let cid = ContainerId::new(container_id);
         if !feature_props.post_start_commands.is_empty() {
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 &cid,
                 &feature_props.post_start_commands,
-                container.devcontainer.effective_user(),
-                container.devcontainer.workspace_folder.as_deref(),
-                merged_env.as_ref(),
+                LifecycleExecOpts {
+                    user: container.devcontainer.effective_user(),
+                    working_dir: container.devcontainer.workspace_folder.as_deref(),
+                    env: merged_env.as_ref(),
+                    output,
+                    tag: Some("feature:postStart"),
+                },
             )
             .await?;
         }
         if let Some(ref cmd) = container.devcontainer.post_start_command {
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 &cid,
                 cmd,
-                container.devcontainer.effective_user(),
-                container.devcontainer.workspace_folder.as_deref(),
-                merged_env.as_ref(),
+                LifecycleExecOpts {
+                    user: container.devcontainer.effective_user(),
+                    working_dir: container.devcontainer.workspace_folder.as_deref(),
+                    env: merged_env.as_ref(),
+                    output,
+                    tag: Some("postStart"),
+                },
             )
             .await?;
         }
@@ -1389,7 +1417,7 @@ fi
         // Start container (idempotent) and run post-start phase
         send_stage(stage, BuildStage::StartingContainer);
         send_progress(progress, "Starting container...");
-        self.start_inner(id, false, progress).await?;
+        self.start_inner(id, false, progress, output).await?;
         if run_agent_injection {
             self.maybe_inject_agents_after_start(id, progress).await?;
         }
@@ -3375,6 +3403,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_post_start_streams_output() {
+        let (workspace, _marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        // Every exec emits this on the progress channel via exec_with_progress.
+        *mock.exec_output.lock().unwrap() = "post-start-output".to_string();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Stopped,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        mgr.start_with_channels(&id, None, Some(&tx)).await.unwrap();
+        drop(tx);
+
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+
+        assert!(
+            lines.iter().any(|l| l == "[postStart] post-start-output"),
+            "expected `[postStart] post-start-output` in streamed output, got: {:?}",
+            lines
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_start_streams_feature_output() {
+        let (workspace, _marker, feature_json) = create_lifecycle_workspace_with_features();
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.exec_output.lock().unwrap() = "feat-ps-output".to_string();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state_with_features(
+            workspace.path(),
+            DevcContainerStatus::Stopped,
+            Some("sha256:img"),
+            Some("container123"),
+            &feature_json,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        mgr.start_with_channels(&id, None, Some(&tx)).await.unwrap();
+        drop(tx);
+
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "[feature:postStart] feat-ps-output"),
+            "expected `[feature:postStart] feat-ps-output` line, got: {:?}",
+            lines
+        );
+    }
+
+    #[tokio::test]
     async fn test_post_attach_command_runs() {
         let (workspace, _marker) = create_lifecycle_workspace();
         let mock = MockProvider::new(ProviderType::Docker);
@@ -3408,6 +3506,79 @@ mod tests {
         assert!(!lifecycle_cmds.contains(&"echo update-content"));
         assert!(!lifecycle_cmds.contains(&"echo post-create"));
         assert!(!lifecycle_cmds.contains(&"echo post-start"));
+    }
+
+    #[tokio::test]
+    async fn test_post_attach_streams_output() {
+        let (workspace, _marker) = create_lifecycle_workspace();
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.exec_output.lock().unwrap() = "post-attach-output".to_string();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        mgr.run_post_attach_command_with_output(&id, Some(&tx))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+
+        assert!(
+            lines.iter().any(|l| l == "[postAttach] post-attach-output"),
+            "expected `[postAttach] post-attach-output` line, got: {:?}",
+            lines
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_attach_streams_feature_output() {
+        let (workspace, _marker, feature_json) = create_lifecycle_workspace_with_features();
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.exec_output.lock().unwrap() = "feat-pa-output".to_string();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state_with_features(
+            workspace.path(),
+            DevcContainerStatus::Running,
+            Some("sha256:img"),
+            Some("container123"),
+            &feature_json,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        let mgr = test_manager_no_creds(mock, state);
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        mgr.run_post_attach_command_with_output(&id, Some(&tx))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "[feature:postAttach] feat-pa-output"),
+            "expected `[feature:postAttach] feat-pa-output` line, got: {:?}",
+            lines
+        );
     }
 
     #[tokio::test]

@@ -195,8 +195,10 @@ mod pty {
         runtime_prefix: Vec<String>,
         container_id: String,
         auto_forward_enabled: bool,
-        /// Forwarders spawned on-demand for browser URL requests
+        /// Forwarders spawned on-demand for browser URL requests, kept alive for the shell's lifetime
         on_demand_forwarders: Vec<crate::tunnel::PortForwarder>,
+        /// Ports we've already attempted to forward on-demand, to avoid retrying on repeat URLs
+        attempted_on_demand_ports: std::collections::HashSet<u16>,
     }
 
     // SIGWINCH flag: set by signal handler, checked in poll loop
@@ -271,6 +273,7 @@ mod pty {
                 container_id: config.container_id.clone(),
                 auto_forward_enabled: config.auto_forward_enabled,
                 on_demand_forwarders: Vec::new(),
+                attempted_on_demand_ports: std::collections::HashSet::new(),
             })
         }
 
@@ -449,17 +452,21 @@ mod pty {
         fn open_url_ensuring_forwarded(&mut self, url: &str) {
             if self.auto_forward_enabled {
                 if let Some(port) = crate::tunnel::extract_localhost_port(url) {
-                    let rt = tokio::runtime::Handle::current();
-                    if let Ok(forwarder) = rt.block_on(crate::tunnel::spawn_forwarder(
-                        self.runtime_program.clone(),
-                        self.runtime_prefix.clone(),
-                        self.container_id.clone(),
-                        port,
-                        port,
-                    )) {
-                        self.on_demand_forwarders.push(forwarder);
+                    // Dedup: only attempt to spawn a forwarder for each port once per shell.
+                    // A spawn failure (port already bound by app-level auto-forwarder, or by
+                    // our prior successful spawn) means forwarding is already in place.
+                    if self.attempted_on_demand_ports.insert(port) {
+                        let rt = tokio::runtime::Handle::current();
+                        if let Ok(forwarder) = rt.block_on(crate::tunnel::spawn_forwarder(
+                            self.runtime_program.clone(),
+                            self.runtime_prefix.clone(),
+                            self.container_id.clone(),
+                            port,
+                            port,
+                        )) {
+                            self.on_demand_forwarders.push(forwarder);
+                        }
                     }
-                    // If spawn failed (bind error), auto-forwarder already has it
                 }
             }
             let _ = crate::tunnel::open_url(url);
@@ -482,10 +489,7 @@ mod pty {
 
             for line in content.lines() {
                 let url = line.trim();
-                if url.starts_with("http://")
-                    || url.starts_with("https://")
-                    || url.starts_with("ftp://")
-                {
+                if crate::tunnel::is_browser_openable_url(url) {
                     self.open_url_ensuring_forwarded(url);
                 }
             }

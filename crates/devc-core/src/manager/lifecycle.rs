@@ -1,9 +1,8 @@
 //! Lifecycle command execution for ContainerManager
 
 use crate::{
-    run_feature_lifecycle_commands, run_feature_lifecycle_commands_with_output,
-    run_lifecycle_command_with_env, run_lifecycle_command_with_env_and_output, Container,
-    CoreError, DotfilesManager, LifecycleExecOpts, Result, SshManager,
+    run_feature_lifecycle_commands_with_output, run_lifecycle_command_with_env_and_output,
+    Container, CoreError, DotfilesManager, LifecycleExecOpts, Result, SshManager,
 };
 use devc_provider::{ContainerId, ContainerProvider, ContainerStatus};
 use tokio::sync::mpsc;
@@ -20,7 +19,7 @@ pub(crate) struct LifecycleChannels<'a> {
 }
 
 impl ContainerManager {
-    fn lifecycle_exec_opts<'a>(
+    pub(crate) fn lifecycle_exec_opts<'a>(
         user: Option<&'a str>,
         workspace_folder: Option<&'a str>,
         remote_env: Option<&'a std::collections::HashMap<String, String>>,
@@ -282,6 +281,15 @@ impl ContainerManager {
 
     /// Run postAttachCommand for a container (if configured)
     pub async fn run_post_attach_command(&self, id: &str) -> Result<()> {
+        self.run_post_attach_command_with_output(id, None).await
+    }
+
+    /// Run postAttachCommand for a container, streaming stdout/stderr lines to `output` (tagged).
+    pub async fn run_post_attach_command_with_output(
+        &self,
+        id: &str,
+        output: Option<&mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
         let container_state = {
             let state = self.state.read().await;
             state
@@ -306,25 +314,33 @@ impl ContainerManager {
             &feature_props.remote_env,
         );
         if !feature_props.post_attach_commands.is_empty() {
-            run_feature_lifecycle_commands(
+            run_feature_lifecycle_commands_with_output(
                 provider,
                 &cid,
                 &feature_props.post_attach_commands,
-                container.devcontainer.effective_user(),
-                container.devcontainer.workspace_folder.as_deref(),
-                merged_env.as_ref(),
+                LifecycleExecOpts {
+                    user: container.devcontainer.effective_user(),
+                    working_dir: container.devcontainer.workspace_folder.as_deref(),
+                    env: merged_env.as_ref(),
+                    output,
+                    tag: Some("feature:postAttach"),
+                },
             )
             .await?;
         }
 
         if let Some(ref cmd) = container.devcontainer.post_attach_command {
-            run_lifecycle_command_with_env(
+            run_lifecycle_command_with_env_and_output(
                 provider,
                 &cid,
                 cmd,
-                container.devcontainer.effective_user(),
-                container.devcontainer.workspace_folder.as_deref(),
-                merged_env.as_ref(),
+                LifecycleExecOpts {
+                    user: container.devcontainer.effective_user(),
+                    working_dir: container.devcontainer.workspace_folder.as_deref(),
+                    env: merged_env.as_ref(),
+                    output,
+                    tag: Some("postAttach"),
+                },
             )
             .await?;
         }
