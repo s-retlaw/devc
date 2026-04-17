@@ -153,6 +153,16 @@ impl ContainerManager {
             )
             .await?;
 
+        // Inject credentials before lifecycle commands so they can pull from private
+        // registries/repos (same placement as the non-compose path).
+        self.inject_credentials_nonfatal(
+            provider,
+            &container_id,
+            container.devcontainer.effective_user(),
+            &container.workspace_path,
+        )
+        .await;
+
         // 3. Install features via exec if any were resolved
         if !resolved_features.is_empty() {
             send_progress(progress, "Installing features...");

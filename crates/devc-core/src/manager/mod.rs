@@ -357,6 +357,28 @@ impl ContainerManager {
         .await
     }
 
+    /// Inject credentials into a running container, logging (not returning) any error.
+    /// Used by the `up` paths where credential setup shouldn't abort the whole operation.
+    pub(crate) async fn inject_credentials_nonfatal(
+        &self,
+        provider: &dyn ContainerProvider,
+        container_id: &ContainerId,
+        user: Option<&str>,
+        workspace_path: &Path,
+    ) {
+        if let Err(e) = crate::credentials::setup_credentials(
+            provider,
+            container_id,
+            &self.global_config,
+            user,
+            workspace_path,
+        )
+        .await
+        {
+            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
+        }
+    }
+
     /// Prepare context for exec/shell operations.
     ///
     /// This resolves the live container ID (re-resolving for compose services),
@@ -1385,17 +1407,13 @@ fi
 
         // Set up credential forwarding before lifecycle commands so they can
         // access private registries and repos
-        if let Err(e) = crate::credentials::setup_credentials(
+        self.inject_credentials_nonfatal(
             provider,
             &container_id,
-            &self.global_config,
             container.devcontainer.effective_user(),
             &container_state.workspace_path,
         )
-        .await
-        {
-            tracing::warn!("Credential forwarding setup failed (non-fatal): {}", e);
-        }
+        .await;
 
         // Run first-create lifecycle if this is a newly created container
         if container_state.status == DevcContainerStatus::Created {
@@ -2680,16 +2698,22 @@ mod tests {
 
     // ==================== Compose Start / Stop ====================
 
-    /// Helper: create a compose workspace with devcontainer.json + docker-compose.yml
+    /// Helper: create a compose workspace with devcontainer.json + docker-compose.yml.
     fn create_compose_workspace() -> tempfile::TempDir {
+        create_compose_workspace_with_fields("")
+    }
+
+    /// Like `create_compose_workspace` but appends `extra_devcontainer_fields` (e.g.
+    /// `, "onCreateCommand": "echo foo"`) inside the devcontainer.json object.
+    fn create_compose_workspace_with_fields(extra_devcontainer_fields: &str) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let devcontainer_dir = tmp.path().join(".devcontainer");
         std::fs::create_dir_all(&devcontainer_dir).unwrap();
-        std::fs::write(
-            devcontainer_dir.join("devcontainer.json"),
-            r#"{"dockerComposeFile": "docker-compose.yml", "service": "app", "workspaceFolder": "/workspace"}"#,
-        )
-        .unwrap();
+        let json = format!(
+            r#"{{"dockerComposeFile": "docker-compose.yml", "service": "app", "workspaceFolder": "/workspace"{}}}"#,
+            extra_devcontainer_fields,
+        );
+        std::fs::write(devcontainer_dir.join("devcontainer.json"), json).unwrap();
         std::fs::write(
             devcontainer_dir.join("docker-compose.yml"),
             "version: '3'\nservices:\n  app:\n    image: ubuntu:22.04\n",
@@ -4917,6 +4941,78 @@ mod tests {
             err.contains("not found"),
             "Expected 'not found' in: {}",
             err
+        );
+    }
+
+    /// Regression test: compose `up` must inject credential helpers BEFORE lifecycle
+    /// commands run, so that an onCreateCommand like `git clone https://github.com/private/repo`
+    /// can authenticate via the injected docker/git credential helpers.
+    /// Prior to the fix, the compose path skipped `setup_credentials` entirely — private
+    /// clones in lifecycle commands would fail.
+    #[tokio::test]
+    async fn test_up_compose_injects_credentials_before_lifecycle() {
+        let workspace =
+            create_compose_workspace_with_fields(r#", "onCreateCommand": "echo on-create""#);
+        let mock = MockProvider::new(ProviderType::Docker);
+        *mock.compose_resolve_service_id_result.lock().unwrap() =
+            Ok(ContainerId::new("compose_creds_cid"));
+        let calls = mock.calls.clone();
+
+        let mut state = StateStore::new();
+        let cs = make_container_state(
+            workspace.path(),
+            DevcContainerStatus::Configured,
+            None,
+            None,
+        );
+        let id = cs.id.clone();
+        state.add(cs);
+
+        // Default GlobalConfig has credentials.docker/git/gh = true, so setup_credentials
+        // will actually run the helper injection exec calls.
+        let mgr = test_manager_with_state(mock, state);
+        mgr.up(&id).await.unwrap();
+
+        let recorded = calls.lock().unwrap();
+
+        // Find the credential-injection exec: the docker-credential-devc helper write
+        // is emitted by `setup_credentials` -> `inject_helpers`.
+        let cred_inject_idx = recorded.iter().position(|c| {
+            matches!(
+                c,
+                MockCall::Exec { cmd, .. }
+                    if cmd.iter().any(|s| s.contains("docker-credential-devc"))
+            )
+        });
+
+        // Find the onCreateCommand exec (exact shell command as configured).
+        let on_create_idx = recorded.iter().position(|c| {
+            matches!(
+                c,
+                MockCall::Exec { cmd, .. }
+                    if cmd.as_slice() == ["/bin/sh", "-c", "echo on-create"]
+            )
+        });
+
+        let cred_idx = cred_inject_idx.unwrap_or_else(|| {
+            panic!(
+                "Expected credential helper injection to appear in recorded exec calls; got: {:?}",
+                *recorded
+            )
+        });
+        let oc_idx = on_create_idx.unwrap_or_else(|| {
+            panic!(
+                "Expected onCreateCommand exec in recorded exec calls; got: {:?}",
+                *recorded
+            )
+        });
+
+        assert!(
+            cred_idx < oc_idx,
+            "Credential injection (at index {}) must happen BEFORE onCreateCommand (at index {}). \
+             Otherwise lifecycle commands cannot pull from private registries/repos.",
+            cred_idx,
+            oc_idx,
         );
     }
 
