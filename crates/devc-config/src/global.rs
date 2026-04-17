@@ -96,7 +96,11 @@ pub struct DefaultsConfig {
     pub url_forwarding: Option<bool>,
     /// Automatically forward all detected ports in containers (default: true)
     pub auto_forward_ports: Option<bool>,
-    /// Automatically open browser for forwarded ports (default: true)
+    /// Kill-switch for explicit `openBrowser` / `openBrowserOnce` port actions
+    /// configured in devcontainer.json. When `true` (default), those actions
+    /// fire as the user requested; when `false`, they're suppressed (treated as
+    /// `silent`). Does NOT cause browsers to open for ports that were never
+    /// asked to open one — it only governs configured browser-open requests.
     pub auto_open_browser: Option<bool>,
 }
 

@@ -188,7 +188,7 @@ impl SettingsField {
             Self::SshEnabled => "Enable SSH for better TTY support",
             Self::SshKeyPath => "Path to SSH private key",
             Self::AutoForwardPorts => "Automatically forward all detected ports",
-            Self::AutoOpenBrowser => "Open browser for newly forwarded ports",
+            Self::AutoOpenBrowser => "Honor openBrowser actions from devcontainer.json",
             Self::CredentialsDocker => "Forward Docker registry credentials into containers",
             Self::CredentialsGit => "Forward Git credentials into containers",
             Self::AgentCodexEnabled => {

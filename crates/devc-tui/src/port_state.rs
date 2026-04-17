@@ -216,6 +216,40 @@ impl Default for PortForwardingState {
     }
 }
 
+/// What (if anything) to do with the user's browser when a port is newly forwarded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BrowserOpenDecision {
+    /// Do not open a browser.
+    Skip,
+    /// Open a browser every time this port is newly forwarded (`openBrowser`).
+    OpenEach,
+    /// Open a browser once per session and track it (`openBrowserOnce`).
+    OpenOnce,
+}
+
+/// Decide whether to open a browser for a freshly-forwarded port. Pure.
+/// `auto_open_browser` is a kill-switch on configured actions, not a promoter
+/// for unconfigured ports — see the unit tests in this module for the exact
+/// invariants.
+pub fn browser_open_decision(
+    configured_action: Option<&devc_config::AutoForwardAction>,
+    auto_open_browser: bool,
+    already_opened: bool,
+) -> BrowserOpenDecision {
+    let Some(action) = configured_action else {
+        return BrowserOpenDecision::Skip;
+    };
+    match action {
+        devc_config::AutoForwardAction::OpenBrowser if auto_open_browser => {
+            BrowserOpenDecision::OpenEach
+        }
+        devc_config::AutoForwardAction::OpenBrowserOnce if auto_open_browser && !already_opened => {
+            BrowserOpenDecision::OpenOnce
+        }
+        _ => BrowserOpenDecision::Skip,
+    }
+}
+
 /// State extracted from PortForwardingState for background auto-forwarding during shell sessions.
 pub struct ShellAutoForwardState {
     pub detectors: HashMap<String, mpsc::UnboundedReceiver<PortDetectionUpdate>>,
@@ -285,29 +319,21 @@ async fn poll_detectors_background(state: &mut ShellAutoForwardState) {
                     Ok(forwarder) => {
                         state.forwarders.insert(key.clone(), forwarder);
                         state.forwarded_ports.insert(key.clone());
-                        let default_action = if state.auto_open_browser_global {
-                            devc_config::AutoForwardAction::OpenBrowserOnce
-                        } else {
-                            devc_config::AutoForwardAction::Silent
-                        };
-                        let action = matching_config
-                            .map(|pfc| &pfc.action)
-                            .unwrap_or(&default_action);
-                        match action {
-                            devc_config::AutoForwardAction::OpenBrowser => {
-                                let protocol =
-                                    matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                        let decision = browser_open_decision(
+                            matching_config.map(|pfc| &pfc.action),
+                            state.auto_open_browser_global,
+                            state.opened_ports.contains(&key),
+                        );
+                        let protocol = matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                        match decision {
+                            BrowserOpenDecision::Skip => {}
+                            BrowserOpenDecision::OpenEach => {
                                 let _ = crate::tunnel::open_in_browser(detected.port, protocol);
                             }
-                            devc_config::AutoForwardAction::OpenBrowserOnce
-                                if !state.opened_ports.contains(&key) =>
-                            {
+                            BrowserOpenDecision::OpenOnce => {
                                 state.opened_ports.insert(key);
-                                let protocol =
-                                    matching_config.and_then(|pfc| pfc.protocol.as_deref());
                                 let _ = crate::tunnel::open_in_browser(detected.port, protocol);
                             }
-                            _ => {}
                         }
                     }
                     Err(e) => {
@@ -336,4 +362,84 @@ pub fn spawn_shell_auto_forwarder(
         }
         state
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devc_config::AutoForwardAction;
+
+    // No configured action → never open a browser, regardless of the global
+    // auto_open_browser kill-switch. Prevents the "every auto-forwarded port
+    // opens a browser" bug.
+    #[test]
+    fn no_configured_action_never_opens_browser() {
+        assert_eq!(
+            browser_open_decision(None, true, false),
+            BrowserOpenDecision::Skip
+        );
+        assert_eq!(
+            browser_open_decision(None, false, false),
+            BrowserOpenDecision::Skip
+        );
+        assert_eq!(
+            browser_open_decision(None, true, true),
+            BrowserOpenDecision::Skip
+        );
+    }
+
+    // auto_open_browser=false is a kill-switch: suppresses explicit openBrowser
+    // / openBrowserOnce actions from devcontainer.json.
+    #[test]
+    fn auto_open_browser_false_suppresses_explicit_configs() {
+        assert_eq!(
+            browser_open_decision(Some(&AutoForwardAction::OpenBrowser), false, false),
+            BrowserOpenDecision::Skip,
+        );
+        assert_eq!(
+            browser_open_decision(Some(&AutoForwardAction::OpenBrowserOnce), false, false),
+            BrowserOpenDecision::Skip,
+        );
+    }
+
+    #[test]
+    fn open_browser_fires_every_time_when_enabled() {
+        assert_eq!(
+            browser_open_decision(Some(&AutoForwardAction::OpenBrowser), true, false),
+            BrowserOpenDecision::OpenEach,
+        );
+        // Already-opened tracking doesn't apply to OpenBrowser (always fires).
+        assert_eq!(
+            browser_open_decision(Some(&AutoForwardAction::OpenBrowser), true, true),
+            BrowserOpenDecision::OpenEach,
+        );
+    }
+
+    #[test]
+    fn open_browser_once_fires_only_first_time() {
+        assert_eq!(
+            browser_open_decision(Some(&AutoForwardAction::OpenBrowserOnce), true, false),
+            BrowserOpenDecision::OpenOnce,
+        );
+        assert_eq!(
+            browser_open_decision(Some(&AutoForwardAction::OpenBrowserOnce), true, true),
+            BrowserOpenDecision::Skip,
+        );
+    }
+
+    #[test]
+    fn silent_notify_ignore_never_open_browser() {
+        for action in [
+            AutoForwardAction::Silent,
+            AutoForwardAction::Notify,
+            AutoForwardAction::Ignore,
+        ] {
+            assert_eq!(
+                browser_open_decision(Some(&action), true, false),
+                BrowserOpenDecision::Skip,
+                "action {:?} should never open a browser",
+                action,
+            );
+        }
+    }
 }

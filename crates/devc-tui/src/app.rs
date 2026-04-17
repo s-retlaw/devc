@@ -1143,44 +1143,45 @@ impl App {
                                 .active_forwarders
                                 .insert(key.clone(), forwarder);
                             self.port_state.auto_forwarded_ports.insert(key.clone());
-                            let default_action = if global_auto_open {
-                                devc_config::AutoForwardAction::OpenBrowserOnce
-                            } else {
-                                devc_config::AutoForwardAction::Notify
-                            };
-                            let action = matching_config
-                                .map(|pfc| &pfc.action)
-                                .unwrap_or(&default_action);
-                            match action {
-                                devc_config::AutoForwardAction::Notify => {
-                                    let label = matching_config.and_then(|pfc| pfc.label.as_ref());
-                                    let msg = if let Some(label) = label {
-                                        format!(
-                                            "Auto-forwarded port {} ({}) (localhost:{})",
-                                            detected.port, label, detected.port
-                                        )
-                                    } else {
-                                        format!(
-                                            "Auto-forwarded port {} (localhost:{})",
-                                            detected.port, detected.port
-                                        )
-                                    };
-                                    self.status_message = Some(msg);
-                                }
-                                devc_config::AutoForwardAction::OpenBrowser => {
-                                    let protocol =
-                                        matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                            // Notify is the default for ports with no explicit action — the
+                            // user sees a status line and gets the port forwarded, no browser.
+                            // `auto_open_browser` is a kill-switch on explicit OpenBrowser /
+                            // OpenBrowserOnce configs, not a "open every port" promoter.
+                            let configured_action = matching_config.map(|pfc| &pfc.action);
+                            let show_notify = matches!(
+                                configured_action,
+                                None | Some(devc_config::AutoForwardAction::Notify)
+                            );
+                            if show_notify {
+                                let label = matching_config.and_then(|pfc| pfc.label.as_ref());
+                                let msg = if let Some(label) = label {
+                                    format!(
+                                        "Auto-forwarded port {} ({}) (localhost:{})",
+                                        detected.port, label, detected.port
+                                    )
+                                } else {
+                                    format!(
+                                        "Auto-forwarded port {} (localhost:{})",
+                                        detected.port, detected.port
+                                    )
+                                };
+                                self.status_message = Some(msg);
+                            }
+                            let decision = crate::port_state::browser_open_decision(
+                                configured_action,
+                                global_auto_open,
+                                self.port_state.auto_opened_ports.contains(&key),
+                            );
+                            let protocol = matching_config.and_then(|pfc| pfc.protocol.as_deref());
+                            match decision {
+                                crate::port_state::BrowserOpenDecision::Skip => {}
+                                crate::port_state::BrowserOpenDecision::OpenEach => {
                                     let _ = open_in_browser(detected.port, protocol);
                                 }
-                                devc_config::AutoForwardAction::OpenBrowserOnce
-                                    if !self.port_state.auto_opened_ports.contains(&key) =>
-                                {
+                                crate::port_state::BrowserOpenDecision::OpenOnce => {
                                     self.port_state.auto_opened_ports.insert(key);
-                                    let protocol =
-                                        matching_config.and_then(|pfc| pfc.protocol.as_deref());
                                     let _ = open_in_browser(detected.port, protocol);
                                 }
-                                _ => {}
                             }
                         }
                         Err(e) => {
