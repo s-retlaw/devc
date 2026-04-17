@@ -341,32 +341,56 @@ pub fn open_in_browser(port: u16, protocol: Option<&str>) -> Result<(), String> 
     spawn_browser(&url)
 }
 
-/// Extract the port from a localhost URL.
-/// Returns `Some(port)` if the URL targets localhost, 127.0.0.1, [::1], or 0.0.0.0.
-/// Returns `None` for non-localhost URLs or URLs without an explicit port.
-pub fn extract_localhost_port(url: &str) -> Option<u16> {
-    let after_scheme = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .or_else(|| url.strip_prefix("ftp://"))?;
+/// Host literals recognized as "localhost" by `extract_localhost_ports`.
+const LOCALHOST_HOSTS: &[&str] = &["127.0.0.1", "localhost", "0.0.0.0", "[::1]"];
 
-    // Extract host:port portion (before any path/query/fragment)
-    let authority = after_scheme.split(&['/', '?', '#'][..]).next()?;
-
-    // Handle [::1]:port (IPv6 localhost)
-    if let Some(rest) = authority.strip_prefix("[::1]") {
-        return rest.strip_prefix(':')?.parse::<u16>().ok();
+/// Extract all localhost port references from a URL, including ones buried
+/// inside URL-encoded query-param values. Returns ports in first-seen order,
+/// deduplicated.
+///
+/// Scans for any of `127.0.0.1`, `localhost`, `0.0.0.0`, `[::1]` followed by a
+/// port separator (`:` or its URL-encoded form `%3A` / `%3a`) and a run of
+/// digits. Intentionally promiscuous: this is called before we open a URL in
+/// the host browser and the goal is to pre-spawn a port forwarder for any
+/// callback the URL might redirect to — e.g. `aws sso login` opens a URL whose
+/// top-level host is `oidc.us-east-1.amazonaws.com` but embeds
+/// `redirect_uri=http%3A%2F%2F127.0.0.1%3APORT%2Foauth%2Fcallback` in a query
+/// parameter. Without pre-forwarding that callback port, the host browser
+/// can't reach the container's OAuth listener when AWS redirects back.
+pub fn extract_localhost_ports(url: &str) -> Vec<u16> {
+    let mut ports: Vec<u16> = Vec::new();
+    for host in LOCALHOST_HOSTS {
+        let mut cursor = 0;
+        while let Some(rel) = url[cursor..].find(host) {
+            let after_host = cursor + rel + host.len();
+            let port_start = if url[after_host..].starts_with(':') {
+                after_host + 1
+            } else if url.len() >= after_host + 3
+                && url[after_host..after_host + 3].eq_ignore_ascii_case("%3A")
+            {
+                after_host + 3
+            } else {
+                cursor = after_host;
+                continue;
+            };
+            let port_end = url[port_start..]
+                .bytes()
+                .position(|b| !b.is_ascii_digit())
+                .map(|i| port_start + i)
+                .unwrap_or(url.len());
+            if port_end > port_start {
+                if let Ok(port) = url[port_start..port_end].parse::<u16>() {
+                    if !ports.contains(&port) {
+                        ports.push(port);
+                    }
+                }
+            }
+            // port_end is always > cursor: port_start >= after_host + 1 > cursor,
+            // and port_end >= port_start. No need for a .max() guard.
+            cursor = port_end;
+        }
     }
-
-    let (host, port_str) = authority.rsplit_once(':')?;
-    let port: u16 = port_str.parse().ok()?;
-
-    let is_localhost = host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0";
-    if is_localhost {
-        Some(port)
-    } else {
-        None
-    }
+    ports
 }
 
 #[cfg(test)]
@@ -615,36 +639,82 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_localhost_port() {
-        assert_eq!(extract_localhost_port("http://localhost:3000"), Some(3000));
+    fn test_extract_localhost_ports_plain_localhost() {
+        assert_eq!(extract_localhost_ports("http://localhost:3000"), vec![3000]);
         assert_eq!(
-            extract_localhost_port("http://localhost:3000/path"),
-            Some(3000)
+            extract_localhost_ports("http://localhost:3000/path"),
+            vec![3000]
         );
         assert_eq!(
-            extract_localhost_port("http://localhost:3000?q=1"),
-            Some(3000)
+            extract_localhost_ports("http://localhost:3000?q=1"),
+            vec![3000]
         );
-        assert_eq!(extract_localhost_port("https://localhost:8443"), Some(8443));
-        assert_eq!(extract_localhost_port("http://127.0.0.1:8080"), Some(8080));
         assert_eq!(
-            extract_localhost_port("https://127.0.0.1:443/foo"),
-            Some(443)
+            extract_localhost_ports("https://localhost:8443"),
+            vec![8443]
         );
-        assert_eq!(extract_localhost_port("http://[::1]:3000"), Some(3000));
-        assert_eq!(extract_localhost_port("http://0.0.0.0:5000"), Some(5000));
+        assert_eq!(extract_localhost_ports("http://127.0.0.1:8080"), vec![8080]);
+        assert_eq!(
+            extract_localhost_ports("https://127.0.0.1:443/foo"),
+            vec![443]
+        );
+        assert_eq!(extract_localhost_ports("http://0.0.0.0:5000"), vec![5000]);
     }
 
     #[test]
-    fn test_extract_localhost_port_non_localhost() {
-        assert_eq!(extract_localhost_port("http://example.com:3000"), None);
-        assert_eq!(extract_localhost_port("http://192.168.1.1:80"), None);
+    fn test_extract_localhost_ports_ipv6_localhost() {
+        assert_eq!(extract_localhost_ports("http://[::1]:9000"), vec![9000]);
     }
 
     #[test]
-    fn test_extract_localhost_port_no_port() {
-        assert_eq!(extract_localhost_port("http://localhost"), None);
-        assert_eq!(extract_localhost_port("http://localhost/path"), None);
-        assert_eq!(extract_localhost_port("not-a-url"), None);
+    fn test_extract_localhost_ports_ignores_non_localhost() {
+        assert!(extract_localhost_ports("http://example.com:3000").is_empty());
+        assert!(extract_localhost_ports("http://192.168.1.1:80").is_empty());
+        assert!(extract_localhost_ports("https://oidc.us-east-1.amazonaws.com/").is_empty());
+    }
+
+    #[test]
+    fn test_extract_localhost_ports_no_port() {
+        assert!(extract_localhost_ports("http://localhost").is_empty());
+        assert!(extract_localhost_ports("http://localhost/path").is_empty());
+        assert!(extract_localhost_ports("not-a-url").is_empty());
+    }
+
+    /// AWS SSO login opens a URL whose top-level host is AWS but whose
+    /// `redirect_uri` query param (URL-encoded) points at a localhost callback
+    /// port in the container. We must extract that port so we can pre-forward
+    /// it before the host browser is redirected back.
+    #[test]
+    fn test_extract_localhost_ports_aws_sso_callback() {
+        let url = "https://oidc.us-east-1.amazonaws.com/authorize\
+                   ?response_type=code\
+                   &client_id=abc\
+                   &redirect_uri=http%3A%2F%2F127.0.0.1%3A55512%2Foauth%2Fcallback\
+                   &state=xyz";
+        assert_eq!(extract_localhost_ports(url), vec![55512]);
+    }
+
+    /// URL-encoded colon with lowercase hex (%3a) must also work.
+    #[test]
+    fn test_extract_localhost_ports_url_encoded_colon_lowercase() {
+        let url = "https://example.com/?cb=http%3a%2f%2flocalhost%3a4567%2fdone";
+        assert_eq!(extract_localhost_ports(url), vec![4567]);
+    }
+
+    /// A URL that mentions localhost at the top level AND in a callback:
+    /// return both. Two distinct ports → two entries.
+    #[test]
+    fn test_extract_localhost_ports_both_top_level_and_query() {
+        let url = "http://localhost:3000/auth?redirect=http%3A%2F%2F127.0.0.1%3A4040%2Fcb";
+        let ports = extract_localhost_ports(url);
+        assert!(ports.contains(&3000), "missing 3000 in {:?}", ports);
+        assert!(ports.contains(&4040), "missing 4040 in {:?}", ports);
+    }
+
+    /// Same port mentioned twice (once top-level, once in a query) — dedupe.
+    #[test]
+    fn test_extract_localhost_ports_dedupes_same_port() {
+        let url = "http://127.0.0.1:5555/signin?return=http://127.0.0.1:5555/home";
+        assert_eq!(extract_localhost_ports(url), vec![5555]);
     }
 }

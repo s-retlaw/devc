@@ -446,26 +446,28 @@ mod pty {
             }
         }
 
-        /// Open a URL, ensuring the target port is forwarded first if applicable.
-        /// If the URL targets localhost:PORT and auto-forwarding is enabled,
-        /// tries to set up port forwarding before opening the browser.
+        /// Open a URL, pre-spawning forwarders for every localhost port the URL
+        /// references. The URL's top-level host may point at an external auth
+        /// provider while the actual OAuth callback is an embedded localhost
+        /// port (e.g. `aws sso login`); we forward every localhost port we see.
+        /// Dedup via `attempted_on_demand_ports`: at most one spawn attempt per
+        /// (shell session, port). A spawn failure typically means the port is
+        /// already bound (by the app-level auto-forwarder or a prior spawn).
         fn open_url_ensuring_forwarded(&mut self, url: &str) {
             if self.auto_forward_enabled {
-                if let Some(port) = crate::tunnel::extract_localhost_port(url) {
-                    // Dedup: only attempt to spawn a forwarder for each port once per shell.
-                    // A spawn failure (port already bound by app-level auto-forwarder, or by
-                    // our prior successful spawn) means forwarding is already in place.
-                    if self.attempted_on_demand_ports.insert(port) {
-                        let rt = tokio::runtime::Handle::current();
-                        if let Ok(forwarder) = rt.block_on(crate::tunnel::spawn_forwarder(
-                            self.runtime_program.clone(),
-                            self.runtime_prefix.clone(),
-                            self.container_id.clone(),
-                            port,
-                            port,
-                        )) {
-                            self.on_demand_forwarders.push(forwarder);
-                        }
+                for port in crate::tunnel::extract_localhost_ports(url) {
+                    if !self.attempted_on_demand_ports.insert(port) {
+                        continue;
+                    }
+                    let rt = tokio::runtime::Handle::current();
+                    if let Ok(forwarder) = rt.block_on(crate::tunnel::spawn_forwarder(
+                        self.runtime_program.clone(),
+                        self.runtime_prefix.clone(),
+                        self.container_id.clone(),
+                        port,
+                        port,
+                    )) {
+                        self.on_demand_forwarders.push(forwarder);
                     }
                 }
             }
