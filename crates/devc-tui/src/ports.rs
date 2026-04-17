@@ -4,8 +4,10 @@
 
 use devc_provider::{ContainerId, ContainerProvider, ExecConfig, ProviderType};
 use std::collections::{HashMap, HashSet};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 
 /// A detected port in a container
@@ -88,6 +90,43 @@ pub async fn detect_ports(
     ports.retain(|&p| p >= 1024 || p == 22 || p == 80 || p == 443);
 
     Ok(ports)
+}
+
+/// One-shot probe of the container's current listening ports via `runtime exec`.
+///
+/// Functionally equivalent to `detect_ports` but takes the runtime invocation
+/// args as plain strings (matching `tunnel::spawn_forwarder`'s shape), so it
+/// can be called from contexts (like the PTY relay loop in `shell.rs`) that
+/// hold runtime args but no `&dyn ContainerProvider`. Returns an empty Vec on
+/// any failure — callers treat the probe as advisory.
+pub async fn detect_listening_ports_via_cmd(
+    runtime_program: &str,
+    runtime_prefix: &[String],
+    container_id: &str,
+) -> Vec<u16> {
+    let mut cmd = Command::new(runtime_program);
+    cmd.args(runtime_prefix);
+    cmd.args([
+        "exec",
+        "-u",
+        "root",
+        container_id,
+        "sh",
+        "-c",
+        "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null || true",
+    ]);
+    cmd.stdin(Stdio::null()).stderr(Stdio::null());
+    let output = match cmd.output().await {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut ports = parse_proc_net_tcp(&stdout);
+    ports.sort();
+    ports.dedup();
+    // Same filter as detect_ports: ephemeral range plus a few well-knowns.
+    ports.retain(|&p| p >= 1024 || p == 22 || p == 80 || p == 443);
+    ports
 }
 
 /// Port detection update message
