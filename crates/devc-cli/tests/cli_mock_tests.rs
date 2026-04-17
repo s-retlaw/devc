@@ -320,7 +320,7 @@ async fn test_shell_runs_post_attach_on_running_container() {
         matches!(
             c,
             devc_core::test_support::MockCall::Exec { cmd, .. }
-                if cmd == &["/bin/sh".to_string(), "-c".to_string(), "echo post-attach".to_string()]
+                if cmd == &["/bin/sh".to_string(), "-lc".to_string(), "echo post-attach".to_string()]
         )
     });
     assert!(
@@ -362,7 +362,7 @@ async fn test_shell_runs_post_attach_after_start() {
         matches!(
             c,
             devc_core::test_support::MockCall::Exec { cmd, .. }
-                if cmd == &["/bin/sh".to_string(), "-c".to_string(), "echo post-attach".to_string()]
+                if cmd == &["/bin/sh".to_string(), "-lc".to_string(), "echo post-attach".to_string()]
         )
     });
     assert!(

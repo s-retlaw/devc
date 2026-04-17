@@ -24,6 +24,24 @@ pub const GIT_CREDENTIAL_HELPER_PATH: &str = "/usr/local/bin/git-credential-devc
 /// Absolute path of the injected Docker credential helper script.
 pub const DOCKER_CREDENTIAL_HELPER_PATH: &str = "/usr/local/bin/docker-credential-devc";
 
+/// Profile.d script that exports credential env vars (GH_TOKEN) into login
+/// shells. Lifecycle commands run via `sh -lc`, so this file is sourced
+/// automatically via the standard `/etc/profile` → `/etc/profile.d/*.sh` chain
+/// on Ubuntu/Debian/Alpine/Fedora. Numbered `50-` to sit mid-order so earlier
+/// feature scripts can observe it and later ones can override if they choose.
+pub const PROFILE_D_CREDENTIALS_PATH: &str = "/etc/profile.d/50-devc-credentials.sh";
+
+/// Content of PROFILE_D_CREDENTIALS_PATH. Reads the cached gh token (if any)
+/// and exports it as `GH_TOKEN` so `gh` CLI invocations in lifecycle scripts
+/// pick up the host's GitHub authentication without the caller having to
+/// set the env var explicitly.
+const PROFILE_D_CREDENTIALS_SCRIPT: &str = r#"# devc credential env — sourced by /etc/profile in login shells
+if [ -r /run/devc-creds/gh-token ]; then
+    GH_TOKEN=$(cat /run/devc-creds/gh-token 2>/dev/null)
+    export GH_TOKEN
+fi
+"#;
+
 /// Result of credential setup, for user-visible reporting
 #[derive(Debug, Default, Clone)]
 pub struct CredentialStatus {
@@ -235,10 +253,20 @@ async fn inject_helpers(
     )
     .await?;
 
-    // 4. Update container Docker config: set credsStore to "devc"
+    // 4. Write the profile.d script that exports GH_TOKEN for login shells
+    //    (lifecycle commands run via `sh -lc`, so they source this).
+    write_script_to_container(
+        provider,
+        container_id,
+        PROFILE_D_CREDENTIALS_PATH,
+        PROFILE_D_CREDENTIALS_SCRIPT,
+    )
+    .await?;
+
+    // 5. Update container Docker config: set credsStore to "devc"
     set_container_creds_store(provider, container_id, user).await?;
 
-    // 5. Register git credential helper at the system level
+    // 6. Register git credential helper at the system level
     set_system_git_credential_helper(provider, container_id).await?;
 
     Ok(true)
@@ -855,6 +883,89 @@ mod tests {
             !any_invokes_git,
             "inject_helpers should not shell out to the git binary \
              (it must work even when git isn't installed); calls: {:?}",
+            provider.get_calls()
+        );
+    }
+
+    /// `inject_helpers` must write `/etc/profile.d/50-devc-credentials.sh` so
+    /// that lifecycle scripts (run via `sh -lc`) automatically export `GH_TOKEN`
+    /// from the cached credential file. Otherwise `gh auth` calls in an
+    /// `onCreateCommand` / `postCreateCommand` see no token and fail.
+    #[tokio::test]
+    async fn test_inject_helpers_writes_profile_d_credentials_script() {
+        use crate::test_support::{MockCall, MockProvider};
+        use devc_provider::ProviderType;
+
+        let provider = MockProvider::new(ProviderType::Docker);
+        *provider.exec_output.lock().unwrap() = String::new();
+
+        let container_id = ContainerId::new("test-container");
+        inject_helpers(&provider, &container_id, None)
+            .await
+            .expect("inject helpers");
+
+        // The profile.d file is written via write_script_to_container which
+        // base64-encodes the content, so the exec command line references the
+        // target path but not the inlined GH_TOKEN literal. Check the path.
+        let wrote_profile_d = provider.get_calls().iter().any(|c| {
+            matches!(
+                c,
+                MockCall::Exec { cmd, .. }
+                    if cmd.iter().any(|s| s.contains(PROFILE_D_CREDENTIALS_PATH))
+            )
+        });
+        assert!(
+            wrote_profile_d,
+            "Expected an exec that writes {}; got: {:?}",
+            PROFILE_D_CREDENTIALS_PATH,
+            provider.get_calls()
+        );
+
+        // Separately verify the script content (which is embedded in the
+        // binary, not observable via the mock) actually exports GH_TOKEN.
+        assert!(
+            PROFILE_D_CREDENTIALS_SCRIPT.contains("GH_TOKEN"),
+            "profile.d script content must export GH_TOKEN; got: {}",
+            PROFILE_D_CREDENTIALS_SCRIPT
+        );
+        assert!(
+            PROFILE_D_CREDENTIALS_SCRIPT.contains("/run/devc-creds/gh-token"),
+            "profile.d script must read from the gh-token cache path"
+        );
+    }
+
+    /// Lifecycle commands must exec via a login shell (`sh -lc`) so that
+    /// /etc/profile, /etc/profile.d/*.sh and user profile scripts are sourced.
+    /// That's how our /etc/profile.d/50-devc-credentials.sh gets applied
+    /// (exporting GH_TOKEN) and how feature-installed PATH additions (nvm, asdf,
+    /// cargo, etc.) become visible inside lifecycle scripts, matching the
+    /// user's interactive shell environment.
+    #[tokio::test]
+    async fn test_lifecycle_string_command_uses_login_shell() {
+        use crate::test_support::{MockCall, MockProvider};
+        use devc_provider::ProviderType;
+
+        let provider = MockProvider::new(ProviderType::Docker);
+        let container_id = ContainerId::new("test-container");
+
+        let cmd = devc_config::Command::String("echo hello".to_string());
+        crate::run_lifecycle_command_with_env(&provider, &container_id, &cmd, None, None, None)
+            .await
+            .expect("lifecycle run");
+
+        let login_shell_used = provider.get_calls().iter().any(|c| {
+            matches!(
+                c,
+                MockCall::Exec { cmd, .. }
+                    if cmd.len() >= 3
+                    && cmd[0] == "/bin/sh"
+                    && cmd[1] == "-lc"
+                    && cmd[2] == "echo hello"
+            )
+        });
+        assert!(
+            login_shell_used,
+            "Expected lifecycle exec to use `/bin/sh -lc`; got: {:?}",
             provider.get_calls()
         );
     }

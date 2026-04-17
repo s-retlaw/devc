@@ -810,8 +810,14 @@ pub async fn run_lifecycle_command_with_env_and_output(
 
     match command {
         devc_config::Command::String(cmd) => {
+            // Use a login shell (`-lc`) so lifecycle scripts see the same PATH /
+            // env that the user's interactive shell does: /etc/profile and
+            // /etc/profile.d/*.sh are sourced, which is where devcontainer
+            // features (and our own /etc/profile.d/50-devc-credentials.sh)
+            // register GH_TOKEN, PATH additions, etc. Matches the devcontainers
+            // CLI's behavior.
             let config = ExecConfig {
-                cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
+                cmd: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.clone()],
                 env: base_env,
                 working_dir: opts.working_dir.map(|s| s.to_string()),
                 user: opts.user.map(|s| s.to_string()),
@@ -866,7 +872,7 @@ pub async fn run_lifecycle_command_with_env_and_output(
                         tracing::info!("Running lifecycle command: {}", name);
                         let config = match cmd {
                             devc_config::StringOrArray::String(s) => ExecConfig {
-                                cmd: vec!["/bin/sh".to_string(), "-c".to_string(), s.clone()],
+                                cmd: vec!["/bin/sh".to_string(), "-lc".to_string(), s.clone()],
                                 env: base_env,
                                 working_dir,
                                 user,

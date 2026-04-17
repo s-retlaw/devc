@@ -4990,7 +4990,7 @@ mod tests {
             matches!(
                 c,
                 MockCall::Exec { cmd, .. }
-                    if cmd.as_slice() == ["/bin/sh", "-c", "echo on-create"]
+                    if cmd.as_slice() == ["/bin/sh", "-lc", "echo on-create"]
             )
         });
 
