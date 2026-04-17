@@ -13,6 +13,17 @@ use std::path::Path;
 /// The tmpfs mount path inside the container for credential cache
 pub const CREDS_TMPFS_PATH: &str = "/run/devc-creds";
 
+/// System-wide git config file. Writing here (as root) makes our credential
+/// helper and identity visible to every user, with no dependency on `git`
+/// being installed or `$HOME` being correct for the remote user.
+pub const SYSTEM_GITCONFIG: &str = "/etc/gitconfig";
+
+/// Absolute path of the injected git credential helper script.
+pub const GIT_CREDENTIAL_HELPER_PATH: &str = "/usr/local/bin/git-credential-devc";
+
+/// Absolute path of the injected Docker credential helper script.
+pub const DOCKER_CREDENTIAL_HELPER_PATH: &str = "/usr/local/bin/docker-credential-devc";
+
 /// Result of credential setup, for user-visible reporting
 #[derive(Debug, Default, Clone)]
 pub struct CredentialStatus {
@@ -76,21 +87,15 @@ SECRET=$(printf '%s' "$SECRET" | sed 's/"/\\"/g')
 printf '{"ServerURL":"%s","Username":"%s","Secret":"%s"}\n' "$REGISTRY" "$USER" "$SECRET"
 "#;
 
-/// Git credential helper script template.
+/// Git credential helper script. Emits credentials sourced from the tmpfs cache.
 ///
-/// `{{original}}` is replaced with the full original credential.helper value.
+/// No chaining: this helper is registered at the system level in `/etc/gitconfig`,
+/// which git supports alongside other `credential.helper` entries. Existing helpers
+/// (from the base image or user-level config) are tried by git natively, so the
+/// helper script itself only needs to look up its own cache.
 const GIT_CREDENTIAL_HELPER: &str = r#"#!/bin/sh
-ACTION="$1"
-if [ "$ACTION" != "get" ]; then
-    ORIGINAL_HELPER='{{original}}'
-    if [ -n "$ORIGINAL_HELPER" ]; then
-        # shellcheck disable=SC2086
-        exec $ORIGINAL_HELPER "$ACTION" 2>/dev/null
-    fi
-    exit 0
-fi
+[ "$1" = "get" ] || exit 0
 
-# Read input
 INPUT=""
 while IFS= read -r line; do
     [ -z "$line" ] && break
@@ -98,18 +103,6 @@ while IFS= read -r line; do
 "
 done
 
-# 1. Try original helper
-ORIGINAL_HELPER='{{original}}'
-if [ -n "$ORIGINAL_HELPER" ]; then
-    # shellcheck disable=SC2086
-    RESULT=$(printf '%s\n' "$INPUT" | $ORIGINAL_HELPER get 2>/dev/null)
-    if [ $? -eq 0 ] && echo "$RESULT" | grep -q "^password="; then
-        printf '%s\n' "$RESULT"
-        exit 0
-    fi
-fi
-
-# 2. Read from tmpfs cache (exit 0 with no output if missing — allows anonymous access)
 CREDS_FILE="/run/devc-creds/git-credentials"
 [ -f "$CREDS_FILE" ] || exit 0
 
@@ -154,7 +147,7 @@ pub async fn setup_credentials(
 
     // Inject git identity (user.name/email) from host (idempotent)
     let git_identity_injected = if global_config.credentials.git {
-        inject_git_identity(provider, container_id, user).await
+        inject_git_identity(provider, container_id).await
     } else {
         false
     };
@@ -191,11 +184,13 @@ fn shell_escape_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Inject the chaining credential helper scripts into the container.
+/// Inject credential helper scripts into the container.
 ///
-/// Idempotent: if `credsStore` is already `"devc"`, skips injection.
-/// If it's something else (e.g. VS Code's helper), saves it as "original"
-/// in the generated scripts so credentials chain through.
+/// Idempotent: if Docker `credsStore` is already `"devc"`, skips injection.
+/// For Docker, if the image ships a different credsStore (e.g. VS Code's), that
+/// name is baked into our docker-credential-devc script as a fallback chain.
+/// For git we don't chain — we register our helper at the system level
+/// (`/etc/gitconfig`) and rely on git's native multi-helper support.
 ///
 /// Returns `true` if helpers were newly injected, `false` if already present.
 async fn inject_helpers(
@@ -221,36 +216,30 @@ async fn inject_helpers(
         }
     );
 
-    // 2. Generate docker-credential-devc script
+    // 2. Generate docker-credential-devc script (still chains through original)
     let docker_script = DOCKER_CREDENTIAL_HELPER.replace("{{original}}", &original);
     write_script_to_container(
         provider,
         container_id,
-        "/usr/local/bin/docker-credential-devc",
+        DOCKER_CREDENTIAL_HELPER_PATH,
         &docker_script,
     )
     .await?;
 
-    // 3. Read container's current git credential.helper
-    let original_git_helper =
-        read_container_git_credential_helper(provider, container_id, user).await;
-    let git_original = shell_escape_single_quotes(&original_git_helper.unwrap_or_default());
-
-    // 4. Generate git-credential-devc script
-    let git_script = GIT_CREDENTIAL_HELPER.replace("{{original}}", &git_original);
+    // 3. Write git-credential-devc script (no chaining — git handles it natively)
     write_script_to_container(
         provider,
         container_id,
-        "/usr/local/bin/git-credential-devc",
-        &git_script,
+        GIT_CREDENTIAL_HELPER_PATH,
+        GIT_CREDENTIAL_HELPER,
     )
     .await?;
 
-    // 5. Update container Docker config: set credsStore to "devc"
+    // 4. Update container Docker config: set credsStore to "devc"
     set_container_creds_store(provider, container_id, user).await?;
 
-    // 6. Update container git config: set credential.helper
-    set_container_git_credential_helper(provider, container_id, user).await?;
+    // 5. Register git credential helper at the system level
+    set_system_git_credential_helper(provider, container_id).await?;
 
     Ok(true)
 }
@@ -366,23 +355,6 @@ async fn read_container_creds_store(
         .map(|s| s.to_string())
 }
 
-/// Read the container's git credential.helper value
-async fn read_container_git_credential_helper(
-    provider: &dyn ContainerProvider,
-    container_id: &ContainerId,
-    user: Option<&str>,
-) -> Option<String> {
-    let script = "git config --global credential.helper 2>/dev/null || true";
-
-    let result = exec_script_with_output(provider, container_id, script, user).await?;
-    let trimmed = result.trim().to_string();
-    if trimmed.is_empty() || trimmed == "/usr/local/bin/git-credential-devc" {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 /// Set credsStore to "devc" in the container's Docker config
 async fn set_container_creds_store(
     provider: &dyn ContainerProvider,
@@ -414,46 +386,52 @@ fi
     Ok(())
 }
 
-/// Set credential.helper in the container's git config
-async fn set_container_git_credential_helper(
+/// Register our git credential helper at the *system* level (`/etc/gitconfig`).
+///
+/// Appends a `[credential] helper = /usr/local/bin/git-credential-devc` entry if
+/// absent. Never rewrites existing entries: git supports multiple `credential.helper`
+/// values and tries each in order, so pre-existing helpers (from the base image or
+/// a feature) keep working and ours is a fallback. Idempotent via grep.
+///
+/// Runs as root (no user param): works regardless of whether `git` is installed,
+/// `$HOME` is set correctly, or the remote user exists in `/etc/passwd`.
+async fn set_system_git_credential_helper(
     provider: &dyn ContainerProvider,
     container_id: &ContainerId,
-    user: Option<&str>,
 ) -> Result<()> {
-    let script = "git config --global credential.helper /usr/local/bin/git-credential-devc 2>/dev/null || true";
-
-    exec_script(provider, container_id, script, user).await?;
+    let script = format!(
+        r#"
+GITCONFIG="{gitconfig}"
+HELPER="{helper}"
+if grep -q "helper[[:space:]]*=[[:space:]]*${{HELPER}}" "$GITCONFIG" 2>/dev/null; then
+    exit 0
+fi
+printf '\n[credential]\n\thelper = %s\n' "$HELPER" >> "$GITCONFIG"
+"#,
+        gitconfig = SYSTEM_GITCONFIG,
+        helper = GIT_CREDENTIAL_HELPER_PATH,
+    );
+    exec_script(provider, container_id, &script, Some("root")).await?;
     Ok(())
 }
 
 /// Inject git identity (user.name and user.email) from the host into the container.
 ///
-/// Idempotent: skips if the container already has user.name set.
+/// Inject the host's git identity (user.name / user.email) into the container's
+/// system git config (`/etc/gitconfig`) as root.
+///
+/// Idempotent: skips if a `[user]` name is already present in `/etc/gitconfig`.
+/// User-level `~/.gitconfig` (if any user happens to have one) is not consulted
+/// here — that level can only override, never un-set, so writing at the system
+/// level is always safe.
+///
+/// Writes the file directly rather than shelling out to `git config`, so it
+/// works even when git isn't yet installed in the container and regardless of
+/// the remote user's existence / HOME.
+///
 /// Returns `true` if identity was newly injected.
-async fn inject_git_identity(
-    provider: &dyn ContainerProvider,
-    container_id: &ContainerId,
-    user: Option<&str>,
-) -> bool {
-    // Check if identity is already set in the container
-    let existing = exec_script_with_output(
-        provider,
-        container_id,
-        "git config --global user.name 2>/dev/null || true",
-        user,
-    )
-    .await;
-
-    if existing
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
-    {
-        tracing::debug!("Git identity already configured in container, skipping");
-        return false;
-    }
-
-    // Resolve identity from the host
+async fn inject_git_identity(provider: &dyn ContainerProvider, container_id: &ContainerId) -> bool {
+    // Resolve identity from the host first — if there's nothing to inject, bail.
     let identity = match host::resolve_git_identity() {
         Some(id) => id,
         None => {
@@ -462,19 +440,26 @@ async fn inject_git_identity(
         }
     };
 
-    // Shell-escape the values for safe injection
     let escaped_name = shell_escape_single_quotes(&identity.name);
     let escaped_email = shell_escape_single_quotes(&identity.email);
 
     let script = format!(
-        "git config --global user.name '{}' 2>/dev/null && git config --global user.email '{}' 2>/dev/null || true",
-        escaped_name, escaped_email
+        r#"
+GITCONFIG="{gitconfig}"
+if grep -q '^[[:space:]]*name[[:space:]]*=' "$GITCONFIG" 2>/dev/null; then
+    exit 0
+fi
+printf '\n[user]\n\tname = %s\n\temail = %s\n' '{name}' '{email}' >> "$GITCONFIG"
+"#,
+        gitconfig = SYSTEM_GITCONFIG,
+        name = escaped_name,
+        email = escaped_email,
     );
 
-    match exec_script(provider, container_id, &script, user).await {
+    match exec_script(provider, container_id, &script, Some("root")).await {
         Ok(()) => {
             tracing::info!(
-                "Injected git identity: {} <{}>",
+                "Injected git identity into /etc/gitconfig: {} <{}>",
                 identity.name,
                 identity.email
             );
@@ -607,10 +592,10 @@ pub fn generate_docker_helper_script(original: &str) -> String {
     DOCKER_CREDENTIAL_HELPER.replace("{{original}}", original)
 }
 
-/// Generate the Git credential helper script (for testing)
+/// Return the Git credential helper script (for testing)
 #[cfg(test)]
-pub fn generate_git_helper_script(original: &str) -> String {
-    GIT_CREDENTIAL_HELPER.replace("{{original}}", original)
+pub fn git_helper_script() -> &'static str {
+    GIT_CREDENTIAL_HELPER
 }
 
 #[cfg(test)]
@@ -644,18 +629,13 @@ mod tests {
     }
 
     #[test]
-    fn test_git_helper_script_no_original() {
-        let script = generate_git_helper_script("");
-        assert!(script.contains("ORIGINAL_HELPER=''"));
+    fn test_git_helper_script_reads_tmpfs_cache_no_chaining() {
+        let script = git_helper_script();
         assert!(script.contains("/run/devc-creds/git-credentials"));
-    }
-
-    #[test]
-    fn test_git_helper_script_with_original() {
-        let script = generate_git_helper_script("/usr/local/share/vscode/git-credential-helper.sh");
-        assert!(
-            script.contains("ORIGINAL_HELPER='/usr/local/share/vscode/git-credential-helper.sh'")
-        );
+        // The script no longer chains through an original helper; git handles that
+        // natively via multiple credential.helper entries in /etc/gitconfig + user config.
+        assert!(!script.contains("ORIGINAL_HELPER"));
+        assert!(!script.contains("{{original}}"));
     }
 
     #[test]
@@ -768,12 +748,114 @@ mod tests {
         assert!(result.is_ok());
 
         let calls = provider.get_calls();
-        // Should have at least: read credsStore, write docker script, read git helper,
-        // write git script, set credsStore, set git config
+        // Expected exec calls: read credsStore, write docker helper, write git helper,
+        // set credsStore, register git helper in /etc/gitconfig.
         assert!(
             calls.len() >= 4,
             "Expected at least 4 exec calls, got {}",
             calls.len()
+        );
+    }
+
+    /// Given a fresh container with no `/etc/gitconfig`, `inject_helpers` should
+    /// issue an exec that appends our helper line. The MockProvider's default
+    /// exec_output is empty so `grep -q` returns non-zero, triggering the append.
+    #[tokio::test]
+    async fn test_set_system_git_credential_helper_writes_gitconfig_when_missing() {
+        use crate::test_support::{MockCall, MockProvider};
+        use devc_provider::ProviderType;
+
+        let provider = MockProvider::new(ProviderType::Docker);
+        let container_id = ContainerId::new("test-container");
+
+        set_system_git_credential_helper(&provider, &container_id)
+            .await
+            .expect("system git helper registration");
+
+        let calls = provider.get_calls();
+        let ran_as_root_with_gitconfig_write = calls.iter().any(|c| {
+            matches!(
+                c,
+                MockCall::Exec { user, cmd, .. }
+                    if user.as_deref() == Some("root")
+                    && cmd.iter().any(|s|
+                        s.contains("/etc/gitconfig")
+                        && s.contains("/usr/local/bin/git-credential-devc"))
+            )
+        });
+        assert!(
+            ran_as_root_with_gitconfig_write,
+            "Expected an exec as root that references /etc/gitconfig and the helper path; got: {:?}",
+            calls
+        );
+    }
+
+    /// When `/etc/gitconfig` already has our helper line, the script's grep
+    /// short-circuits with `exit 0` before any append. Since the exec is a
+    /// single script invocation we can't assert "no append happened" directly —
+    /// instead we verify only ONE exec call is made (the grep+append script
+    /// runs atomically), matching the single-exec behavior.
+    #[tokio::test]
+    async fn test_set_system_git_credential_helper_single_exec() {
+        use crate::test_support::{MockCall, MockProvider};
+        use devc_provider::ProviderType;
+
+        let provider = MockProvider::new(ProviderType::Docker);
+        let container_id = ContainerId::new("test-container");
+
+        set_system_git_credential_helper(&provider, &container_id)
+            .await
+            .expect("system git helper registration");
+
+        let exec_calls: Vec<_> = provider
+            .get_calls()
+            .into_iter()
+            .filter(|c| matches!(c, MockCall::Exec { .. }))
+            .collect();
+        assert_eq!(
+            exec_calls.len(),
+            1,
+            "Expected a single atomic exec (grep+append in one script); got {} calls",
+            exec_calls.len()
+        );
+    }
+
+    /// `inject_helpers` must not depend on `git` being installed in the container.
+    /// Today's implementation registers the helper by writing `/etc/gitconfig` as
+    /// root — plain shell, no `git` CLI. This test verifies that the recorded
+    /// exec calls don't invoke `git` anywhere.
+    #[tokio::test]
+    async fn test_inject_helpers_does_not_invoke_git_binary() {
+        use crate::test_support::{MockCall, MockProvider};
+        use devc_provider::ProviderType;
+
+        let provider = MockProvider::new(ProviderType::Docker);
+        *provider.exec_output.lock().unwrap() = String::new();
+
+        let container_id = ContainerId::new("test-container");
+        inject_helpers(&provider, &container_id, None)
+            .await
+            .expect("inject helpers");
+
+        let any_invokes_git = provider.get_calls().iter().any(|c| {
+            matches!(
+                c,
+                MockCall::Exec { cmd, .. }
+                    if cmd.iter().any(|s| {
+                        // Match `git ` followed by a subcommand (config/help/etc.) —
+                        // don't false-positive on `/usr/local/bin/git-credential-devc`
+                        // or the /etc/gitconfig file path.
+                        s.contains("git config")
+                            || s.contains("git init")
+                            || s.contains("git clone")
+                    })
+            )
+        });
+        assert!(
+            !any_invokes_git,
+            "inject_helpers should not shell out to the git binary \
+             (it must work even when git isn't installed); calls: {:?}",
+            provider.get_calls()
         );
     }
 }
